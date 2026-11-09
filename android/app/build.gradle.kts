@@ -61,6 +61,13 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Exercise real system upgrades with the current app code and stable
+        // signing identity, while keeping this internal APK out of Releases.
+        if (providers.environmentVariable("FQAPP_UPDATE_BOOTSTRAP").orNull == "true") {
+            require(flutter.versionCode > 1) { "Update bootstrap needs a preceding version code" }
+            versionCode = flutter.versionCode - 1
+            versionName = "${flutter.versionName}-update-test"
+        }
         // A single-device package must not advertise ABIs lacking Flutter's
         // compiled app. Leave split builds to Flutter's split configuration.
         if (!providers.gradleProperty("split-per-abi").orNull.equals("true", ignoreCase = true)) {

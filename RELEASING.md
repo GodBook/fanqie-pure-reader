@@ -22,3 +22,8 @@ pwsh -File scripts/publish_novel_release.ps1 -NotesFile release-notes.md
 发布完成后，用前一正式签名版本在真实手机打开“设置 → 软件更新”，
 验证检查、取消/重试下载、授权安装、系统安装与升级后数据保留。
 同时验证最新版本提示、网络失败及离线首屏。构建成功不能替代这些验收。
+
+首次发布可用 `scripts/build_novel.ps1 -UpdateBootstrap` 构建同签名过渡包：代码与当前版相同，
+原生构建号减1、版本名带update-test，单独输出为update-bootstrap APK。
+在尚未升级的测试安装上覆盖该包，再通过应用更新到公开正式包，验证完整安装流程。
+发布脚本会拒绝版本与pubspec不一致的过渡包。`-AcceptancePackage` 则生成独立.benchmark包用于真正首装计时。

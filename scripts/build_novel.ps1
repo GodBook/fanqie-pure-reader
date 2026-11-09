@@ -6,11 +6,13 @@ param(
     [string]$BuildRoot = 'D:\dev\fanqie-pure',
     [string]$DartTarget = 'lib/main.dart',
     [switch]$RebuildNative,
-    [switch]$AcceptancePackage
+    [switch]$AcceptancePackage,
+    [switch]$UpdateBootstrap
 )
 
 $ErrorActionPreference = 'Stop'
 if ($AcceptancePackage -and $BuildMode -ne 'release') { throw 'AcceptancePackage requires release mode.' }
+if ($UpdateBootstrap -and ($BuildMode -ne 'release' -or $AcceptancePackage)) { throw 'UpdateBootstrap requires the production package in release mode.' }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $projectItem = Get-Item -LiteralPath $projectRoot
 $physicalProjectRoot = if ($projectItem.LinkType -eq 'Junction') { [string]@($projectItem.Target)[0] } else { $projectItem.FullName }
@@ -35,7 +37,7 @@ function Invoke-Checked {
 }
 
 $environmentKeys = @('JAVA_HOME', 'PATH', 'NOVEL_SIGNING_PASSWORD', 'RELEASE_KEYSTORE_FILE',
-    'RELEASE_STORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD', 'FQAPP_ACCEPTANCE_SUFFIX')
+    'RELEASE_STORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD', 'FQAPP_ACCEPTANCE_SUFFIX', 'FQAPP_UPDATE_BOOTSTRAP')
 $previousEnvironment = @{}
 foreach ($name in $environmentKeys) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 
@@ -43,6 +45,7 @@ Push-Location -LiteralPath $BuildRoot
 try {
     $env:JAVA_HOME = $JdkRoot
     $env:FQAPP_ACCEPTANCE_SUFFIX = if ($AcceptancePackage) { '.benchmark' } else { $null }
+    $env:FQAPP_UPDATE_BOOTSTRAP = if ($UpdateBootstrap) { 'true' } else { $null }
     $env:PATH = (Join-Path $JdkRoot 'bin') + ';' + $env:PATH
     Invoke-Checked 'flutter' @('--no-version-check', 'pub', 'get')
     if ($RebuildNative -or -not (Test-Path 'android/app/src/main/jniLibs/arm64-v8a/libfqapi_core.so')) {
@@ -88,7 +91,7 @@ try {
     }
     $distribution = Join-Path $projectRoot 'dist'
     New-Item -ItemType Directory -Force -Path $distribution | Out-Null
-    $outputKind = if ($AcceptancePackage) { 'benchmark' } else { $BuildMode }
+    $outputKind = if ($AcceptancePackage) { 'benchmark' } elseif ($UpdateBootstrap) { 'update-bootstrap' } else { $BuildMode }
     $destination = Join-Path $distribution "fanqie-pure-$outputKind-arm64.apk"
     Copy-Item -LiteralPath $apk -Destination $destination -Force
     $hash = Get-FileHash -LiteralPath $destination -Algorithm SHA256

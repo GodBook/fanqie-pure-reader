@@ -3,7 +3,8 @@
 param(
     [string]$Repository = 'GodBook/fanqie-pure-reader',
     [string]$ApkPath = '',
-    [Parameter(Mandatory)][string]$NotesFile
+    [Parameter(Mandatory)][string]$NotesFile,
+    [switch]$ResumeDraft
 )
 $ErrorActionPreference = 'Stop'
 $sourceRoot = Split-Path -Parent $PSScriptRoot
@@ -37,15 +38,25 @@ $manifest = [ordered]@{
 $manifestFile = Join-Path $staging 'update.json'
 $checksumFile = Join-Path $staging 'SHA256SUMS'
 "$($report.sha256)  $assetName" | Set-Content -LiteralPath $checksumFile -Encoding utf8NoBOM
-& gh release create $tag $asset $checksumFile --repo $Repository --draft --title "番茄小说纯净版 $releaseVersion" --notes-file $NotesFile
-if ($LASTEXITCODE -ne 0) { throw 'Draft creation/upload failed. Inspect GitHub before retrying.' }
-$metadata = & gh api "repos/$Repository/releases/tags/$tag" | ConvertFrom-Json
+if (-not $ResumeDraft) {
+    & gh release create $tag $asset $checksumFile --repo $Repository --draft --title "番茄小说纯净版 $releaseVersion" --notes-file $NotesFile
+    if ($LASTEXITCODE -ne 0) { throw 'Draft creation/upload failed. Inspect GitHub before retrying.' }
+}
+# GitHub does not expose unpublished tags through GET /releases/tags/:tag.
+# gh release view resolves drafts through the authenticated release listing.
+$metadata = & gh release view $tag --repo $Repository --json isDraft,assets | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read draft asset IDs.' }
+if (-not $metadata.isDraft) { throw 'Release is already public; do not replace its assets automatically.' }
 $apkAsset = @($metadata.assets | Where-Object name -EQ $assetName)
 if ($apkAsset.Count -ne 1) { throw 'APK asset is missing or ambiguous.' }
-$manifest.assetApiUrl = $apkAsset[0].url
+if ($apkAsset[0].size -ne $report.bytes -or $apkAsset[0].digest -ne "sha256:$($report.sha256)") { throw 'Uploaded APK differs from the verified local build.' }
+$manifest.assetApiUrl = $apkAsset[0].apiUrl
 $manifest | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM
-& gh release upload $tag $manifestFile --repo $Repository
+if ($ResumeDraft) {
+    & gh release upload $tag $manifestFile --repo $Repository --clobber
+} else {
+    & gh release upload $tag $manifestFile --repo $Repository
+}
 if ($LASTEXITCODE -ne 0) { throw 'Manifest upload failed; the draft is not public.' }
 & gh release edit $tag --repo $Repository --draft=false --latest
 if ($LASTEXITCODE -ne 0) { throw 'Assets are uploaded but publication failed. Inspect the draft.' }
