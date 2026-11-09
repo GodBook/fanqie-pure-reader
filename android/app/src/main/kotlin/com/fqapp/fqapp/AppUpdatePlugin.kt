@@ -86,9 +86,12 @@ class AppUpdatePlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHa
                     // Called only after a Flutter frame with actionable books;
                     // the next vsync bounds the submitted frame's presentation.
                     activity?.window?.decorView?.postOnAnimation {
+                        val launchStart = activity?.intent?.getLongExtra("fq_launch_elapsed_ms", -1L) ?: -1L
+                        val launchTiming = if (launchStart > 0L)
+                            " launch_to_feed_ms=" + (SystemClock.elapsedRealtime() - launchStart) else ""
                         Log.i("NovelPerformance", "feed_first_frame_ms=" +
                             (SystemClock.uptimeMillis() - Process.getStartUptimeMillis()) +
-                            " source=" + source.replace(Regex("[^a-z]"), ""))
+                            " source=" + source.replace(Regex("[^a-z]"), "") + launchTiming)
                     }
                 }
                 result.success(null)

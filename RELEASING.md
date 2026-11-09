@@ -15,7 +15,8 @@ pwsh -File scripts/publish_novel_release.ps1 -NotesFile release-notes.md
 `release-notes.md` 为自行编写的公开更新说明，不应包含设备标识或私人数据。
 
 `update.json` 结构：`schema: 1`、`package`、`abi`、`version`、`versionCode`、`bytes`、
-`sha256`、`apkUrl`、`notes`。APK URL 必须位于本仓库对应 `v版本` 的 Releases。
+`sha256`、`apkUrl`、`assetApiUrl`、`notes`。APK URL 必须位于本仓库对应 `v版本` 的 Releases。
+应用通过 GitHub 官方 API 读取 latest 和发布附件，避免网页域名不可达时阻塞更新；不需要用户登录或令牌。
 应用只接受本包名、ARM64、有效大小和 SHA-256，安装前还会原生复核版本及签名。
 
 发布完成后，用前一正式签名版本在真实手机打开“设置 → 软件更新”，

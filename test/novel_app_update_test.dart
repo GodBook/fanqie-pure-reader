@@ -55,11 +55,19 @@ void main() {
         },
         {
           'apkUrl':
-          'https://github.com:444/GodBook/fanqie-pure-reader/releases/download/v1.3.1/reader.apk',
+              'https://github.com:444/GodBook/fanqie-pure-reader/releases/download/v1.3.1/reader.apk',
         },
         {'bytes': 500 * 1024 * 1024},
         {'bytes': -1},
         {'sha256': 'bad'},
+        {
+          'assetApiUrl':
+              'https://api.github.com/repos/other/repo/releases/assets/1',
+        },
+        {
+          'assetApiUrl':
+              'http://api.github.com/repos/GodBook/fanqie-pure-reader/releases/assets/1',
+        },
       ]) {
         expect(
           () => NovelRelease.parse({...manifest(bytes), ...change}),
@@ -88,6 +96,33 @@ void main() {
       await dir.delete(recursive: true);
     }
   }
+
+  test(
+    'official asset API requests bytes, rather than downloading JSON metadata',
+    () async {
+      String? accept;
+      await serve(
+        (updater, dir, _) async {
+          final file = await updater.download(
+            NovelRelease.parse({
+              ...manifest(bytes),
+              'assetApiUrl':
+                  'https://api.github.com/repos/GodBook/fanqie-pure-reader/releases/assets/2',
+            }),
+            InstalledNovelApp('1.3.0', 5, dir.path),
+            (_, _) {},
+          );
+          expect(await file.readAsBytes(), bytes);
+          expect(accept, 'application/octet-stream');
+        },
+        (r) {
+          accept = r.headers.value('accept');
+          r.response.add(bytes);
+          unawaited(r.response.close());
+        },
+      );
+    },
+  );
 
   test(
     'verified download writes the exact APK and reports real byte progress',

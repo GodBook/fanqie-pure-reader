@@ -33,6 +33,7 @@ class NovelRelease {
     required this.sha256Hex,
     required this.bytes,
     required this.notes,
+    this.assetApiUrl,
   });
   final String version;
   final int code;
@@ -40,6 +41,18 @@ class NovelRelease {
   final String sha256Hex;
   final int bytes;
   final String notes;
+  final Uri? assetApiUrl;
+
+  static bool isAssetApi(Uri uri) =>
+      uri.scheme == 'https' &&
+      uri.host == 'api.github.com' &&
+      !uri.hasPort &&
+      uri.userInfo.isEmpty &&
+      !uri.hasQuery &&
+      !uri.hasFragment &&
+      RegExp(
+        r'^/repos/GodBook/fanqie-pure-reader/releases/assets/\d+$',
+      ).hasMatch(uri.path);
 
   factory NovelRelease.parse(Map<String, dynamic> json) {
     final version = json['version'];
@@ -47,6 +60,10 @@ class NovelRelease {
     final bytes = json['bytes'];
     final hash = json['sha256'];
     final url = Uri.tryParse(json['apkUrl']?.toString() ?? '');
+    final apiValue = json['assetApiUrl'];
+    final assetApi = apiValue == null
+        ? null
+        : Uri.tryParse(apiValue.toString());
     if (json['schema'] != 1 ||
         json['package'] != 'com.fanqie.pure.reader' ||
         json['abi'] != 'arm64-v8a' ||
@@ -69,13 +86,15 @@ class NovelRelease {
         !url.path.startsWith(
           '/GodBook/fanqie-pure-reader/releases/download/v$version/',
         ) ||
-        !url.path.endsWith('.apk')) {
+        !url.path.endsWith('.apk') ||
+        (apiValue != null && (assetApi == null || !isAssetApi(assetApi)))) {
       throw const FormatException('更新信息无效，请稍后重试');
     }
     return NovelRelease(
       version: version,
       code: code,
       url: url,
+      assetApiUrl: assetApi,
       sha256Hex: hash.toLowerCase(),
       bytes: bytes,
       notes: (json['notes']?.toString() ?? '').substring(
@@ -118,6 +137,15 @@ class NovelAppUpdate {
         .timeout(const Duration(seconds: 20));
     // GitHub redirects downloads to its HTTPS asset CDN.
     request.maxRedirects = 5;
+    if (url.host == 'api.github.com') {
+      request.headers.set(
+        'Accept',
+        NovelRelease.isAssetApi(url)
+            ? 'application/octet-stream'
+            : 'application/vnd.github+json',
+      );
+      request.headers.set('X-GitHub-Api-Version', '2022-11-28');
+    }
     final response = await request.close().timeout(const Duration(seconds: 20));
     if (response.statusCode != HttpStatus.ok) {
       throw HttpException('GitHub 暂时无法访问（${response.statusCode}）');
@@ -128,20 +156,53 @@ class NovelAppUpdate {
   Future<NovelRelease> check() async {
     final client = _begin();
     try {
-      final response = await _get(client, Uri.parse(novelUpdateManifest));
-      final data = <int>[];
-      await for (final chunk in response.timeout(const Duration(seconds: 20))) {
-        data.addAll(chunk);
-        if (data.length > 32 * 1024) throw const FormatException('更新信息过大');
-      }
-      if (_cancelled) throw const NovelUpdateCancelled();
-      return NovelRelease.parse(
-        jsonDecode(utf8.decode(data)) as Map<String, dynamic>,
+      final latest = await _json(
+        client,
+        Uri.parse(novelLatestReleaseApi),
+        256 * 1024,
       );
+      if (latest['draft'] == true || latest['prerelease'] == true) {
+        throw const FormatException('暂时没有可用的正式更新');
+      }
+      Uri? manifestUrl;
+      final assets = latest['assets'];
+      if (assets is List) {
+        for (final asset in assets.whereType<Map>()) {
+          if (asset['name'] == 'update.json') {
+            manifestUrl = Uri.tryParse(asset['url']?.toString() ?? '');
+          }
+        }
+      }
+      if (manifestUrl == null || !NovelRelease.isAssetApi(manifestUrl)) {
+        throw const FormatException('更新清单暂时不可用');
+      }
+      final manifest = await _json(client, manifestUrl, 32 * 1024);
+      if (_cancelled) throw const NovelUpdateCancelled();
+      final release = NovelRelease.parse(manifest);
+      if (latest['tag_name'] != 'v${release.version}') {
+        throw const FormatException('更新版本不一致');
+      }
+      return release;
     } finally {
       client.close(force: true);
       if (identical(_active, client)) _active = null;
     }
+  }
+
+  Future<Map<String, dynamic>> _json(
+    HttpClient client,
+    Uri url,
+    int limit,
+  ) async {
+    final response = await _get(client, url);
+    final data = <int>[];
+    await for (final chunk in response.timeout(const Duration(seconds: 20))) {
+      data.addAll(chunk);
+      if (data.length > limit) throw const FormatException('更新信息过大');
+    }
+    final json = jsonDecode(utf8.decode(data));
+    if (json is! Map<String, dynamic>) throw const FormatException('更新信息无效');
+    return json;
   }
 
   Future<File> download(
@@ -159,7 +220,7 @@ class NovelAppUpdate {
     try {
       // Never reuse a previous file as though it belonged to this manifest.
       if (await file.exists()) await file.delete();
-      final response = await _get(client, release.url);
+      final response = await _get(client, release.assetApiUrl ?? release.url);
       if (response.contentLength >= 0 &&
           response.contentLength != release.bytes) {
         throw const FormatException('安装包大小不符，请重新下载');

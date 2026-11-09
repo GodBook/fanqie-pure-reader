@@ -14,7 +14,8 @@ class _RedirectClient implements HttpClient {
   @override
   set userAgent(String? value) => _client.userAgent = value;
   @override
-  Future<HttpClientRequest> getUrl(Uri _) => _client.getUrl(uri);
+  Future<HttpClientRequest> getUrl(Uri requested) =>
+      _client.getUrl(uri.replace(path: requested.path));
   @override
   void close({bool force = false}) => _client.close(force: force);
   @override
@@ -43,7 +44,22 @@ void main() {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((r) {
       r.response.statusCode = status;
-      r.response.write(body);
+      r.response.write(
+        r.uri.path.endsWith('/latest') && status == 200
+            ? jsonEncode({
+                'tag_name': 'v1.3.1',
+                'draft': false,
+                'prerelease': false,
+                'assets': [
+                  {
+                    'name': 'update.json',
+                    'url':
+                        'https://api.github.com/repos/GodBook/fanqie-pure-reader/releases/assets/1',
+                  },
+                ],
+              })
+            : body,
+      );
       unawaited(r.response.close());
     });
     final updater = NovelAppUpdate(
