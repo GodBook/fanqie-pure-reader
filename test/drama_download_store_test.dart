@@ -1,0 +1,296 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_ce/hive.dart';
+
+import 'package:fqapp/models/media_item.dart';
+import 'package:fqapp/services/drama_download_store.dart';
+import 'package:fqapp/services/secure_key_provider.dart';
+
+void main() {
+  late Directory temp;
+  late Directory videoDir;
+  late SecureKeyProvider keys;
+  late HiveDramaDownloadStore store;
+
+  setUp(() async {
+    temp = await Directory.systemTemp.createTemp('fqapp-drama-store-');
+    Hive.init(temp.path);
+    videoDir = Directory('${temp.path}${Platform.pathSeparator}offline-video')
+      ..createSync();
+    keys = SecureKeyProvider(storage: InMemorySecureKeyStorage());
+    store = HiveDramaDownloadStore(
+      keys: keys,
+      // directoryResolver 返回应用私有根，store 自己在下面再拼
+      // `offline-video`；videoDir 就是拼出来的那个目录。
+      directoryResolver: () async => temp,
+    );
+  });
+
+  tearDown(() async {
+    await Hive.close();
+    try {
+      await Hive.deleteBoxFromDisk('drama_download_v1');
+    } catch (_) {}
+    try {
+      await temp.delete(recursive: true);
+    } catch (_) {}
+  });
+
+  CachedEpisode episode({
+    String itemId = 'ep1',
+    String seriesId = 'series1',
+    int index = 0,
+    int bytes = 1024,
+    bool withFile = true,
+    String? filePath,
+    int? cachedAt,
+    bool auto = false,
+  }) {
+    final path =
+        filePath ??
+        '${videoDir.path}${Platform.pathSeparator}$itemId.mp4';
+    if (withFile && filePath == null) {
+      File(path).writeAsBytesSync(List.filled(bytes, 1));
+    }
+    return CachedEpisode(
+      seriesId: seriesId,
+      itemId: itemId,
+      title: '第${index + 1}集',
+      index: index,
+      keyHex: '0102',
+      height: 1080,
+      variantName: '1080P',
+      bytes: bytes,
+      filePath: path,
+      cachedAt: cachedAt ?? DateTime.now().millisecondsSinceEpoch,
+      auto: auto,
+    );
+  }
+
+  test('saveEpisode/isDownloaded/episode 往返一致', () async {
+    await store.saveEpisode(episode());
+    expect(await store.isDownloaded('ep1'), isTrue);
+    expect(await store.isDownloaded('ep2'), isFalse);
+    final record = await store.episode('ep1');
+    expect(record, isNotNull);
+    expect(record!.seriesId, 'series1');
+    expect(record.keyHex, '0102');
+    expect(record.bytes, 1024);
+  });
+
+  test('toSource 生成 file:// 取流结果并保留画质档', () async {
+    await store.saveEpisode(episode());
+    final source = (await store.episode('ep1'))!.toSource();
+    expect(source.url.startsWith('file://'), isTrue);
+    expect(source.keyHex, '0102');
+    expect(source.variants, hasLength(1));
+    expect(source.variants.first.name, '1080P');
+    expect(source.variants.first.height, 1080);
+  });
+
+  test('损坏记录按未缓存处理，不给出不可回放的取流结果', () async {
+    // Seed the corrupt record into the encrypted box the store actually
+    // reads (open it via the store first so no cipher is needed here).
+    await store.isDownloaded('bad');
+    final box = Hive.box<dynamic>('drama_download_v1_enc');
+    await box.put('episode:bad', {'seriesId': 'series1'});
+    expect(await store.isDownloaded('bad'), isFalse);
+    expect(await store.episode('bad'), isNull);
+  });
+
+  test('dramas 按剧聚合、集按目录顺序排序、剧按最近缓存排序', () async {
+    await store.ensureCatalogue(
+      CachedDrama(
+        id: 'series1',
+        title: '测试剧',
+        cover: 'cover.jpg',
+        episodes: [
+          Chapter(itemId: 'ep1', title: '第一集', volumeName: ''),
+          Chapter(itemId: 'ep2', title: '第二集', volumeName: ''),
+        ],
+      ),
+    );
+    // 显式给每集一个 cachedAt：剧的排序取各集 cachedAt 的最大值，若两个剧
+    // 落在同一毫秒，`List.sort` 的比较返回 0 且不保证稳定——用真实时钟会
+    // 变成偶发失败（CI 上实测到过 series1/series2 顺序反转）。这里直接钉死
+    // 时间戳，让断言只依赖实现逻辑，不依赖计时精度。
+    await store.saveEpisode(
+      episode(itemId: 'ep1', index: 1, cachedAt: 1000),
+    );
+    await store.saveEpisode(
+      episode(itemId: 'ep2', index: 0, cachedAt: 2000),
+    );
+    await store.saveEpisode(
+      episode(itemId: 'ep9', seriesId: 'series2', cachedAt: 3000),
+    );
+
+    final dramas = await store.dramas();
+    expect(dramas, hasLength(2));
+    // series2 的最后缓存时间更晚（3000 > 2000），排前面。
+    expect(dramas.first.drama.id, 'series2');
+    final series1 = dramas.lastWhere((item) => item.drama.id == 'series1');
+    expect(series1.drama.title, '测试剧');
+    // 记录里的 index（这里是 1 / 0）和目录（ep1 在 ep2 前）相反：集序以
+    // 目录为准，见 cached_dramas_page.dart 的同一套规则。
+    expect(series1.episodes.map((e) => e.itemId).toList(), ['ep1', 'ep2']);
+    expect(series1.bytes, 2048);
+  });
+
+  test('老记录的相对序号不影响集序：按目录位置排', () async {
+    // 早期版本把「本次入队列表里的相对序号」写进了 index：目录里的第 13-17
+    // 集记成了 0-4。管理页的名字是按目录算的（第 13 集），列表顺序也必须
+    // 按目录，否则第 13 集会排到第 1 集前面。
+    await store.ensureCatalogue(
+      CachedDrama(
+        id: 'series1',
+        title: '测试剧',
+        cover: '',
+        episodes: [
+          for (var number = 1; number <= 20; number++)
+            Chapter(itemId: 'ep$number', title: '第$number集', volumeName: ''),
+        ],
+      ),
+    );
+    for (final (relative, number) in const [17, 13, 15, 14, 16].indexed) {
+      await store.saveEpisode(
+        episode(itemId: 'ep$number', index: relative, cachedAt: 1000 + relative),
+      );
+    }
+
+    final series1 = (await store.dramas()).single;
+    expect(
+      series1.episodes.map((e) => e.itemId).toList(),
+      ['ep13', 'ep14', 'ep15', 'ep16', 'ep17'],
+    );
+  });
+
+  test('removeEpisode 连带删除视频文件', () async {
+    final record = episode();
+    await store.saveEpisode(record);
+    expect(File(record.filePath).existsSync(), isTrue);
+    await store.removeEpisode('ep1');
+    expect(await store.isDownloaded('ep1'), isFalse);
+    expect(File(record.filePath).existsSync(), isFalse);
+  });
+
+  test('removeDrama 清空该剧全部集与文件', () async {
+    await store.saveEpisode(episode(itemId: 'ep1'));
+    await store.saveEpisode(episode(itemId: 'ep2', index: 1));
+    await store.removeDrama('series1');
+    expect(await store.dramas(), isEmpty);
+    expect(await store.isDownloaded('ep1'), isFalse);
+    expect(await store.isDownloaded('ep2'), isFalse);
+  });
+
+  test('removeEpisode 只删离线视频根目录内的文件', () async {
+    // 记录被改成指向根外：只删记录，绝不删那个文件（否则就是任意文件删除）。
+    final outside = File('${temp.path}${Platform.pathSeparator}secret.txt')
+      ..writeAsStringSync('keep me');
+    await store.saveEpisode(episode(itemId: 'evil', filePath: outside.path));
+    await store.removeEpisode('evil');
+    expect(outside.existsSync(), isTrue);
+    expect(await store.isDownloaded('evil'), isFalse);
+  });
+
+  test('removeEpisode 不被根内路径里的 .. 绕过', () async {
+    final sep = Platform.pathSeparator;
+    final outside = File('${temp.path}${sep}secret.txt')
+      ..writeAsStringSync('keep me');
+    final sneaky = '${videoDir.path}$sep..${sep}secret.txt';
+    await store.saveEpisode(episode(itemId: 'evil', filePath: sneaky));
+    await store.removeEpisode('evil');
+    expect(outside.existsSync(), isTrue);
+    expect(await store.isDownloaded('evil'), isFalse);
+  });
+
+  test('removeDrama 只删根内文件，根外路径保留', () async {
+    final inside = episode(itemId: 'ep1');
+    final outside = File('${temp.path}${Platform.pathSeparator}secret.txt')
+      ..writeAsStringSync('keep me');
+    await store.saveEpisode(inside);
+    await store.saveEpisode(
+      episode(itemId: 'ep2', index: 1, filePath: outside.path),
+    );
+    await store.removeDrama('series1');
+    expect(File(inside.filePath).existsSync(), isFalse);
+    expect(outside.existsSync(), isTrue);
+    expect(await store.dramas(), isEmpty);
+  });
+
+  test('删掉某剧最后一集时一并清掉目录，不留孤儿', () async {
+    await store.ensureCatalogue(
+      CachedDrama(
+        id: 'series1',
+        title: '测试剧',
+        cover: '',
+        episodes: [
+          Chapter(itemId: 'ep1', title: '第一集', volumeName: ''),
+          Chapter(itemId: 'ep2', title: '第二集', volumeName: ''),
+        ],
+      ),
+    );
+    await store.ensureCatalogue(
+      CachedDrama(
+        id: 'series2',
+        title: '别的剧',
+        cover: '',
+        episodes: [Chapter(itemId: 'ep9', title: '第一集', volumeName: '')],
+      ),
+    );
+    await store.saveEpisode(episode(itemId: 'ep1'));
+    await store.saveEpisode(episode(itemId: 'ep2', index: 1));
+    await store.saveEpisode(episode(itemId: 'ep9', seriesId: 'series2'));
+
+    // 同剧还有别的集：目录必须留着（管理页的剧名与集序都靠它）。
+    await store.removeEpisode('ep1');
+    expect(await store.hasCatalogue('series1'), isTrue);
+
+    // 最后一集删掉后，目录再没有集可聚合，管理页永远读不到它。
+    await store.removeEpisode('ep2');
+    expect(await store.hasCatalogue('series1'), isFalse);
+    expect(await store.hasCatalogue('series2'), isTrue);
+    expect((await store.dramas()).single.drama.id, 'series2');
+  });
+
+  test('目录记录在集全无时不被 dramas 丢弃（下载中状态可见）', () async {
+    await store.ensureCatalogue(
+      CachedDrama(
+        id: 'series1',
+        title: '测试剧',
+        cover: '',
+        episodes: [Chapter(itemId: 'ep1', title: '第一集', volumeName: '')],
+      ),
+    );
+    // 集还没完成：dramas() 不返回它（管理页的任务区显示），但目录留着。
+    expect(await store.hasCatalogue('series1'), isTrue);
+    expect(await store.dramas(), isEmpty);
+  });
+
+  test('totalBytes 只统计合法记录', () async {
+    expect(await store.totalBytes(), 0);
+    await store.saveEpisode(episode(bytes: 4096));
+    expect(await store.totalBytes(), 4096);
+  });
+
+  test('自动缓存的标记随记录落库并读回', () async {
+    // 边看边缓存排的集要能被认出来（清理时只动这一批），用户手动下的一律
+    // 不标记。老记录没有这个字段，读出来必须是 false。
+    await store.saveEpisode(episode(itemId: 'auto1', auto: true));
+    await store.saveEpisode(episode(itemId: 'manual1'));
+
+    final cached = await store.episode('auto1');
+    expect(cached?.auto, isTrue);
+    final manual = await store.episode('manual1');
+    expect(manual?.auto, isFalse);
+
+    final legacy = CachedEpisode.fromMap({
+      'seriesId': 'series1',
+      'itemId': 'old1',
+      'title': '旧记录',
+      'index': 0,
+      'filePath': '/tmp/old.mp4',
+    });
+    expect(legacy?.auto, isFalse);
+  });
+}

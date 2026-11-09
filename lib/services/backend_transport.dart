@@ -1,0 +1,593 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+
+import '../src/rust/api.dart' as rust;
+import '../src/rust/frb_generated.dart';
+import 'app_log.dart';
+import 'rust_bootstrap.dart';
+import 'secure_key_provider.dart';
+
+/// One backend response.
+///
+/// The transport keeps the HTTP shape (status + bytes) because the whole
+/// business contract - including "HTTP 200 with a business error code" - is
+/// expressed that way by the Rust core.
+class BackendResponse {
+  const BackendResponse(this.statusCode, this.body, this.contentType);
+
+  final int statusCode;
+  final Uint8List body;
+  final String contentType;
+}
+
+/// Raised when a call was cancelled, or exceeded its deadline.
+///
+/// Cancelling drops the in-flight Rust dispatch future, which tears down the
+/// awaiting upstream request, any retry backoff and any not-yet-submitted
+/// write - so a late result is never published. A filesystem write the OS has
+/// already accepted is not rolled back: Tokio file I/O is not a transaction.
+class BackendRequestAborted implements Exception {
+  BackendRequestAborted(this.message, {this.timedOut = false});
+
+  final String message;
+
+  /// The request hit its deadline instead of the caller cancelling. A shared
+  /// caller may retry only when it has its own explicitly remaining budget.
+  final bool timedOut;
+
+  @override
+  String toString() => message;
+}
+
+/// Cancellation handle for one logical unit of work.
+///
+/// A page (or a feed loader) creates one, asks [ApiClient.withCancellation] to
+/// bind its requests to it, and cancels it when the page goes away or a newer
+/// request supersedes it. Cancelling is idempotent and always safe.
+class BackendRequest {
+  final List<void Function()> _cancellers = [];
+  bool _cancelled = false;
+  final Completer<void> _cancelledSignal = Completer<void>();
+
+  bool get isCancelled => _cancelled;
+
+  /// Completes when [cancel] is called. A request that is already cancelled
+  /// resolves immediately.
+  Future<void> get whenCancelled => _cancelledSignal.future;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    _cancelledSignal.complete();
+    for (final cancel in List<void Function()>.of(_cancellers)) {
+      cancel();
+    }
+    _cancellers.clear();
+  }
+
+  /// Registers [cancel]. Returns false - after cancelling immediately - when
+  /// this request was already cancelled, which is how a caller that lost a race
+  /// learns it must not start the work at all.
+  bool register(void Function() cancel) {
+    if (_cancelled) {
+      cancel();
+      return false;
+    }
+    _cancellers.add(cancel);
+    return true;
+  }
+
+  void unregister(void Function() cancel) {
+    _cancellers.remove(cancel);
+  }
+}
+
+/// [baseUrl] with [capability] woven into the path, ending in `/`.
+///
+/// Resource URLs must use this: backend-relative paths are root-relative
+/// (`/src/...`) and `Uri.resolve` would otherwise replace the whole base path,
+/// dropping the capability. `resolveBackendResource` re-anchors them.
+///
+/// A free function rather than an interface member, so that every
+/// `implements BackendTransport` (test doubles included) stays untouched.
+String backendResourceBase(String baseUrl, String capability) =>
+    capability.isEmpty ? '$baseUrl/' : '$baseUrl/_session/$capability/';
+
+/// A backend call surface. Two implementations share the same Rust core:
+/// [RustBackendTransport] calls it over flutter_rust_bridge, and
+/// [HttpBackendTransport] talks to the loopback HTTP adapter (tests, desktop,
+/// Web).
+abstract class BackendTransport {
+  /// Base URL used to resolve backend-relative resources such as `/src/...`.
+  String get baseUrl;
+
+  /// Per-launch capability the loopback adapter requires; empty when unknown.
+  ///
+  /// Only callers that cross the socket must present it - FFI calls stay in
+  /// process and are never gated.
+  String get capability => '';
+
+  Future<BackendResponse> send(
+    String method,
+    Uri url, {
+    Uint8List? body,
+    Duration? timeout,
+    BackendRequest? request,
+  });
+
+  Future<void> close() async {}
+}
+
+/// flutter_rust_bridge transport. The Rust core owns the HTTP client, the
+/// device pool and the signing keys; Dart only passes method/path/query/body.
+class RustBackendTransport implements BackendTransport {
+  RustBackendTransport({this.port = defaultPort, this.mockUpstreamOrigin = ''})
+    : _baseUrl = 'http://127.0.0.1:$port',
+      // Created eagerly so it captures the ambient `http.Client` of the Zone
+      // that built this transport. That is what keeps `ApiClient` injectable:
+      // a Dart test that replaces `http.Client` through `http.runWithClient`
+      // still drives the same request surface before the core is up.
+      _httpFallback = HttpBackendTransport(baseUrl: 'http://127.0.0.1:$port');
+
+  /// Listener port used when the caller does not supply one.
+  ///
+  /// `assets/config/config.json` is the single source of truth: the shipping
+  /// app reads it after deploying and passes the value to [start]. This
+  /// constant only covers callers that construct the transport directly (the
+  /// host integration test, ad-hoc tooling) and must match that file.
+  static const defaultPort = 18921;
+
+  final int port;
+
+  /// Empty in the shipping app. The host integration test sets it to a local
+  /// mock server so the real FFI path can be verified offline.
+  final String mockUpstreamOrigin;
+
+  /// Process-wide flutter_rust_bridge runtime handle.
+  ///
+  /// The bridge refuses a second `RustLib.init()`, and the flag has to be
+  /// static: a second transport instance in the same process (a restarted
+  /// service, a test) must reuse the runtime instead of initializing it again.
+  static Future<void>? _runtimeReady;
+
+  String _baseUrl;
+  String _capability = '';
+  static Future<void> _nativeTail = Future<void>.value();
+  static _CoreSession? _session;
+  _CoreAttempt? _attempt;
+  _CoreSession? _retiringSession;
+
+  static Future<T> _serialize<T>(Future<T> Function() operation) {
+    final pending = _nativeTail.then((_) => operation());
+    _nativeTail = pending.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return pending;
+  }
+
+  static Future<void> _retire(_CoreSession session) async {
+    if (!identical(_session, session)) return;
+    session.retiring = true;
+    // Keep the failed retirement as the singleton owner until shutdown succeeds.
+    await rust.shutdown();
+    if (identical(_session, session)) _session = null;
+  }
+
+  bool get _coreRunning {
+    final attempt = _attempt;
+    final session = attempt?.session;
+    return attempt != null &&
+        !attempt.retired &&
+        session != null &&
+        session.ready &&
+        !session.retiring &&
+        identical(_session, session);
+  }
+
+  /// Loads the bridge runtime once per process.
+  ///
+  /// A failed load is not cached: caching the rejected future would rethrow the
+  /// same error on every later [start], so one bad native init would leave the
+  /// app unable to reach the core for the rest of the process. Only this
+  /// attempt's own handle is cleared on failure, so a concurrent retry that
+  /// already installed a new future is never dropped.
+  ///
+  /// `RustLib.init` is not atomic: it installs FRB's process-wide state before
+  /// running the Rust initializers, so a failure in that second half leaves a
+  /// half-initialized bridge behind. A blind retry would then throw
+  /// `Should not initialize flutter_rust_bridge twice` from FRB itself, so the
+  /// half state is reset through FRB's own [RustLib.dispose] before the next
+  /// attempt. A runtime that is already up is reused instead of re-initialized.
+  static Future<void> ensureRuntime() {
+    final cached = _runtimeReady;
+    if (cached != null) return cached;
+    if (runtimeInitialized()) return _runtimeReady = Future<void>.value();
+    late final Future<void> attempt;
+    attempt = Future<void>.sync(runtimeInitializer).catchError((
+      Object error,
+      StackTrace stack,
+    ) {
+      if (identical(_runtimeReady, attempt)) _runtimeReady = null;
+      if (runtimeInitialized()) {
+        try {
+          disposeRuntime();
+        } catch (resetError, resetStack) {
+          // FRB could not release the half-initialized state. There is no
+          // other reset entry point, so the process cannot retry cleanly;
+          // make that actionable instead of looping on the same StateError.
+          AppLog.e(
+            'backend',
+            'Flutter Rust Bridge 运行时复位失败，需要重启应用',
+            error: resetError,
+            stack: resetStack,
+          );
+        }
+      }
+      AppLog.e(
+        'backend',
+        'Flutter Rust Bridge 运行时初始化失败，下次启动重试',
+        error: error,
+        stack: stack,
+      );
+      Error.throwWithStackTrace(error, stack);
+    });
+    _runtimeReady = attempt;
+    return attempt;
+  }
+
+  /// The loader [ensureRuntime] runs on first use; production always uses
+  /// [RustLib.init]. A seam rather than a direct call, so the retry behavior
+  /// can be tested without loading the shared library.
+  @visibleForTesting
+  static Future<void> Function() runtimeInitializer = initRustRuntime;
+
+  /// Whether FRB already installed its process-wide state.
+  ///
+  /// Read before initializing (a runtime loaded by the host is reused) and
+  /// after a failure (only a half-initialized bridge needs [disposeRuntime]).
+  @visibleForTesting
+  static bool Function() runtimeInitialized = () =>
+      RustLib.instance.initialized;
+
+  /// FRB's own reset entry point (`disposeImpl` clears the singleton state).
+  @visibleForTesting
+  static void Function() disposeRuntime = RustLib.dispose;
+
+  /// Forgets the process-wide runtime handle. Only for tests.
+  @visibleForTesting
+  static void resetRuntimeForTest() {
+    _runtimeReady = null;
+    runtimeInitializer = initRustRuntime;
+    runtimeInitialized = () => RustLib.instance.initialized;
+    disposeRuntime = RustLib.dispose;
+  }
+
+  /// Records that the runtime is already initialized, for hosts that load the
+  /// shared library themselves (the host integration test opens an explicit
+  /// path).
+  static void markRuntimeReady() {
+    _runtimeReady ??= Future<void>.value();
+  }
+
+  final HttpBackendTransport _httpFallback;
+
+  @override
+  String get baseUrl => _baseUrl;
+
+  @override
+  String get capability => _capability;
+
+  /// Process-wide monotonic id source.
+  ///
+  /// Request ids are registered in one global table inside the Rust core, so
+  /// they must be unique across transport instances too - an instance-local
+  /// counter would let two transports (a restarted service, a test) collide and
+  /// cancel each other's calls.
+  static int _requestIdCounter = 0;
+
+  /// Allocates the next request id. Exposed so the uniqueness invariant can be
+  /// tested without loading the shared library.
+  static String nextRequestId() => 'fq-${_requestIdCounter++}';
+
+  /// Initializes the Rust runtime and the backend core. Idempotent: concurrent
+  /// and repeated calls converge on the same core.
+  ///
+  /// [listenPort] overrides [port] so the caller can drive the listener from
+  /// `config.json` (the single source of truth) instead of the constructor.
+  /// [lanShare] widens the listener from loopback to every interface.
+  Future<String> start({
+    required String configPath,
+    required String poolPath,
+    required String filterPath,
+    required String runtimeDir,
+    int? listenPort,
+    bool lanShare = false,
+  }) {
+    final current = _attempt;
+    if (current != null && !current.retired) return current.future;
+    final attempt = _CoreAttempt();
+    _attempt = attempt;
+    attempt.future =
+        _serialize(() async {
+          void checkCurrent() {
+            if (attempt.retired || !identical(_attempt, attempt)) {
+              throw StateError('backend start retired');
+            }
+          }
+
+          checkCurrent();
+          await ensureRuntime();
+          checkCurrent();
+          final previous = _session;
+          if (previous != null && previous.retiring) {
+            await _retire(previous);
+            checkCurrent();
+          }
+          final shared = _session;
+          if (shared != null) {
+            shared.participants.add(attempt);
+            attempt.session = shared;
+            _publish(shared);
+            return 'running';
+          }
+          // P1-2: provision the device-pool encryption key before init, so the
+          // Rust core reads an encrypted pool file on its first load. A null
+          // key (secure storage unavailable) keeps the old plaintext behavior;
+          // a provisioning failure never blocks startup.
+          final poolKey = await SecureKeyProvider().devicePoolKey();
+          checkCurrent();
+          if (poolKey != null) {
+            try {
+              await rust.setDevicePoolKey(key: poolKey);
+            } catch (_) {
+              // Keep starting: the pool falls back to plaintext + a warning.
+            }
+            checkCurrent();
+          }
+          final session = _CoreSession()..participants.add(attempt);
+          attempt.session = session;
+          _session = session;
+          try {
+            final result = await rust.init(
+              configPath: configPath,
+              poolPath: poolPath,
+              filterPath: filterPath,
+              runtimeDir: runtimeDir,
+              port: listenPort ?? port,
+              lanShare: lanShare,
+              mockUpstreamOrigin: mockUpstreamOrigin,
+            );
+            checkCurrent();
+            if (result != 'running') {
+              throw StateError('Rust core failed: $result');
+            }
+            session.baseUrl = await rust.baseUrl();
+            checkCurrent();
+            session.capability = await rust.sessionCapability();
+            checkCurrent();
+            _publish(session);
+            return result;
+          } catch (_) {
+            attempt.retired = true;
+            session.participants.remove(attempt);
+            // This cleanup remains inside the operation that allocated the core.
+            await _retire(session);
+            rethrow;
+          }
+        }).whenComplete(() {
+          if (identical(_attempt, attempt) && !_coreRunning) {
+            attempt.retired = true;
+          }
+        });
+    return attempt.future;
+  }
+
+  void _publish(_CoreSession session) {
+    session.ready = true;
+    _baseUrl = session.baseUrl;
+    _capability = session.capability;
+    _httpFallback.capability = session.capability;
+  }
+
+  Future<String> status() async {
+    if (!_coreRunning) return 'starting';
+    final attempt = _attempt;
+    final result = await _serialize(rust.status);
+    return identical(attempt, _attempt) && _coreRunning ? result : 'starting';
+  }
+
+  Future<void> stop() {
+    final attempt = _attempt;
+    _attempt = null;
+    _baseUrl = 'http://127.0.0.1:$port';
+    _capability = '';
+    _httpFallback.capability = '';
+    attempt?.retired = true;
+    final session = attempt?.session ?? _retiringSession;
+    if (attempt == null && session == null) return Future<void>.value();
+    if (session != null) {
+      if (attempt != null) session.participants.remove(attempt);
+      if (session.participants.isNotEmpty) return Future<void>.value();
+      session.retiring = true;
+      _retiringSession = session;
+    }
+    return _serialize(() async {
+      if (session != null) {
+        await _retire(session);
+        if (identical(_retiringSession, session)) _retiringSession = null;
+      }
+    });
+  }
+
+  @override
+  Future<void> close() async {
+    await Future.wait<void>([stop(), _httpFallback.close()]);
+  }
+
+  @override
+  Future<BackendResponse> send(
+    String method,
+    Uri url, {
+    Uint8List? body,
+    Duration? timeout,
+    BackendRequest? request,
+  }) async {
+    if (request != null && request.isCancelled) {
+      throw BackendRequestAborted('请求已取消');
+    }
+    if (!_coreRunning) {
+      return _httpFallback.send(
+        method,
+        url,
+        body: body,
+        timeout: timeout,
+        request: request,
+      );
+    }
+
+    final attempt = _attempt;
+    final requestId = nextRequestId();
+    void cancelInRust() {
+      unawaited(rust.cancel(requestId: requestId));
+    }
+
+    if (request != null && !request.register(cancelInRust)) {
+      throw BackendRequestAborted('请求已取消');
+    }
+
+    final pending = rust.request(
+      requestId: requestId,
+      method: method,
+      path: url.path,
+      query: url.query,
+      body: body ?? Uint8List(0),
+      timeoutMs: timeout?.inMilliseconds ?? 0,
+    );
+
+    try {
+      final response = request == null
+          ? await pending
+          : await Future.any<rust.BridgeResponse?>([
+              pending,
+              request.whenCancelled.then((_) => null),
+            ]);
+      if (response == null || !identical(attempt, _attempt) || !_coreRunning) {
+        cancelInRust();
+        throw BackendRequestAborted('请求已取消');
+      }
+      if (response.status == 499) {
+        throw BackendRequestAborted('请求已取消');
+      }
+      if (response.status == 504) {
+        throw BackendRequestAborted('请求超时', timedOut: true);
+      }
+      return BackendResponse(
+        response.status,
+        response.body,
+        response.contentType,
+      );
+    } finally {
+      request?.unregister(cancelInRust);
+    }
+  }
+}
+
+class _CoreAttempt {
+  late Future<String> future;
+  bool retired = false;
+  _CoreSession? session;
+}
+
+class _CoreSession {
+  final Set<_CoreAttempt> participants = {};
+  bool retiring = false;
+  bool ready = false;
+  String baseUrl = '';
+  String capability = '';
+}
+
+/// HTTP transport for the loopback adapter, Dart tests and the Web build.
+class HttpBackendTransport implements BackendTransport {
+  HttpBackendTransport({
+    http.Client? client,
+    required this.baseUrl,
+    this.capability = '',
+  }) : _client = client ?? http.Client();
+
+  final http.Client _client;
+
+  @override
+  final String baseUrl;
+
+  /// Loopback capability presented as a bearer token; empty when the caller
+  /// talks to a server that does not ask for one.
+  ///
+  /// Mutable because the FFI transport only learns it once the core is up.
+  @override
+  String capability;
+
+  @override
+  Future<BackendResponse> send(
+    String method,
+    Uri url, {
+    Uint8List? body,
+    Duration? timeout,
+    BackendRequest? request,
+  }) async {
+    if (request != null && request.isCancelled) {
+      throw BackendRequestAborted('请求已取消');
+    }
+    final abort = Completer<void>();
+    void abortNow() {
+      if (!abort.isCompleted) abort.complete();
+    }
+
+    if (request != null && !request.register(abortNow)) {
+      throw BackendRequestAborted('请求已取消');
+    }
+
+    final httpRequest = http.AbortableRequest(
+      method,
+      url,
+      abortTrigger: abort.future,
+    );
+    if (body != null) httpRequest.bodyBytes = body;
+    if (capability.isNotEmpty) {
+      // This is the only HTTP path that never sees the cookie the entry URL
+      // sets, so it has to present the capability as a bearer token.
+      httpRequest.headers['authorization'] = 'Bearer $capability';
+    }
+    try {
+      // The deadline must cover reading the body too: a server that sends
+      // headers and then stalls would otherwise hold the connection forever.
+      final response = await _client
+          .send(httpRequest)
+          .then(http.Response.fromStream)
+          .timeout(timeout ?? const Duration(seconds: 20));
+      return BackendResponse(
+        response.statusCode,
+        response.bodyBytes,
+        response.headers['content-type'] ?? '',
+      );
+    } catch (error) {
+      // A timed-out or cancelled exchange must not keep occupying a connection.
+      abortNow();
+      if (request != null &&
+          request.isCancelled &&
+          error is! BackendRequestAborted) {
+        throw BackendRequestAborted('请求已取消');
+      }
+      rethrow;
+    } finally {
+      request?.unregister(abortNow);
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    _client.close();
+  }
+}

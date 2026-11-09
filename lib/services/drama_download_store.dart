@@ -1,0 +1,593 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:hive_ce/hive.dart';
+import 'package:path_provider/path_provider.dart';
+
+import '../models/media_item.dart';
+import 'encrypted_hive.dart';
+import 'episode_source_cache.dart';
+import 'secure_key_provider.dart';
+
+/// 一集的离线缓存记录。文件是**原始 CENC 加密字节**（与官方加密落盘同
+/// 姿态），keyHex 是该集确定性派生的内容密钥——回放时把 `file://` 路径
+/// 和 key 一起交给原生播放器，解密仍发生在 C 核心流层，磁盘上永远没有
+/// 明文。
+///
+/// P1-4：keyHex 不进集记录本身。它只存在同一个**加密**箱里的独立条目
+/// `key:<itemId>` 下（见 [HiveDramaDownloadStore]），集记录里永远不带
+/// keyHex；播放时由 store 把两者拼回 [CachedEpisode]。
+@immutable
+class CachedEpisode {
+  const CachedEpisode({
+    required this.seriesId,
+    required this.itemId,
+    required this.title,
+    required this.index,
+    required this.keyHex,
+    required this.height,
+    required this.variantName,
+    required this.bytes,
+    required this.filePath,
+    required this.cachedAt,
+    this.auto = false,
+  });
+
+  final String seriesId;
+  final String itemId;
+  final String title;
+  final int index;
+
+  /// 该集该画质档的 16 字节内容密钥（hex），`spade_a` 的确定性派生，
+  /// 不随会话变化。
+  final String keyHex;
+  final int height;
+  final String variantName;
+
+  /// 加密字节数（完成时实测的文件大小）。
+  final int bytes;
+  final String filePath;
+  final int cachedAt;
+
+  /// 这一集是「边看边往后缓存」自动排进来的，不是用户在缓存面板里选的。
+  ///
+  /// 只用来决定能不能删：自动缓存的旧集跟着播放进度滚动清理，用户手动下
+  /// 的一律不动。
+  final bool auto;
+
+  /// Episode record as persisted. Deliberately key-less (P1-4): the content
+  /// key travels separately under `key:<itemId>` in the same encrypted box.
+  Map<String, dynamic> toMap() => {
+    'seriesId': seriesId,
+    'itemId': itemId,
+    'title': title,
+    'index': index,
+    'height': height,
+    'variantName': variantName,
+    'bytes': bytes,
+    'filePath': filePath,
+    'cachedAt': cachedAt,
+    if (auto) 'auto': true,
+  };
+
+  /// Reassembles an episode from its record plus the separately stored key.
+  /// [keyHex] is '' for plain (non-CENC) streams.
+  static CachedEpisode? fromMap(dynamic raw, {String keyHex = ''}) {
+    if (raw is! Map) return null;
+    final seriesId = raw['seriesId'];
+    final itemId = raw['itemId'];
+    final filePath = raw['filePath'];
+    if (seriesId is! String ||
+        seriesId.isEmpty ||
+        itemId is! String ||
+        itemId.isEmpty ||
+        filePath is! String ||
+        filePath.isEmpty) {
+      return null;
+    }
+    return CachedEpisode(
+      seriesId: seriesId,
+      itemId: itemId,
+      title: raw['title']?.toString() ?? '',
+      index: raw['index'] is num ? (raw['index'] as num).toInt() : 0,
+      keyHex: keyHex,
+      height: raw['height'] is num ? (raw['height'] as num).toInt() : 0,
+      variantName: raw['variantName']?.toString() ?? '',
+      bytes: raw['bytes'] is num ? (raw['bytes'] as num).toInt() : 0,
+      filePath: filePath,
+      cachedAt: raw['cachedAt'] is num ? (raw['cachedAt'] as num).toInt() : 0,
+      auto: raw['auto'] == true,
+    );
+  }
+
+  /// 离线回放的取流结果：主 url 是 `file://` 标记（原生播放器据此走
+  /// 本地文件桥 + 同一把 key 解密），variants 只带下载时选定的那一档。
+  EpisodeSource toSource() => EpisodeSource('file://$filePath', keyHex, [
+    if (variantName.isNotEmpty)
+      EpisodeVariant(
+        name: variantName,
+        url: 'file://$filePath',
+        keyHex: keyHex,
+        height: height,
+      ),
+  ]);
+}
+
+/// 一部剧的目录（剧名/封面/全集列表），下载启动时落库，管理页靠它自举，
+/// 不依赖任何页面传元数据。
+@immutable
+class CachedDrama {
+  CachedDrama({
+    required this.id,
+    required this.title,
+    required this.cover,
+    required List<Chapter> episodes,
+  }) : episodes = List.unmodifiable(episodes);
+
+  final String id;
+  final String title;
+  final String cover;
+  final List<Chapter> episodes;
+
+  Map<String, dynamic> toMap() => {
+    'id': id,
+    'title': title,
+    'cover': cover,
+    'catalogueComplete': hasCompleteEpisodeCatalogue(episodes),
+    'episodes': [
+      for (final (index, episode) in episodes.indexed)
+        {
+          'itemId': episode.itemId,
+          'title': episode.title,
+          'index': index,
+          if (episode.trailer) 'trailer': true,
+          if (episode.highlight) 'highlight': true,
+          if (episode.disabled) 'disabled': true,
+          if (episode.newlyUpdate) 'newlyUpdate': true,
+          if (episode.vertical != null) 'vertical': episode.vertical,
+        },
+    ],
+  };
+
+  static CachedDrama? fromMap(dynamic raw) {
+    if (raw is! Map || raw['id'] is! String || raw['episodes'] is! List) {
+      return null;
+    }
+    final values = raw['episodes'] as List;
+    // Old single-entry records may be the faulty search/history fallback, not
+    // a one-episode series. Only an explicitly marked catalogue proves that.
+    final complete =
+        raw['catalogueComplete'] == true ||
+        (raw['catalogueComplete'] == null && values.length > 1);
+    final episodes = <Chapter>[];
+    final ids = <String>{};
+    for (final (index, value) in values.indexed) {
+      // Never skip a damaged row and renumber all following episodes.
+      if (value is! Map ||
+          value['itemId'] is! String ||
+          (value['itemId'] as String).isEmpty ||
+          !ids.add(value['itemId'] as String) ||
+          value['index'] != index) {
+        return null;
+      }
+      episodes.add(
+        Chapter(
+          itemId: value['itemId'] as String,
+          title: value['title']?.toString() ?? '',
+          volumeName: '剧集',
+          trailer: value['trailer'] == true,
+          highlight: value['highlight'] == true,
+          disabled: value['disabled'] == true,
+          newlyUpdate: value['newlyUpdate'] == true,
+          vertical: value['vertical'] is bool
+              ? value['vertical'] as bool
+              : null,
+          hasKnownIndex: complete,
+        ),
+      );
+    }
+    if (episodes.isEmpty) return null;
+    return CachedDrama(
+      id: raw['id'] as String,
+      title: raw['title']?.toString() ?? '未知剧集',
+      cover: raw['cover']?.toString() ?? '',
+      episodes: episodes,
+    );
+  }
+}
+
+/// 管理页的按剧聚合视图。
+@immutable
+class CachedDramaSummary {
+  final CachedDrama drama;
+  final List<CachedEpisode> episodes;
+
+  const CachedDramaSummary(this.drama, this.episodes);
+
+  int get bytes => episodes.fold(0, (sum, episode) => sum + episode.bytes);
+}
+
+abstract interface class DramaDownloadStore {
+  /// 下载启动时写入/刷新剧集目录。
+  Future<void> ensureCatalogue(CachedDrama drama);
+
+  /// 完成一集：记录 + 刷新目录访问时间。
+  Future<void> saveEpisode(CachedEpisode episode);
+
+  Future<bool> isDownloaded(String itemId);
+  Future<CachedEpisode?> episode(String itemId);
+
+  /// 该集是否已有目录记录（管理页里「下载中」的剧）。
+  Future<bool> hasCatalogue(String seriesId);
+
+  Future<List<CachedDramaSummary>> dramas();
+  Future<int> totalBytes();
+  Future<void> removeEpisode(String itemId);
+  Future<void> removeDrama(String seriesId);
+
+  /// 存储是否可用。Hive 未初始化（测试宿主、早期启动）时为 false，
+  /// 调用方据此跳过读写，别去碰没打开的 box。
+  bool get isReady;
+
+  /// 视频文件目录（不存在则创建）。
+  Future<Directory> directory();
+
+  ValueListenable<int> get changes;
+}
+
+class HiveDramaDownloadStore implements DramaDownloadStore {
+  HiveDramaDownloadStore({
+    HiveInterface? hive,
+    this._keys,
+    Future<Directory> Function()? directoryResolver,
+  }) : _hive = hive ?? Hive,
+       _dirResolver = directoryResolver;
+
+  static final HiveDramaDownloadStore instance = HiveDramaDownloadStore();
+  static const _boxName = 'drama_download_v1';
+
+  /// Key entry for one episode: `key:<itemId>` -> keyHex, in the same
+  /// encrypted box as the episode record. P1-4 keeps the content key out
+  /// of the episode record itself.
+  static String _keyKey(String itemId) => 'key:$itemId';
+
+  /// One-time marker: embedded-key migration (below) has run on this box.
+  static const _keySplitMarker = '__key_split_v1';
+
+  /// Encryption-key source. Production uses the shared secure-storage
+  /// provider; tests inject an in-memory one. The box holds content keys,
+  /// so it opens with `requireEncryption`: no key, no plaintext fallback.
+  final SecureKeyProvider? _keys;
+
+  /// box 是否已打开。播放器的离线命中读路径用它做前置门：Hive 未初始化
+  /// 时触碰 openBox 会产生无法被 try/catch 完全拦住的异步错误（openBox
+  /// 内部 completer 的孪生错误），生产环境由 main 的 [warmUp] 打开。
+  @override
+  bool get isReady => EncryptedHive.isBoxOpen(_hive, _boxName);
+
+  /// 启动时打开 box；失败不拖启动（离线命中退化为每次都走在线）。
+  Future<void> warmUp() async {
+    try {
+      await _box();
+    } catch (_) {
+      _opening = null;
+    }
+  }
+
+  final HiveInterface _hive;
+  final Future<Directory> Function()? _dirResolver;
+  Directory? _dir;
+
+  @override
+  final ValueNotifier<int> changes = ValueNotifier(0);
+  Future<Box<dynamic>>? _opening;
+  Future<void> _writes = Future<void>.value();
+
+  Future<Box<dynamic>> _box() async {
+    // Hive.close()（全量关箱，测试 tearDown 的常态）之后 openBox 仍会把
+    // 注册表里的已关闭实例交回来——按「已开直接取、未开才开」收口，
+    // 不做「拿到关闭箱就重试」的递归（那会无限循环）。
+    if (EncryptedHive.isBoxOpen(_hive, _boxName)) {
+      final box = EncryptedHive.box<dynamic>(_hive, _boxName);
+      await _migrateEmbeddedKeys(box);
+      return box;
+    }
+    final opening = _opening ??= _openBox();
+    try {
+      return await opening;
+    } finally {
+      if (identical(_opening, opening)) _opening = null;
+    }
+  }
+
+  Future<Box<dynamic>> _openBox() async {
+    final box = await EncryptedHive.openBox<dynamic>(
+      _hive,
+      _boxName,
+      keys: _keys,
+      requireEncryption: true,
+    );
+    await _migrateEmbeddedKeys(box);
+    return box;
+  }
+
+  /// One-time migration for records written before P1-4, which embedded
+  /// keyHex in the episode record: move each embedded key into its
+  /// `key:<itemId>` entry, then rewrite the record without it. The key
+  /// entry is written before the record is stripped, so a crash between
+  /// the two just re-runs this migration idempotently. Orphaned key
+  /// entries (record gone) are dropped. Afterwards the marker is set, so
+  /// later opens pay for one [Box.containsKey] check only.
+  Future<void> _migrateEmbeddedKeys(Box<dynamic> box) async {
+    if (box.containsKey(_keySplitMarker)) return;
+    final episodeKeys = <dynamic>[
+      for (final key in box.keys)
+        if (key is String && key.startsWith('episode:')) key,
+    ];
+    final liveItems = <String>{};
+    for (final key in episodeKeys) {
+      final raw = box.get(key);
+      if (raw is! Map) continue;
+      final itemId = raw['itemId'];
+      if (itemId is! String || itemId.isEmpty) continue;
+      liveItems.add(itemId);
+      final embedded = raw['keyHex'];
+      if (embedded is! String || embedded.isEmpty) continue;
+      await box.put(_keyKey(itemId), embedded);
+      final stripped = Map<String, dynamic>.from(raw)..remove('keyHex');
+      await box.put(key, stripped);
+    }
+    for (final key in box.keys.toList()) {
+      if (key is String &&
+          key.startsWith('key:') &&
+          !liveItems.contains(key.substring(4))) {
+        await box.delete(key);
+      }
+    }
+    await box.put(_keySplitMarker, true);
+  }
+
+  Future<T> _serialize<T>(Future<T> Function(Box<dynamic>) action) {
+    final operation = _writes.then((_) async => action(await _box()));
+    _writes = operation.then<void>(
+      (_) {},
+      onError: (Object _) {
+        _opening = null;
+      },
+    );
+    return operation;
+  }
+
+  @override
+  Future<Directory> directory() async {
+    final existing = _dir;
+    if (existing != null) return existing;
+    final root =
+        await (_dirResolver?.call() ?? getApplicationSupportDirectory());
+    final dir = Directory('${root.path}${Platform.pathSeparator}offline-video');
+    await dir.create(recursive: true);
+    return _dir = dir;
+  }
+
+  String _episodeKey(String itemId) => 'episode:$itemId';
+
+  /// Episode-record shape. P1-4: the record carries no keyHex (it lives
+  /// under `key:<itemId>`), so shape alone must not require it — a plain
+  /// (non-CENC) stream legitimately has an empty key.
+  bool _isEpisode(dynamic value) =>
+      value is Map &&
+      value['seriesId'] is String &&
+      (value['seriesId'] as String).isNotEmpty &&
+      value['itemId'] is String &&
+      (value['itemId'] as String).isNotEmpty &&
+      value['filePath'] is String &&
+      (value['filePath'] as String).isNotEmpty;
+
+  @override
+  Future<void> ensureCatalogue(CachedDrama drama) => _serialize((box) async {
+    if (drama.id.isEmpty || drama.episodes.isEmpty) return;
+    final existing = CachedDrama.fromMap(box.get('series:${drama.id}'));
+    if (!hasCompleteEpisodeCatalogue(drama.episodes) &&
+        existing != null &&
+        hasCompleteEpisodeCatalogue(existing.episodes)) {
+      return;
+    }
+    final record = drama.toMap()
+      ..['cachedAt'] = DateTime.now().millisecondsSinceEpoch;
+    await box.put('series:${drama.id}', record);
+    changes.value++;
+  });
+
+  @override
+  Future<void> saveEpisode(CachedEpisode episode) => _serialize((box) async {
+    if (episode.seriesId.isEmpty || episode.itemId.isEmpty) return;
+    await _requireExistingFile(episode.filePath, episode.bytes);
+    // Key entry first: a crash between the two writes leaves an orphaned
+    // key entry (cleaned by the next migration pass), never a key-less
+    // record that claims to be playable.
+    await box.put(_keyKey(episode.itemId), episode.keyHex);
+    await box.put(_episodeKey(episode.itemId), episode.toMap());
+    await box.flush();
+    changes.value++;
+  });
+
+  @override
+  Future<bool> isDownloaded(String itemId) => _serialize((box) async {
+    return _isEpisode(box.get(_episodeKey(itemId)));
+  });
+
+  @override
+  Future<CachedEpisode?> episode(String itemId) => _serialize((box) async {
+    final raw = box.get(_episodeKey(itemId));
+    if (!_isEpisode(raw)) return null;
+    final keyHex = box.get(_keyKey(itemId));
+    return CachedEpisode.fromMap(raw, keyHex: keyHex is String ? keyHex : '');
+  });
+
+  @override
+  Future<bool> hasCatalogue(String seriesId) => _serialize((box) async {
+    return box.get('series:$seriesId') != null;
+  });
+
+  /// Reads the saved full catalogue, never the downloaded-subset projection.
+  Future<CachedDrama?> catalogue(String seriesId) async {
+    if (!isReady || seriesId.isEmpty) return null;
+    return _serialize((box) async {
+      final drama = CachedDrama.fromMap(box.get('series:$seriesId'));
+      return drama != null &&
+              drama.id == seriesId &&
+              hasCompleteEpisodeCatalogue(drama.episodes)
+          ? drama
+          : null;
+    });
+  }
+
+  @override
+  Future<List<CachedDramaSummary>> dramas() => _serialize((box) async {
+    final bySeries = <String, List<CachedEpisode>>{};
+    for (final value in box.values) {
+      if (!_isEpisode(value)) continue;
+      final keyHex = box.get(_keyKey(value['itemId'] as String));
+      final episode = CachedEpisode.fromMap(
+        value,
+        keyHex: keyHex is String ? keyHex : '',
+      );
+      if (episode == null) continue;
+      (bySeries[episode.seriesId] ??= []).add(episode);
+    }
+    final summaries = <CachedDramaSummary>[];
+    for (final entry in bySeries.entries) {
+      final drama =
+          CachedDrama.fromMap(box.get('series:${entry.key}')) ??
+          CachedDrama(
+            id: entry.key,
+            title: entry.key,
+            cover: '',
+            episodes: [
+              for (final episode in entry.value)
+                Chapter(
+                  itemId: episode.itemId,
+                  title: episode.title,
+                  volumeName: '',
+                  hasKnownIndex: false,
+                ),
+            ],
+          );
+      // 集序以目录（`series:` 里的全集列表）的顺序为准：老记录的 index 是
+      // 「入队时的相对序号」（0..4 对应目录里的 12..16），拿它排序会把
+      // 第 13 集排到第 1 集前面。目录里查不到的记录才退回 index。
+      final order = <String, int>{
+        for (final (position, episode) in drama.episodes.indexed)
+          if (episode.hasKnownIndex) episode.itemId: position,
+      };
+      entry.value.sort(
+        (a, b) =>
+            (order[a.itemId] ?? a.index).compareTo(order[b.itemId] ?? b.index),
+      );
+      summaries.add(CachedDramaSummary(drama, entry.value));
+    }
+    summaries.sort((a, b) {
+      final at = a.episodes
+          .map((episode) => episode.cachedAt)
+          .fold(0, (max, value) => value > max ? value : max);
+      final bt = b.episodes
+          .map((episode) => episode.cachedAt)
+          .fold(0, (max, value) => value > max ? value : max);
+      return bt.compareTo(at);
+    });
+    return summaries;
+  });
+
+  @override
+  Future<int> totalBytes() => _serialize((box) async {
+    var bytes = 0;
+    for (final value in box.values) {
+      if (!_isEpisode(value)) continue;
+      final size = value['bytes'];
+      if (size is num && size.isFinite && size > 0) bytes += size.toInt();
+    }
+    return bytes;
+  });
+
+  @override
+  Future<void> removeEpisode(String itemId) => _serialize((box) async {
+    final raw = box.get(_episodeKey(itemId));
+    if (_isEpisode(raw)) {
+      // 记录指向的文件随记录删除；路径被篡改时宁可留着文件也不删错。
+      await _deleteOwnedFile(raw['filePath'] as String);
+    }
+    await box.deleteAll([_episodeKey(itemId), _keyKey(itemId)]);
+    // 最后一集删掉后目录再没有集可聚合，管理页永远读不到它；不清掉的话
+    // 每按集清理一次就在加密箱里留下一条孤儿。
+    final seriesId = raw is Map ? raw['seriesId'] : null;
+    if (seriesId is String && seriesId.isNotEmpty) {
+      final hasSiblings = box.values.any(
+        (value) => _isEpisode(value) && value['seriesId'] == seriesId,
+      );
+      if (!hasSiblings) await box.delete('series:$seriesId');
+    }
+    await box.flush();
+    changes.value++;
+  });
+
+  @override
+  Future<void> removeDrama(String seriesId) => _serialize((box) async {
+    if (seriesId.isEmpty) return;
+    final doomed = <String>[
+      'series:$seriesId',
+      for (final value in box.values)
+        if (_isEpisode(value) && value['seriesId'] == seriesId) ...[
+          _episodeKey(value['itemId'] as String),
+          _keyKey(value['itemId'] as String),
+        ],
+    ];
+    for (final value in box.values) {
+      if (!_isEpisode(value) || value['seriesId'] != seriesId) continue;
+      await _deleteOwnedFile(value['filePath'] as String);
+    }
+    await box.deleteAll(doomed);
+    changes.value++;
+  });
+
+  Future<void> _requireExistingFile(String path, int bytes) async {
+    final file = File(path);
+    if (bytes <= 0 || !await file.exists()) {
+      throw FileSystemException('Completed download file conflict', path);
+    }
+  }
+
+  /// 只删属于本箱目录的文件。
+  ///
+  /// 记录里的路径可以被改箱内容的人指向任意位置，直接 `File(...).delete()`
+  /// 就成了任意文件删除（听书侧 `_deleteOwnedFile` 同源）。路径不在
+  /// `offline-video` 根内时保留文件、只删记录。两边都解析成真实路径再比：
+  /// `absolute` 不折叠 `..`，`<root>/../x` 会被误判为根内。
+  Future<void> _deleteOwnedFile(String filePath) async {
+    try {
+      final root = await (await directory()).resolveSymbolicLinks();
+      final file = File(filePath);
+      if (await FileSystemEntity.type(filePath, followLinks: false) ==
+          FileSystemEntityType.notFound) {
+        return;
+      }
+      final resolved = await file.resolveSymbolicLinks();
+      if (!_within(root, resolved)) return;
+      await file.delete();
+      if (await file.exists()) {
+        throw FileSystemException(
+          'Download file deletion incomplete',
+          filePath,
+        );
+      }
+    } on ArgumentError catch (_) {
+      // Invalid persisted paths do not authorize a file deletion.
+    }
+  }
+
+  static bool _within(String root, String candidate) {
+    final normalizedRoot = root.replaceAll('\\', '/').toLowerCase();
+    final normalized = candidate.replaceAll('\\', '/').toLowerCase();
+    return normalized == normalizedRoot ||
+        normalized.startsWith('$normalizedRoot/');
+  }
+}

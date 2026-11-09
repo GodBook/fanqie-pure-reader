@@ -1,0 +1,542 @@
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'reader_tap_zones.dart';
+
+part 'reader_preferences_codec.dart';
+
+enum ReaderThemePreset { light, eyeCare, parchment, dark, eink }
+
+enum ReaderTitleAlignment { start, center }
+
+enum ReaderPageMode { paged, scroll }
+
+enum ReaderScrollChapterMode { replace, joined }
+
+enum ReaderDialogueHighlightStyle { automatic, background, underline }
+
+/// Compact mode keeps one footer; detailed mode also shows book/chapter data.
+/// Note: 兼容旧开关的迁移见 .agents/notes/implemented/feature/2026-10-15-reader-info-modes.md
+enum ReaderInfoMode { hidden, compact, detailed }
+
+/// Page-turn animation for paged mode, mirroring the official 翻页方式 row:
+/// the new page slides in normally (平移), slides over a pinned outgoing page
+/// (覆盖), or appears instantly (无). See
+/// .agents/notes/implemented/feature/2026-09-11-reader-paragraph-bubble.md
+enum ReaderPageTurnStyle { cover, slide, curl, none }
+
+@immutable
+class ReaderPreferences {
+  static Future<void>? _writes;
+  static const _fontSizeKey = 'reader_font_size';
+  static const _fontWeightKey = 'reader_font_weight';
+  static const _lineHeightKey = 'reader_line_height';
+  static const _paragraphSpacingKey = 'reader_paragraph_spacing';
+  static const _horizontalPaddingKey = 'reader_horizontal_padding';
+  static const _themePresetKey = 'reader_theme_preset';
+  static const _letterSpacingKey = 'reader_letter_spacing';
+  static const _verticalPaddingKey = 'reader_vertical_padding';
+  static const _titleSizeKey = 'reader_title_size';
+  static const _titleAlignmentKey = 'reader_title_alignment';
+  static const _showReadingInfoKey = 'reader_show_reading_info';
+  static const _readingInfoModeKey = 'reader_info_mode';
+  static const _showSystemStatusBarKey = 'reader_show_system_status_bar';
+  static const _showSystemNavigationBarKey =
+      'reader_show_system_navigation_bar';
+  static const _followSystemBrightnessKey = 'reader_follow_system_brightness';
+  static const _brightnessKey = 'reader_brightness';
+  static const _fontPathKey = 'reader_font_path';
+  static const _fontNameKey = 'reader_font_name';
+  static const _pageModeKey = 'reader_page_mode';
+  static const _pageTurnStyleKey = 'reader_page_turn_style';
+  static const _volumeKeyTurnKey = 'reader_volume_key_turn';
+  static const _keepScreenOnKey = 'reader_keep_screen_on';
+  static const _autoTurnSecondsKey = 'reader_auto_turn_seconds';
+  static const _listeningFollowKey = 'reader_listening_follow';
+  static const _narrationHighlightKey = 'reader_narration_highlight';
+  static const _narrationHighlightColorKey = 'reader_narration_highlight_color';
+  static const _narrationHighlightStyleKey = 'reader_narration_highlight_style';
+  static const _dialogueHighlightKey = 'reader_dialogue_highlight';
+  static const _dialogueHighlightStyleKey = 'reader_dialogue_highlight_style';
+  static const _continuousReadingKey = 'reader_continuous_reading';
+  static const _scrollChapterModeKey = 'reader_scroll_chapter_mode';
+  static const _einkRefreshIntervalKey = 'reader_eink_refresh_interval';
+  static const _instantSwipeTurnKey = 'reader_instant_swipe_turn';
+  static const _tapLeftTurnsNextKey = 'reader_tap_left_turns_next';
+  static const _tapZonesKey = 'reader_tap_zones';
+  static const _showParagraphBubblesKey = 'reader_show_paragraph_bubbles';
+  static const _showVideoButtonKey = 'reader_show_video_button';
+  static const _videoChapterSyncKey = 'reader_video_chapter_sync';
+
+  final double fontSize;
+  final int fontWeight;
+  final double lineHeight;
+  final double paragraphSpacing;
+  final double horizontalPadding;
+  final ReaderThemePreset themePreset;
+  final double letterSpacing;
+  final double verticalPadding;
+  final double titleSize;
+  final ReaderTitleAlignment titleAlignment;
+  final ReaderInfoMode readingInfoMode;
+  final bool showSystemStatusBar;
+  final bool showSystemNavigationBar;
+  bool get showReadingInfo => readingInfoMode != ReaderInfoMode.hidden;
+  final bool followSystemBrightness;
+  final double brightness;
+  final String fontPath;
+  final String fontName;
+  final ReaderPageMode pageMode;
+  final ReaderPageTurnStyle pageTurnStyle;
+  final bool volumeKeyTurn;
+  final bool keepScreenOn;
+  final int autoTurnSeconds;
+
+  /// While the audio page narrates this chapter, the reader follows the
+  /// playback (听书跟随翻页).
+  final bool listeningFollow;
+
+  /// While the audio page narrates this chapter, paint a background wash
+  /// behind the sentence being spoken (朗读句高亮, #25). Independent of
+  /// [listeningFollow]: the highlight can show without auto page turns.
+  final bool narrationHighlight;
+
+  /// 朗读句高亮的自定义底色（ARGB，半透明）。null = 跟随当前阅读背景自动
+  /// 派生（背景同色系深一档），见 [ReaderThemePreset.narrationHighlightColor]。
+  ///
+  /// 设置入口：设置 → 听书 → 高亮颜色。
+  final int? narrationHighlightColor;
+
+  /// 可选的高亮色（ARGB，半透明）：暖黄/橙/绿/蓝/紫。
+  static const narrationHighlightPresets = <int>[
+    0x47FFC107,
+    0x47FA6725,
+    0x4716A34A,
+    0x472F6FED,
+    0x477C3AED,
+  ];
+
+  /// 朗读句高亮的呈现方式：[narrationHighlightStyleWash] = 背景色块，
+  /// [narrationHighlightStyleUnderline] = 文字下划线。
+  /// null = 自动：**墨水屏用下划线**（色块会整屏拖影），其余背景色块。
+  ///
+  /// 设置入口：设置 → 听书 → 高亮样式。
+  final int? narrationHighlightStyle;
+
+  /// 高亮样式 = 背景色块。
+  static const int narrationHighlightStyleWash = 1;
+
+  /// 高亮样式 = 文字下划线。
+  static const int narrationHighlightStyleUnderline = 2;
+
+  /// 该偏好最终用哪种样式：显式选了样式就用它，否则墨水屏下划线、其余背景。
+  bool narrationUnderlineFor(ReaderThemePreset preset) =>
+      switch (narrationHighlightStyle) {
+        narrationHighlightStyleUnderline => true,
+        narrationHighlightStyleWash => false,
+        _ => preset == ReaderThemePreset.eink,
+      };
+
+  /// Marks quoted dialogue in the reading text, independently of playback.
+  final bool dialogueHighlight;
+  final ReaderDialogueHighlightStyle dialogueHighlightStyle;
+
+  bool dialogueUnderlineFor(ReaderThemePreset preset) =>
+      switch (dialogueHighlightStyle) {
+        ReaderDialogueHighlightStyle.automatic =>
+          preset == ReaderThemePreset.eink,
+        ReaderDialogueHighlightStyle.background => false,
+        ReaderDialogueHighlightStyle.underline => true,
+      };
+
+  /// 滚动模式连续阅读：到底继续下拉进入下一章。默认开启。
+  /// 普通分页始终直接跨章，不受这个滚动手势开关影响。
+  final bool continuousReading;
+
+  /// 滚动模式默认预加载相邻章节并以分割线拼接；也可选择直接切章。
+  final ReaderScrollChapterMode scrollChapterMode;
+
+  /// 墨水屏整屏刷新间隔（页）：翻够这么多页调用一次厂商 EPD 全刷压残影。
+  /// 0 表示关闭。默认 10 页，只在设备提供海信 EPD 接口时才会真正触发。
+  final int einkRefreshInterval;
+
+  /// 分页模式“滑动直翻”：滑动越过阈值直接翻页，不显示翻页过渡页面与动画。
+  /// 适合墨水屏（翻页动画/残影明显）。仅分页模式生效，开启后翻页方式被强制为“无”。
+  final bool instantSwipeTurn;
+
+  /// “点击左侧翻右”：旧单手模式开关，已由点击区域九宫格取代。
+  /// 仅用于首次加载迁移：无九宫格配置且该开关开着时，迁移为单手九宫格。
+  final bool tapLeftTurnsNext;
+
+  /// 点击区域九宫格：9 个动作，行优先（上行 0-2，中行 3-5，下行 6-8）。
+  final List<ReaderTapZoneAction> tapZones;
+
+  /// 段评气泡：段落末尾的评论数气泡，点按打开段评。默认开启。
+  /// 关闭只关气泡渲染，段评本身仍从段落菜单和章节末尾打开。
+  final bool showParagraphBubbles;
+  final bool showVideoButton;
+  final bool videoChapterSync;
+
+  const ReaderPreferences({
+    this.fontSize = 18,
+    this.fontWeight = 400,
+    this.lineHeight = 1.8,
+    this.paragraphSpacing = 12,
+    this.horizontalPadding = 20,
+    this.themePreset = ReaderThemePreset.light,
+    this.letterSpacing = 0,
+    this.verticalPadding = 16,
+    this.titleSize = 20,
+    this.titleAlignment = ReaderTitleAlignment.start,
+    bool? showReadingInfo,
+    ReaderInfoMode readingInfoMode = ReaderInfoMode.compact,
+    this.showSystemStatusBar = true,
+    this.showSystemNavigationBar = false,
+    this.followSystemBrightness = true,
+    this.brightness = 0.5,
+    this.fontPath = '',
+    this.fontName = '',
+    this.pageMode = ReaderPageMode.paged,
+    this.pageTurnStyle = ReaderPageTurnStyle.slide,
+    this.volumeKeyTurn = false,
+    this.keepScreenOn = false,
+    this.autoTurnSeconds = 10,
+    this.listeningFollow = true,
+    this.narrationHighlight = true,
+    this.narrationHighlightColor,
+    this.narrationHighlightStyle,
+    this.dialogueHighlight = false,
+    this.dialogueHighlightStyle = ReaderDialogueHighlightStyle.automatic,
+    this.continuousReading = true,
+    this.scrollChapterMode = ReaderScrollChapterMode.joined,
+    this.einkRefreshInterval = 10,
+    this.instantSwipeTurn = false,
+    this.tapLeftTurnsNext = false,
+    this.tapZones = defaultReaderTapZones,
+    this.showParagraphBubbles = true,
+    this.showVideoButton = true,
+    this.videoChapterSync = true,
+  }) : readingInfoMode = showReadingInfo == false
+           ? ReaderInfoMode.hidden
+           : readingInfoMode;
+
+  ReaderPreferences copyWith({
+    double? fontSize,
+    int? fontWeight,
+    double? lineHeight,
+    double? paragraphSpacing,
+    double? horizontalPadding,
+    ReaderThemePreset? themePreset,
+    double? letterSpacing,
+    double? verticalPadding,
+    double? titleSize,
+    ReaderTitleAlignment? titleAlignment,
+    bool? showReadingInfo,
+    ReaderInfoMode? readingInfoMode,
+    bool? showSystemStatusBar,
+    bool? showSystemNavigationBar,
+    bool? followSystemBrightness,
+    double? brightness,
+    String? fontPath,
+    String? fontName,
+    ReaderPageMode? pageMode,
+    ReaderPageTurnStyle? pageTurnStyle,
+    bool? volumeKeyTurn,
+    bool? keepScreenOn,
+    int? autoTurnSeconds,
+    bool? listeningFollow,
+    bool? narrationHighlight,
+    int? narrationHighlightColor,
+
+    /// true = 恢复「自动跟随背景派生」；此时 [narrationHighlightColor] 不生效。
+    /// （copyWith 的 null 约定是「不改」，清除必须显式说明。）
+    bool autoNarrationHighlightColor = false,
+    int? narrationHighlightStyle,
+
+    /// true = 恢复「自动」（墨水屏下划线，其余背景色块）。
+    bool autoNarrationHighlightStyle = false,
+    bool? dialogueHighlight,
+    ReaderDialogueHighlightStyle? dialogueHighlightStyle,
+    bool? continuousReading,
+    ReaderScrollChapterMode? scrollChapterMode,
+    int? einkRefreshInterval,
+    bool? instantSwipeTurn,
+    bool? tapLeftTurnsNext,
+    List<ReaderTapZoneAction>? tapZones,
+    bool? showParagraphBubbles,
+    bool? showVideoButton,
+    bool? videoChapterSync,
+  }) {
+    return ReaderPreferences(
+      fontSize: fontSize ?? this.fontSize,
+      fontWeight: fontWeight ?? this.fontWeight,
+      lineHeight: lineHeight ?? this.lineHeight,
+      paragraphSpacing: paragraphSpacing ?? this.paragraphSpacing,
+      horizontalPadding: horizontalPadding ?? this.horizontalPadding,
+      themePreset: themePreset ?? this.themePreset,
+      letterSpacing: letterSpacing ?? this.letterSpacing,
+      verticalPadding: verticalPadding ?? this.verticalPadding,
+      titleSize: titleSize ?? this.titleSize,
+      titleAlignment: titleAlignment ?? this.titleAlignment,
+      readingInfoMode:
+          readingInfoMode ??
+          (showReadingInfo == false
+              ? ReaderInfoMode.hidden
+              : showReadingInfo == true && !this.showReadingInfo
+              ? ReaderInfoMode.compact
+              : this.readingInfoMode),
+      showSystemStatusBar: showSystemStatusBar ?? this.showSystemStatusBar,
+      showSystemNavigationBar:
+          showSystemNavigationBar ?? this.showSystemNavigationBar,
+      followSystemBrightness:
+          followSystemBrightness ?? this.followSystemBrightness,
+      brightness: brightness ?? this.brightness,
+      fontPath: fontPath ?? this.fontPath,
+      fontName: fontName ?? this.fontName,
+      pageMode: pageMode ?? this.pageMode,
+      pageTurnStyle: pageTurnStyle ?? this.pageTurnStyle,
+      volumeKeyTurn: volumeKeyTurn ?? this.volumeKeyTurn,
+      keepScreenOn: keepScreenOn ?? this.keepScreenOn,
+      autoTurnSeconds: autoTurnSeconds ?? this.autoTurnSeconds,
+      listeningFollow: listeningFollow ?? this.listeningFollow,
+      narrationHighlight: narrationHighlight ?? this.narrationHighlight,
+      narrationHighlightColor: autoNarrationHighlightColor
+          ? null
+          : narrationHighlightColor ?? this.narrationHighlightColor,
+      narrationHighlightStyle: autoNarrationHighlightStyle
+          ? null
+          : narrationHighlightStyle ?? this.narrationHighlightStyle,
+      dialogueHighlight: dialogueHighlight ?? this.dialogueHighlight,
+      dialogueHighlightStyle:
+          dialogueHighlightStyle ?? this.dialogueHighlightStyle,
+      continuousReading: continuousReading ?? this.continuousReading,
+      scrollChapterMode: scrollChapterMode ?? this.scrollChapterMode,
+      einkRefreshInterval: einkRefreshInterval ?? this.einkRefreshInterval,
+      instantSwipeTurn: instantSwipeTurn ?? this.instantSwipeTurn,
+      tapLeftTurnsNext: tapLeftTurnsNext ?? this.tapLeftTurnsNext,
+      tapZones: tapZones ?? this.tapZones,
+      showParagraphBubbles: showParagraphBubbles ?? this.showParagraphBubbles,
+      showVideoButton: showVideoButton ?? this.showVideoButton,
+      videoChapterSync: videoChapterSync ?? this.videoChapterSync,
+    ).normalized();
+  }
+
+  ReaderPreferences normalized() {
+    final normalizedWeight = ((fontWeight.clamp(300, 700) / 100).round() * 100)
+        .clamp(300, 700);
+    return ReaderPreferences(
+      fontSize: fontSize.isFinite ? fontSize.clamp(14, 32) : 18,
+      fontWeight: normalizedWeight,
+      lineHeight: lineHeight.isFinite ? lineHeight.clamp(1.2, 2.4) : 1.8,
+      paragraphSpacing: paragraphSpacing.isFinite
+          ? paragraphSpacing.clamp(0, 32)
+          : 12,
+      horizontalPadding: horizontalPadding.isFinite
+          ? horizontalPadding.clamp(8, 48)
+          : 20,
+      themePreset: themePreset,
+      letterSpacing: letterSpacing.isFinite ? letterSpacing.clamp(-0.5, 3) : 0,
+      verticalPadding: verticalPadding.isFinite
+          ? verticalPadding.clamp(0, 64)
+          : 16,
+      titleSize: titleSize.isFinite ? titleSize.clamp(16, 40) : 20,
+      titleAlignment: titleAlignment,
+      readingInfoMode: readingInfoMode,
+      showSystemStatusBar: showSystemStatusBar,
+      showSystemNavigationBar: showSystemNavigationBar,
+      followSystemBrightness: followSystemBrightness,
+      brightness: brightness.isFinite ? brightness.clamp(0.02, 1) : 0.5,
+      fontPath: fontPath,
+      fontName: fontPath.isEmpty ? '' : fontName,
+      pageMode: pageMode,
+      pageTurnStyle: pageTurnStyle,
+      volumeKeyTurn: volumeKeyTurn,
+      keepScreenOn: keepScreenOn,
+      autoTurnSeconds: autoTurnSeconds.isFinite
+          ? autoTurnSeconds.round().clamp(3, 60)
+          : 10,
+      listeningFollow: listeningFollow,
+      narrationHighlight: narrationHighlight,
+      narrationHighlightColor: narrationHighlightColor,
+      narrationHighlightStyle: narrationHighlightStyle,
+      dialogueHighlight: dialogueHighlight,
+      dialogueHighlightStyle: dialogueHighlightStyle,
+      continuousReading: continuousReading,
+      scrollChapterMode: scrollChapterMode,
+      einkRefreshInterval: einkRefreshInterval.clamp(0, 100),
+      instantSwipeTurn: instantSwipeTurn,
+      tapLeftTurnsNext: tapLeftTurnsNext,
+      tapZones: ensureReaderTapZonesHaveMenu(tapZones),
+      showParagraphBubbles: showParagraphBubbles,
+      showVideoButton: showVideoButton,
+      videoChapterSync: videoChapterSync,
+    );
+  }
+
+  static Future<ReaderPreferences> load() async {
+    await _writes;
+    final preferences = await SharedPreferences.getInstance();
+    final rawPreset = preferences.get(_themePresetKey);
+    final preset = ReaderThemePreset.values.firstWhere(
+      (value) => value.name == rawPreset,
+      orElse: () => ReaderThemePreset.light,
+    );
+    return ReaderPreferences(
+      fontSize: _number(preferences, _fontSizeKey) ?? 18,
+      fontWeight: (_number(preferences, _fontWeightKey) ?? 400).round(),
+      lineHeight: _number(preferences, _lineHeightKey) ?? 1.8,
+      paragraphSpacing: _number(preferences, _paragraphSpacingKey) ?? 12,
+      horizontalPadding: _number(preferences, _horizontalPaddingKey) ?? 20,
+      themePreset: preset,
+      letterSpacing: _number(preferences, _letterSpacingKey) ?? 0,
+      verticalPadding: _number(preferences, _verticalPaddingKey) ?? 16,
+      titleSize:
+          _number(preferences, _titleSizeKey) ??
+          ((_number(preferences, _fontSizeKey) ?? 18) + 2),
+      titleAlignment: ReaderTitleAlignment.values.firstWhere(
+        (value) => value.name == preferences.get(_titleAlignmentKey),
+        orElse: () => ReaderTitleAlignment.start,
+      ),
+      readingInfoMode: ReaderInfoMode.values.firstWhere(
+        (mode) => mode.name == preferences.get(_readingInfoModeKey),
+        orElse: () => _boolean(preferences, _showReadingInfoKey) == false
+            ? ReaderInfoMode.hidden
+            : ReaderInfoMode.compact,
+      ),
+      showSystemStatusBar:
+          _boolean(preferences, _showSystemStatusBarKey) ?? true,
+      showSystemNavigationBar:
+          _boolean(preferences, _showSystemNavigationBarKey) ?? false,
+      followSystemBrightness:
+          _boolean(preferences, _followSystemBrightnessKey) ?? true,
+      brightness: _number(preferences, _brightnessKey) ?? 0.5,
+      fontPath: _string(preferences, _fontPathKey),
+      fontName: _string(preferences, _fontNameKey),
+      pageMode: ReaderPageMode.values.firstWhere(
+        (value) => value.name == preferences.get(_pageModeKey),
+        orElse: () => ReaderPageMode.paged,
+      ),
+      pageTurnStyle: ReaderPageTurnStyle.values.firstWhere(
+        (value) => value.name == preferences.get(_pageTurnStyleKey),
+        orElse: () => ReaderPageTurnStyle.slide,
+      ),
+      volumeKeyTurn: _boolean(preferences, _volumeKeyTurnKey) ?? false,
+      keepScreenOn: _boolean(preferences, _keepScreenOnKey) ?? false,
+      autoTurnSeconds: (_number(preferences, _autoTurnSecondsKey) ?? 10)
+          .round()
+          .clamp(3, 60),
+      listeningFollow: _boolean(preferences, _listeningFollowKey) ?? true,
+      narrationHighlight: _boolean(preferences, _narrationHighlightKey) ?? true,
+      narrationHighlightColor: _number(
+        preferences,
+        _narrationHighlightColorKey,
+      )?.toInt(),
+      narrationHighlightStyle: _number(
+        preferences,
+        _narrationHighlightStyleKey,
+      )?.toInt(),
+      dialogueHighlight: _boolean(preferences, _dialogueHighlightKey) ?? false,
+      dialogueHighlightStyle: ReaderDialogueHighlightStyle.values.firstWhere(
+        (style) => style.name == preferences.get(_dialogueHighlightStyleKey),
+        orElse: () => ReaderDialogueHighlightStyle.automatic,
+      ),
+      continuousReading: _boolean(preferences, _continuousReadingKey) ?? true,
+      scrollChapterMode: ReaderScrollChapterMode.values.firstWhere(
+        (mode) => mode.name == preferences.getString(_scrollChapterModeKey),
+        orElse: () => ReaderScrollChapterMode.joined,
+      ),
+      einkRefreshInterval: (_number(preferences, _einkRefreshIntervalKey) ?? 10)
+          .round(),
+      instantSwipeTurn: _boolean(preferences, _instantSwipeTurnKey) ?? false,
+      tapLeftTurnsNext: _boolean(preferences, _tapLeftTurnsNextKey) ?? false,
+      tapZones: _tapZones(preferences),
+      showParagraphBubbles:
+          _boolean(preferences, _showParagraphBubblesKey) ?? true,
+      showVideoButton: _boolean(preferences, _showVideoButtonKey) ?? true,
+      videoChapterSync: _boolean(preferences, _videoChapterSyncKey) ?? true,
+    ).normalized();
+  }
+
+  Future<void> save() {
+    final snapshot = normalized();
+    final previous = _writes ?? Future<void>.value();
+    final write = previous.then((_) => snapshot._write());
+    final settled = write.catchError((Object _) {});
+    _writes = settled;
+    return write.whenComplete(() {
+      if (identical(_writes, settled)) _writes = null;
+    });
+  }
+
+  Future<void> _write() async {
+    final preferences = await SharedPreferences.getInstance();
+    final value = normalized();
+    await Future.wait<bool>([
+      preferences.setDouble(_fontSizeKey, value.fontSize),
+      preferences.setInt(_fontWeightKey, value.fontWeight),
+      preferences.setDouble(_lineHeightKey, value.lineHeight),
+      preferences.setDouble(_paragraphSpacingKey, value.paragraphSpacing),
+      preferences.setDouble(_horizontalPaddingKey, value.horizontalPadding),
+      preferences.setString(_themePresetKey, value.themePreset.name),
+      preferences.setDouble(_letterSpacingKey, value.letterSpacing),
+      preferences.setDouble(_verticalPaddingKey, value.verticalPadding),
+      preferences.setDouble(_titleSizeKey, value.titleSize),
+      preferences.setString(_titleAlignmentKey, value.titleAlignment.name),
+      preferences.setBool(_showReadingInfoKey, value.showReadingInfo),
+      preferences.setString(_readingInfoModeKey, value.readingInfoMode.name),
+      preferences.setBool(_showSystemStatusBarKey, value.showSystemStatusBar),
+      preferences.setBool(
+        _showSystemNavigationBarKey,
+        value.showSystemNavigationBar,
+      ),
+      preferences.setBool(
+        _followSystemBrightnessKey,
+        value.followSystemBrightness,
+      ),
+      preferences.setDouble(_brightnessKey, value.brightness),
+      preferences.setString(_fontPathKey, value.fontPath),
+      preferences.setString(_fontNameKey, value.fontName),
+      preferences.setString(_pageModeKey, value.pageMode.name),
+      preferences.setString(_pageTurnStyleKey, value.pageTurnStyle.name),
+      preferences.setBool(_volumeKeyTurnKey, value.volumeKeyTurn),
+      preferences.setBool(_keepScreenOnKey, value.keepScreenOn),
+      preferences.setInt(_autoTurnSecondsKey, value.autoTurnSeconds),
+      preferences.setBool(_listeningFollowKey, value.listeningFollow),
+      preferences.setBool(_narrationHighlightKey, value.narrationHighlight),
+      if (value.narrationHighlightColor == null)
+        preferences.remove(_narrationHighlightColorKey)
+      else
+        preferences.setInt(
+          _narrationHighlightColorKey,
+          value.narrationHighlightColor!,
+        ),
+      if (value.narrationHighlightStyle == null)
+        preferences.remove(_narrationHighlightStyleKey)
+      else
+        preferences.setInt(
+          _narrationHighlightStyleKey,
+          value.narrationHighlightStyle!,
+        ),
+      preferences.setBool(_dialogueHighlightKey, value.dialogueHighlight),
+      preferences.setString(
+        _dialogueHighlightStyleKey,
+        value.dialogueHighlightStyle.name,
+      ),
+      preferences.setBool(_continuousReadingKey, value.continuousReading),
+      preferences.setString(
+        _scrollChapterModeKey,
+        value.scrollChapterMode.name,
+      ),
+      preferences.setInt(_einkRefreshIntervalKey, value.einkRefreshInterval),
+      preferences.setBool(_instantSwipeTurnKey, value.instantSwipeTurn),
+      preferences.setBool(_tapLeftTurnsNextKey, value.tapLeftTurnsNext),
+      preferences.setStringList(
+        _tapZonesKey,
+        encodeReaderTapZones(value.tapZones),
+      ),
+      preferences.setBool(_showParagraphBubblesKey, value.showParagraphBubbles),
+      preferences.setBool(_showVideoButtonKey, value.showVideoButton),
+      preferences.setBool(_videoChapterSyncKey, value.videoChapterSync),
+    ]);
+  }
+}

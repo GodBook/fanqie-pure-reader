@@ -1,0 +1,756 @@
+import 'platform_channel.dart';
+import 'dart:async';
+
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/media_item.dart';
+import '../models/text_replacement_rule.dart';
+import 'text_replacement_engine.dart';
+import 'text_replacement_store.dart';
+import 'api_client.dart';
+import 'audio_preferences.dart';
+import 'backend_transport.dart';
+import 'chapter_cache_store.dart';
+import 'chapter_text_formatter.dart';
+import 'listening_session.dart';
+import 'narration_sentence.dart';
+import 'native_player.dart';
+
+class SystemTtsEngine {
+  const SystemTtsEngine(this.package, this.label);
+  final String package;
+  final String label;
+}
+
+class SystemTts {
+  static const _channel = AppMethodChannel('fqapp/system_tts');
+  static const _events = AppEventChannel('fqapp/system_tts_events');
+  static final events = _events.receiveBroadcastStream();
+
+  static Future<T?> _call<T>(String method, [Object? arguments]) => _channel
+      .invokeMethod<T>(method, arguments)
+      .timeout(const Duration(seconds: 20));
+
+  static Future<({List<SystemTtsEngine> engines, String? defaultEngine})>
+  engines() async {
+    final data = await _call<Map<Object?, Object?>>('engines');
+    return (
+      engines: [
+        for (final item in (data?['engines'] as List? ?? const []))
+          if (item is Map)
+            SystemTtsEngine(item['package'] as String, item['label'] as String),
+      ],
+      defaultEngine: data?['defaultEngine'] as String?,
+    );
+  }
+
+  static Future<int> initialize(SystemTtsPreferences prefs) async =>
+      await _call<int>('initialize', {
+        'engine': prefs.engine,
+        'rate': prefs.rate,
+      }) ??
+      4000;
+
+  /// Speaks [text] as utterance [id]. [queue] appends it behind the utterance
+  /// already playing instead of cutting it off, which is what lets one sentence
+  /// follow the previous one without a gap.
+  static Future<void> speak(String text, String id, {bool queue = false}) =>
+      _call<void>('speak', {'text': text, 'id': id, 'queue': queue});
+  static Future<void> stop() => _call<void>('stop');
+
+  /// Stops the engine but **keeps** the audio focus: a pause must not abandon
+  /// the focus, or the system never sends the GAIN that follows a call, and
+  /// `focus_resume` can never bring the narration back.
+  static Future<void> pause() => _call<void>('pause');
+  static Future<void> shutdown() => _call<void>('shutdown');
+  static Future<void> openSettings() => _call<void>('settings');
+
+  static String errorMessage(Object error) => switch (error) {
+    PlatformException(:final message) => message ?? '系统朗读失败，请检查引擎配置',
+    MissingPluginException() => '当前平台不支持系统朗读',
+    TimeoutException() => '朗读响应超时，请重试或更换引擎',
+    StateError(:final message) => message,
+    _ => '无法加载正文或朗读引擎，请重试',
+  };
+}
+
+class SystemTtsPreferences {
+  const SystemTtsPreferences({this.engine, this.rate = 1});
+  final String? engine;
+  final double rate;
+
+  static Future<SystemTtsPreferences> load() async {
+    final sp = await SharedPreferences.getInstance();
+    final rate = sp.getDouble('system_tts_rate') ?? 1;
+    return SystemTtsPreferences(
+      engine: sp.getString('system_tts_engine'),
+      rate: rate.isFinite ? rate.clamp(0.5, 3) : 1,
+    );
+  }
+
+  Future<void> save() async {
+    final sp = await SharedPreferences.getInstance();
+    if (engine == null) {
+      await sp.remove('system_tts_engine');
+    } else {
+      await sp.setString('system_tts_engine', engine!);
+    }
+    await sp.setDouble('system_tts_rate', rate);
+  }
+}
+
+/// All sources are data/store references. No reader State or BuildContext is
+/// retained when loading the following chapter after the reader has closed.
+class SystemTtsBook {
+  SystemTtsBook({
+    required this.bookId,
+    required this.title,
+    this.coverUrl = '',
+    required List<Chapter> chapters,
+    required this.startIndex,
+    required this.initialContent,
+    this.startOffset = 0,
+    this.localOnly = false,
+    this.textLoader,
+    this.cache,
+    TextReplacementSnapshot? replacementSnapshot,
+    TextReplacementStore? replacementStore,
+    this.displayResolver,
+  }) : replacementStore = replacementStore ?? TextReplacementStore.instance,
+       replacementSnapshot =
+           replacementSnapshot ??
+           (replacementStore ?? TextReplacementStore.instance).snapshot,
+       chapters = List.unmodifiable(chapters);
+
+  final String bookId;
+  final String title;
+
+  /// 当前书的封面地址：交给 `ListenKeepAliveService` 当通知大图与媒体卡封面，
+  /// 与听书走同一条通路（官方 `dn2/i.java` 的 `setLargeIcon`）。空串时退回
+  /// 应用图标。
+  final String coverUrl;
+
+  final List<Chapter> chapters;
+  final int startIndex;
+  final ChapterContent initialContent;
+  final int startOffset;
+  final bool localOnly;
+  final Future<String> Function(Chapter)? textLoader;
+  final ChapterCache? cache;
+  final TextReplacementSnapshot replacementSnapshot;
+  final TextReplacementStore replacementStore;
+
+  /// Optional final-display resolver shared with the reader. When present it
+  /// must return a result whose `source` is [content] (the immutable original)
+  /// and whose `content` is the AI/custom display text.
+  final Future<TextReplacementResult> Function(
+    ChapterContent content,
+    int index,
+  )?
+  displayResolver;
+
+  Future<TextReplacementResult> loadDisplay(
+    int index, {
+    BackendRequest? request,
+    TextReplacementCancellation? cancellation,
+  }) async {
+    final content = await load(index, request: request);
+    final resolver = displayResolver;
+    if (resolver != null) return resolver(content, index);
+    return TextReplacementEngine.instance.transform(
+      source: content,
+      chapterTitle: chapters[index].title,
+      snapshot: replacementSnapshot,
+      cancellation: cancellation,
+    );
+  }
+
+  Future<ChapterContent> load(int index, {BackendRequest? request}) async {
+    if (index == startIndex) return initialContent;
+    final chapter = chapters[index];
+    final loader = textLoader;
+    if (localOnly) {
+      if (loader == null) throw StateError('本地书籍正文不可用');
+      return ChapterContent.fromCacheText(await loader(chapter));
+    }
+    try {
+      final cached = await (cache ?? ChapterCacheStore.instance).read(
+        bookId: bookId,
+        chapterId: chapter.itemId,
+      );
+      if (cached != null) {
+        final content = ChapterContent.fromCacheText(cached);
+        if (!content.withoutLeadingTitle(chapter.title).isEmpty) return content;
+      }
+    } catch (_) {
+      // Online novels retain their normal network fallback on a cache miss.
+    }
+    if (loader != null) {
+      return ChapterContent.fromCacheText(await loader(chapter));
+    }
+    if (request?.isCancelled ?? false) throw BackendRequestAborted('已停止朗读');
+    return ApiClient.instance.withCancellation(
+      request ?? BackendRequest(),
+      () => ApiClient.instance.chapterContent(chapter.itemId),
+    );
+  }
+
+  static String plainText(ChapterContent content, String title) => content
+      .withoutLeadingTitle(title)
+      .blocks
+      .whereType<ChapterParagraph>()
+      .map((p) => p.text)
+      .join('\n');
+}
+
+// Note: .agents/notes/implemented/feature/2026-10-15-system-tts.md
+// The scope serializes ownership. Generations cancel deferred loads/play, and
+// utterance IDs reject late callbacks after pause, chapter changes or shutdown.
+class SystemTtsPlayback extends ChangeNotifier with WidgetsBindingObserver {
+  SystemTtsPlayback(this.book, {required this.beforePlay, required this.onStop})
+    : index = book.startIndex;
+
+  final SystemTtsBook book;
+  final Future<void> Function() beforePlay;
+  final VoidCallback onStop;
+  int index;
+  bool loading = false;
+  bool wantPlay = false;
+  // 上次暂停是被系统临时抢焦点（来电、导航）造成的：焦点交还时收到
+  // focus_resume 就自动续播。用户手动暂停会清掉它，电话里自己停下的
+  // 不会被误恢复。
+  bool _resumeOnFocusGain = false;
+  // 焦点已交还（收到 focus_resume），但当时 app 还在后台、不允许出声：
+  // 记下来等回到前台再补。否则 resume() 的 _allowed 闸会把它直接吞掉。
+  bool _pendingFocusResume = false;
+  bool closed = false;
+  bool completed = false;
+  String? error;
+  String _text = '';
+  int _offset = 0;
+  int _pieceStart = 0;
+  int _pieceEnd = 0;
+  int _generation = 0;
+  int _serial = 0;
+  int _maxLength = 300;
+
+  /// Utterances already handed to the engine, keyed by utterance id. One
+  /// sentence each: most Chinese voices never report progress inside an
+  /// utterance, so the sentence is the finest wash the reader can get.
+  final Map<String, ({int start, int end})> _queued = {};
+
+  /// Id of the utterance the engine has started. Events from utterances still
+  /// waiting in its queue must not move the highlight.
+  String? _speakingId;
+
+  /// First character not yet handed to the engine.
+  int _cursor = 0;
+
+  /// The next `speak` must replace the engine queue instead of appending.
+  bool _flushing = true;
+  bool _ready = false;
+  bool _started = false;
+
+  /// Whether the current piece has reported an `onRangeStart`. This no longer
+  /// decides the wash — a piece is one sentence — but it keeps [_offset]
+  /// tracking the voice inside a long sentence, so progress and the follow
+  /// page do not lag behind by a whole sentence.
+  bool _rangeSeen = false;
+  bool _rangeCapable = false;
+  bool _appActive = true;
+  StreamSubscription<dynamic>? _subscription;
+  Future<void> _notificationQueue = Future<void>.value();
+  Future<void> _pumps = Future<void>.value();
+  Future<void> _engineQueue = Future<void>.value();
+  Future<void>? _closeFuture;
+  BackendRequest? _loadRequest;
+  TextReplacementCancellation? _replacementCancellation;
+
+  Chapter get chapter => book.chapters[index];
+  double get progress =>
+      _text.isEmpty ? 0 : (_offset / _text.length).clamp(0, 1);
+  bool get _allowed =>
+      _appActive || AudioPreferences.instance.backgroundPlayback.value;
+
+  void start() {
+    if (_started || closed) return;
+    _started = true;
+    // Rule updates can occur while this book waits for history or ownership,
+    // before this session has subscribed to future changes.
+    if (book.replacementStore.snapshot.revision !=
+        book.replacementSnapshot.revision) {
+      _replacementChanged();
+      return;
+    }
+    WidgetsBinding.instance.addObserver(this);
+    book.replacementStore.changes.addListener(_replacementChanged);
+    _appActive =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    AudioPreferences.instance.backgroundPlayback.addListener(
+      _preferencesChanged,
+    );
+    _subscription = SystemTts.events.listen(
+      _event,
+      onError: (Object e) {
+        if (!closed) unawaited(_fail(e));
+      },
+    );
+    NativePlayer.setRemoteCommandHandler(
+      onAction: (action) {
+        if (closed) return;
+        switch (action) {
+          case 'playPause':
+            unawaited(toggle());
+          case 'prev':
+            unawaited(openChapter(index - 1));
+          case 'next':
+            unawaited(openChapter(index + 1));
+          case 'stop':
+            onStop();
+        }
+      },
+    );
+    unawaited(openChapter(index, offset: book.startOffset));
+  }
+
+  Future<void> openChapter(int next, {int offset = 0}) async {
+    if (closed || next < 0 || next >= book.chapters.length) return;
+    final token = ++_generation;
+    _loadRequest?.cancel();
+    _replacementCancellation?.cancel();
+    final cancellation = _replacementCancellation =
+        TextReplacementCancellation();
+    final request = _loadRequest = BackendRequest();
+    _resetQueue(_offset);
+    wantPlay = _allowed;
+    loading = true;
+    completed = false;
+    error = null;
+    index = next;
+    _text = '';
+    // The old piece belongs to the previous chapter's coordinates; keeping it
+    // would let the reader paint a range that now points into other text.
+    _pieceStart = 0;
+    _pieceEnd = 0;
+    _offset = offset;
+    _publish();
+    try {
+      await _engineCall<void>(() => SystemTts.stop());
+      if (closed || token != _generation) return;
+      final content = await book
+          .loadDisplay(next, request: request, cancellation: cancellation)
+          .timeout(
+            const Duration(seconds: 30),
+            onTimeout: () {
+              request.cancel();
+              throw TimeoutException('正文加载超时');
+            },
+          );
+      if (closed || token != _generation) return;
+      _text = content
+          .bodyBlocks(chapter.title)
+          .whereType<ChapterParagraph>()
+          .map((p) => p.text)
+          .join('\n');
+      if (_text.trim().isEmpty) throw StateError('本章没有可朗读的文字');
+      _offset = _safeOffset(_offset.clamp(0, _text.length));
+      loading = false;
+      if (wantPlay) {
+        await _begin(token);
+      } else {
+        _publish();
+      }
+    } catch (e) {
+      if (!closed && token == _generation) await _fail(e);
+    } finally {
+      if (identical(_loadRequest, request)) _loadRequest = null;
+    }
+  }
+
+  Future<void> _begin(int token) async {
+    await beforePlay();
+    if (!_current(token)) return;
+    if (!_ready) {
+      loading = true;
+      _publish();
+      final prefs = await SystemTtsPreferences.load();
+      if (!_current(token)) return;
+      // A pending pause/stop must land before a new engine starts, but the
+      // initialization itself stays cancellable: pause() must not wait for a
+      // slow engine handshake before it can invalidate this generation.
+      await _engineQueue;
+      if (!_current(token)) return;
+      _maxLength = (await SystemTts.initialize(prefs)).clamp(2, 300);
+      if (!_current(token)) return;
+      _ready = true;
+    }
+    loading = false;
+    _resetQueue(_offset);
+    _schedulePump(token);
+    await _pumps;
+  }
+
+  bool _current(int token) =>
+      !closed && token == _generation && wantPlay && _allowed;
+
+  int _safeOffset(int offset) {
+    if (offset > 0 && offset < _text.length) {
+      final unit = _text.codeUnitAt(offset);
+      if (unit >= 0xdc00 && unit <= 0xdfff) return offset - 1;
+    }
+    return offset;
+  }
+
+  /// Drops the engine side of the session and rewinds the enqueue cursor.
+  void _resetQueue(int offset) {
+    _queued.clear();
+    _speakingId = null;
+    _cursor = offset;
+    _flushing = true;
+  }
+
+  /// Keeps the engine queue one sentence ahead of the voice.
+  ///
+  /// Speaking a sentence and waiting for `done` before the next one leaves an
+  /// audible hole every few seconds, so the next utterance is appended while
+  /// the current one plays. One ahead is enough to hide the start latency and
+  /// still stops promptly.
+  Future<void> _pump(int token) async {
+    // Re-checked per sentence: a pause inside the loop must not enqueue more.
+    while (_current(token) && _queued.length < 2) {
+      final range = nextSentenceRange(_text, _cursor, maxLength: _maxLength);
+      if (range == null) return;
+      _cursor = range.end;
+      final id = '${identityHashCode(this)}-${++_serial}';
+      _queued[id] = range;
+      final flush = _flushing;
+      if (flush) {
+        _flushing = false;
+        // The first utterance of a position is the one that will speak, so it
+        // owns the reader from here on: some engines never fire `onStart`, and
+        // their range callbacks would otherwise have no owner to attach to.
+        _show(id, range);
+        // Android 15+ requires foreground eligibility before requesting audio
+        // focus.
+        await _notificationQueue;
+        if (!_current(token) || !_queued.containsKey(id)) return;
+      }
+      await _engineCall<void>(
+        () => SystemTts.speak(
+          _text.substring(range.start, range.end),
+          id,
+          queue: !flush,
+        ),
+      );
+      if (!_current(token)) return;
+    }
+  }
+
+  /// Speak/pause/stop calls share one queue so a late pause/stop can never land
+  /// after the next resume's speak and silence it.
+  Future<T> _engineCall<T>(Future<T> Function() call) {
+    final next = _engineQueue.then((_) => call());
+    _engineQueue = next.then<void>((_) {}).catchError((Object _) {});
+    return next;
+  }
+
+  /// Serializes [_pump]. Two overlapping runs would append a sentence behind
+  /// the one a pending flush is about to replace: the engine drops it and the
+  /// reader waits for a `done` that never comes.
+  void _schedulePump(int token) {
+    _pumps = _pumps.then((_) => _pump(token)).catchError((Object e) async {
+      if (!closed && token == _generation) await _fail(e);
+    });
+  }
+
+  /// Points the reader at [id] and publishes its sentence.
+  void _show(String id, ({int start, int end}) range) {
+    if (_rangeSeen) _rangeCapable = true;
+    _rangeSeen = false;
+    _speakingId = id;
+    _pieceStart = range.start;
+    _pieceEnd = range.end;
+    _offset = range.start;
+    _publish();
+  }
+
+  MapEntry<String, ({int start, int end})>? _earliest() {
+    MapEntry<String, ({int start, int end})>? best;
+    for (final entry in _queued.entries) {
+      if (best == null || entry.value.start < best.value.start) best = entry;
+    }
+    return best;
+  }
+
+  Future<void> _advance(int token) async {
+    if (!_current(token)) return;
+    if (index + 1 < book.chapters.length) {
+      await openChapter(index + 1);
+    } else {
+      completed = true;
+      await pause();
+    }
+  }
+
+  void _event(dynamic value) {
+    if (closed || value is! Map) return;
+    if (value['type'] == 'interrupted') {
+      // 旧事件没有 keepFocus 字段，按临时打断处理以兼容既有调用方。
+      if (value['keepFocus'] == false) {
+        unawaited(_stopForFocusLoss());
+      } else {
+        // 焦点被临时抢走（来电、导航提示）：停朗读但**不弃焦点**，等系统
+        // 交还焦点时的 focus_resume 自动续播。带不带 id 都一样处理。
+        unawaited(_pauseForInterruption());
+      }
+      return;
+    }
+    if (value['type'] == 'engine_stopped') {
+      unawaited(_fail(StateError('朗读引擎已停止，请重试')));
+      return;
+    }
+    if (value['type'] == 'focus_resume') {
+      if (!_resumeOnFocusGain) return;
+      if (_allowed) {
+        _resumeOnFocusGain = false;
+        unawaited(resume());
+      } else {
+        // 挂断那一下人还在通话界面或锁屏上：等回到前台再补。
+        _pendingFocusResume = true;
+      }
+      return;
+    }
+    final id = value['id'];
+    if (id is! String) return;
+    final range = _queued[id];
+    // A queued utterance that has not started yet, or a callback from the
+    // piece that is already behind us: neither may move the reader.
+    if (range == null && id != _speakingId) return;
+    switch (value['type']) {
+      case 'start':
+        if (range != null) _show(id, range);
+        _schedulePump(_generation);
+      case 'range':
+        final start = value['start'];
+        if (range == null ||
+            id != _speakingId ||
+            start is! int ||
+            start < 0 ||
+            start >= range.end - range.start) {
+          return;
+        }
+        _rangeSeen = true;
+        _offset = _safeOffset(range.start + start);
+        _publish(notification: false);
+      case 'done':
+        _queued.remove(id);
+        if (_speakingId == id) _speakingId = null;
+        if (range != null) _offset = range.end;
+        // Engines that never call `onRangeStart` still fire `done`, so the
+        // highlight is advanced here as well — the next sentence is already
+        // playing by the time this lands.
+        final next = _earliest();
+        if (next != null) {
+          _show(next.key, next.value);
+        } else if (nextSentenceRange(_text, _cursor, maxLength: _maxLength) ==
+            null) {
+          final token = _generation;
+          unawaited(_advance(token));
+          return;
+        }
+        _schedulePump(_generation);
+      case 'error':
+        unawaited(_fail(StateError('引擎朗读失败，请检查音色或网络后重试')));
+    }
+  }
+
+  Future<void> toggle() => wantPlay ? pause() : resume();
+
+  Future<void> resume() async {
+    if (closed || wantPlay || !_allowed) return;
+    _pendingFocusResume = false;
+    _resumeOnFocusGain = false;
+    if (_text.isEmpty) {
+      await openChapter(index, offset: _offset);
+      return;
+    }
+    final token = ++_generation;
+    wantPlay = true;
+    error = null;
+    if (completed) {
+      _offset = 0;
+      completed = false;
+    }
+    try {
+      await _begin(token);
+    } catch (e) {
+      if (!closed && token == _generation) await _fail(e);
+    }
+  }
+
+  /// 用户主动暂停（阅读页胶囊、听书面板的暂停钮）。
+  ///
+  /// 和被打断不一样：用户按停之后可能去放音乐、打游戏，这时还占着音频焦点
+  /// 会让蓝牙播放键、媒体通知都指向这个已经停下的朗读。所以这里照旧 `stop()`，
+  /// 把焦点交还；`_pauseForInterruption` 才保留焦点等系统交还后自动续播。
+  Future<void> pause() async {
+    if (closed) return;
+    // 用户（或任何非焦点路径）主动暂停：清掉「挂断后自动续播」的意图，
+    // 电话里自己按停的，挂断后不会被复活。
+    _resumeOnFocusGain = false;
+    _pendingFocusResume = false;
+    await _halt(keepFocus: false);
+  }
+
+  /// 焦点被临时抢走（来电、导航提示）造成的暂停：记下打断前是否在播，
+  /// 焦点交还（focus_resume）时据此续播。用户手动暂停会清掉这个意图。
+  Future<void> _pauseForInterruption() async {
+    if (closed || (!wantPlay && !loading)) return;
+    if (wantPlay) _resumeOnFocusGain = true;
+    await _halt(keepFocus: true);
+  }
+
+  /// 永久丢失焦点（其他应用接管媒体音频、拔耳机）后不能等 GAIN：旧焦点
+  /// 已经交还，系统不会再发恢复事件。下次播放必须重新初始化引擎并重新
+  /// 申请焦点，否则在线引擎可能继续“成功”朗读但实际没有输出。
+  Future<void> _stopForFocusLoss() async {
+    if (closed) return;
+    _resumeOnFocusGain = false;
+    _pendingFocusResume = false;
+    _ready = false;
+    await _halt(keepFocus: false);
+  }
+
+  /// [keepFocus] 为真时停朗读但**不放弃音频焦点**：一旦弃了，系统在对方
+  /// 说完后就不会再发 GAIN，自动续播永远等不到。只有「被打断」这一种暂停
+  /// 需要它；用户手动暂停与出错停下都交还焦点。
+  Future<void> _halt({required bool keepFocus}) async {
+    ++_generation;
+    _loadRequest?.cancel();
+    _resetQueue(_offset);
+    wantPlay = false;
+    loading = false;
+    _publish();
+    try {
+      await _engineCall<void>(
+        () => keepFocus ? SystemTts.pause() : SystemTts.stop(),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _fail(Object e) async {
+    if (closed) return;
+    error = SystemTts.errorMessage(e);
+    _ready = false;
+    await pause();
+  }
+
+  void _publish({bool notification = true}) {
+    if (closed) return;
+    ListeningSession.instance.update(
+      bookId: book.bookId,
+      chapterId: chapter.itemId,
+      chapterTitle: chapter.title,
+      position: Duration.zero,
+      duration: Duration.zero,
+      playing: wantPlay && !loading && error == null,
+      textProgress: progress,
+      textReplacementRevision: book.replacementSnapshot.revision,
+      sentenceRange: sentenceHighlightRange(
+        _text,
+        offset: _offset,
+        pieceStart: _pieceStart,
+        pieceEnd: _pieceEnd,
+        precise: _rangeCapable || _rangeSeen,
+      ),
+    );
+    notifyListeners();
+    if (notification) {
+      _notificationQueue = _notificationQueue.then((_) async {
+        if (closed) return;
+        if (!AudioPreferences.instance.backgroundPlayback.value) {
+          await NativePlayer.stopListenForeground();
+        } else {
+          await NativePlayer.startListenForeground(
+            title: book.title,
+            episode: '系统朗读 · ${chapter.title}',
+            coverUrl: book.coverUrl,
+            playing: wantPlay && !loading && error == null,
+            hasPrev: index > 0,
+            hasNext: index + 1 < book.chapters.length,
+          );
+        }
+      });
+    }
+  }
+
+  void _replacementChanged() {
+    if (closed ||
+        book.replacementStore.snapshot.revision ==
+            book.replacementSnapshot.revision) {
+      return;
+    }
+    // The owner also closes this session; close() is idempotent.
+    unawaited(close());
+    onStop();
+  }
+
+  void _preferencesChanged() {
+    if (closed) return;
+    if (!_allowed) {
+      unawaited(pause());
+    } else {
+      _publish();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appActive = state == AppLifecycleState.resumed;
+    if (!_allowed) {
+      // 切后台不是用户想停朗读（电话期间几乎必然走这一条）：按系统打断
+      // 处理，等回到前台时若有欠下的 focus_resume 就补上续播。
+      unawaited(_pauseForInterruption());
+    } else if (_pendingFocusResume) {
+      _pendingFocusResume = false;
+      if (_resumeOnFocusGain) {
+        _resumeOnFocusGain = false;
+        unawaited(resume());
+      }
+    }
+  }
+
+  Future<void> close() => _closeFuture ??= _close();
+
+  Future<void> _close() async {
+    closed = true;
+    _replacementCancellation?.cancel();
+    book.replacementStore.changes.removeListener(_replacementChanged);
+    ++_generation;
+    _loadRequest?.cancel();
+    _resetQueue(_offset);
+    wantPlay = false;
+    WidgetsBinding.instance.removeObserver(this);
+    AudioPreferences.instance.backgroundPlayback.removeListener(
+      _preferencesChanged,
+    );
+    NativePlayer.clearRemoteCommandHandler();
+    ListeningSession.instance.clear();
+    notifyListeners();
+    // Do not await the EventChannel cancel: awaiting a platform-stream
+    // subscription cancel stalls every later await in this zone (widget
+    // tests hang in shutdown below), so fire it and forget it. Late events
+    // are already ignored because `closed` is set above.
+    unawaited(_subscription?.cancel());
+    _subscription = null;
+    try {
+      await _engineCall<void>(() => SystemTts.shutdown());
+    } catch (_) {}
+    await _notificationQueue;
+    await NativePlayer.stopListenForeground();
+    dispose();
+  }
+}

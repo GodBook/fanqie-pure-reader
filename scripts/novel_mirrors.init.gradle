@@ -1,0 +1,21 @@
+// Task-local mirrors also cover Flutter's included Gradle build. No shared
+// Flutter SDK or machine-wide Gradle configuration is modified.
+if (System.getenv('FQAPP_GRADLE_OFFLINE')?.equalsIgnoreCase('true')) {
+    gradle.startParameter.offline = true
+}
+beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven { url = uri('https://maven.aliyun.com/repository/gradle-plugin') }
+        maven { url = uri('https://maven.aliyun.com/repository/google') }
+        maven { url = uri('https://maven.aliyun.com/repository/central') }
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+    settings.dependencyResolutionManagement.repositories {
+        maven { url = uri('https://maven.aliyun.com/repository/google') }
+        maven { url = uri('https://maven.aliyun.com/repository/central') }
+        google()
+        mavenCentral()
+    }
+}

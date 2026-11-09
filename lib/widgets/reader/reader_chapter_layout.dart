@@ -1,0 +1,1338 @@
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kProfileMode;
+
+import '../../services/chapter_text_formatter.dart';
+import '../../services/reader_preferences.dart';
+import '../../services/reader_dialogue.dart';
+import '../../services/ai_reading/ai_models.dart';
+import '../../services/text_replacement_engine.dart';
+import '../../services/reader_underline_store.dart';
+import 'reader_bubble.dart';
+import 'reader_illustration.dart';
+import '../../models/chapter_ideas.dart';
+import 'reader_text_selection.dart';
+import 'reader_theme.dart';
+
+/// Layout inputs exclude brightness and page mode, which do not change text.
+@immutable
+class ReaderLayoutSpec {
+  final Size viewport;
+  final TextScaler textScaler;
+  final TextStyle bodyStyle;
+  final TextStyle titleStyle;
+  final TextAlign titleAlign;
+  final double horizontalPadding;
+  final double verticalPadding;
+  final double paragraphSpacing;
+
+  ReaderLayoutSpec({
+    required this.viewport,
+    required this.textScaler,
+    required ReaderPreferences preferences,
+    required String? fontFamily,
+  }) : horizontalPadding = preferences.horizontalPadding,
+       verticalPadding = preferences.verticalPadding,
+       paragraphSpacing = preferences.paragraphSpacing,
+       titleAlign = preferences.titleAlignment == ReaderTitleAlignment.center
+           ? TextAlign.center
+           : TextAlign.start,
+       bodyStyle = TextStyle(
+         inherit: false,
+         color: preferences.themePreset.textColor,
+         fontFamily: fontFamily,
+         fontSize: preferences.fontSize,
+         fontWeight: FontWeight.values[preferences.fontWeight ~/ 100 - 1],
+         height: preferences.lineHeight,
+         letterSpacing: preferences.letterSpacing,
+         textBaseline: TextBaseline.alphabetic,
+       ),
+       titleStyle = TextStyle(
+         inherit: false,
+         color: preferences.themePreset.textColor,
+         fontFamily: fontFamily,
+         fontSize: preferences.titleSize,
+         fontWeight: FontWeight.w600,
+         height: 1.55,
+         letterSpacing: 0,
+         textBaseline: TextBaseline.alphabetic,
+       );
+
+  double get width => math.max(1, viewport.width - horizontalPadding * 2);
+  double get pagePadding => math.min(verticalPadding, viewport.height / 4);
+  double get pageHeight => math.max(1, viewport.height - pagePadding * 2);
+  double get navigationHeight => math.max(48, textScaler.scale(14) * 1.4 + 24);
+  double get footerHeight => navigationHeight + 12;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ReaderLayoutSpec &&
+      viewport == other.viewport &&
+      textScaler == other.textScaler &&
+      bodyStyle == other.bodyStyle &&
+      titleStyle == other.titleStyle &&
+      titleAlign == other.titleAlign &&
+      horizontalPadding == other.horizontalPadding &&
+      verticalPadding == other.verticalPadding &&
+      paragraphSpacing == other.paragraphSpacing;
+
+  @override
+  int get hashCode => Object.hash(
+    viewport,
+    textScaler,
+    bodyStyle,
+    titleStyle,
+    titleAlign,
+    horizontalPadding,
+    verticalPadding,
+    paragraphSpacing,
+  );
+}
+
+@immutable
+class ReaderTextLine {
+  final int start;
+  final int end;
+  final double top;
+  final double bottom;
+
+  const ReaderTextLine(this.start, this.end, this.top, this.bottom);
+
+  double get height => bottom - top;
+}
+
+@immutable
+class ReaderContentBlock {
+  final int index;
+  final String text;
+  final int start;
+  final int legacyStart;
+  final double top;
+  final double height;
+  final TextSpan span;
+  final TextAlign align;
+  final List<ReaderTextLine> lines;
+  final ChapterImage? illustration;
+
+  /// Upstream paragraph id, when the source carried one. Paragraph-comment
+  /// bubbles are keyed by this, not by the block's ordinal position.
+  ///
+  /// The 听书 timeline addresses text by this id too, so listen-along
+  /// highlighting resolves through it rather than through [index].
+  final int? paraIndex;
+
+  /// Inline `<blk>` boundaries of this paragraph, in reading order.
+  ///
+  /// `positionV2` from the audio timeline addresses text as
+  /// `(element index, offset inside that element)`, so turning it into a
+  /// paragraph offset needs these. Empty when the markup had no `<blk>` or the
+  /// paragraph was rewritten while parsing; callers then use the paragraph-level
+  /// offsets, which every point carries as well.
+  final List<ChapterBlkSpan> blkSpans;
+
+  /// Identity of this paragraph for local features (划线, the long-press menu):
+  /// [paraIndex] when the markup carried one, else an ordinal-derived id. The
+  /// title block has none — it is not a paragraph the user edits.
+  final int? textId;
+
+  /// Start of this paragraph's audio in the chapter, in milliseconds, when the
+  /// chapter shipped a spoken timeline. 从本段听 seeks to this.
+  final int? startMs;
+
+  /// Paragraph-comment count rendered as a bubble at the end of the last line;
+  /// null when the paragraph has none or the upstream gate did not pass.
+  final int? bubbleCount;
+
+  /// Which official mask the bubble uses; see [bubbleCount].
+  final ParagraphBubbleVariant? bubbleVariant;
+
+  /// Whether this paragraph carries a locally saved 划线.
+  final bool underlined;
+
+  const ReaderContentBlock({
+    required this.index,
+    required this.text,
+    required this.start,
+    required this.legacyStart,
+    required this.top,
+    required this.height,
+    required this.span,
+    required this.align,
+    required this.lines,
+    this.illustration,
+    this.paraIndex,
+    this.textId,
+    this.startMs,
+    this.bubbleCount,
+    this.bubbleVariant,
+    this.underlined = false,
+    this.blkSpans = const [],
+  });
+
+  int get end => start + text.length;
+  bool get isTitle => index == 0;
+  bool get isImage => illustration != null;
+  bool get hasBubble => bubbleCount != null;
+}
+
+/// Translates a TTS sentence range into layout display-text coordinates.
+///
+/// TTS text is the body paragraphs (title stripped, images excluded) joined
+/// by '\n'; the layout blocks are `[title, ...body]` with image blocks
+/// consuming layout space only (placeholder + separator). Walking the
+/// blocks while tracking the TTS cursor aligns the two spaces exactly,
+/// including chapters with illustrations. A range landing on a paragraph
+/// separator clamps to the previous paragraph's end; a range with no
+/// overlap returns null.
+({int start, int end})? narrationLayoutRange(
+  ReaderChapterLayout layout,
+  ({int start, int end}) ttsRange,
+) {
+  var ttsCursor = 0;
+  var layoutStart = -1;
+  var layoutEnd = -1;
+  for (var i = 1; i < layout.blocks.length; i++) {
+    final block = layout.blocks[i];
+    if (block.isImage) continue;
+    final ttsStart = ttsCursor;
+    final ttsEnd = ttsCursor + block.text.length;
+    final from = math.max(ttsRange.start, ttsStart) - ttsStart;
+    final to = math.min(ttsRange.end, ttsEnd) - ttsStart;
+    if (to > from) {
+      final start = block.start + from;
+      final end = block.start + to;
+      if (layoutStart < 0) layoutStart = start;
+      layoutEnd = end;
+    }
+    ttsCursor = ttsEnd + 1; // '\n' separator in TTS text.
+  }
+  if (layoutStart < 0) return null;
+  return (start: layoutStart, end: layoutEnd);
+}
+
+/// Maps a 听书 time-point range onto the layout's absolute character offsets.
+///
+/// The upstream addresses text by **paragraph id** (`<p idx="N">`, which the
+/// official client calls `IDragonParagraph.getId()`), not by display order, so
+/// the match goes through [ReaderContentBlock.paraIndex]. Display order and id
+/// order disagree whenever the markup holds marker-only or empty paragraphs —
+/// which is why counting paragraphs here lit the wrong text.
+/// Replacement maps translate the original paragraph offsets into display text.
+///
+/// Offsets are half-open here: the caller passes `endOffset + 1` because the
+/// upstream end offset is inclusive (official `toTargetTextBlock` does the same
+/// `+1`).
+///
+/// When [startElementIndex]/[startElementOffset] are supplied and the paragraph
+/// recorded its `<blk>` spans, the start is narrowed to that element:
+/// `positionV2` addresses text one level deeper than the paragraph.
+///
+/// Returns `null` when the point addresses nothing in this layout — a stale
+/// timeline, a title-only point, or a paragraph this chapter does not render.
+/// Callers treat that as "no highlight": a wrong highlight is worse than none.
+({int start, int end})? audioTimePointLayoutRange(
+  ReaderChapterLayout layout,
+  int startPara,
+  int startParaOff,
+  int endPara,
+  int endParaOff, {
+  int? startElementIndex,
+  int? startElementOffset,
+}) {
+  final from = _blockByParaId(layout, startPara);
+  final to = endPara == startPara ? from : _blockByParaId(layout, endPara);
+  if (from == null || to == null) return null;
+
+  final fromSource = layout._sourceBlocks[from.index];
+  final toSource = layout._sourceBlocks[to.index];
+  final startInPara = _paraOffset(
+    from,
+    startParaOff,
+    startElementIndex,
+    startElementOffset,
+  ).clamp(0, fromSource.text.length);
+  // A range that spans paragraphs lights from this paragraph's start offset to
+  // the last one's end offset; the single absolute span covers everything
+  // between them, which is what the reader paints.
+  final endInPara = endParaOff.clamp(0, toSource.text.length);
+
+  final start =
+      from.start +
+      (fromSource.map?.toDisplay(startInPara, bias: TextBoundaryBias.start) ??
+          startInPara);
+  final end =
+      to.start +
+      (toSource.map?.toDisplay(endInPara, bias: TextBoundaryBias.end) ??
+          endInPara);
+  if (end <= start) return null;
+  return (start: start, end: end);
+}
+
+/// The block whose upstream paragraph id is [paraId], if this layout renders it.
+ReaderContentBlock? _blockByParaId(ReaderChapterLayout layout, int paraId) {
+  for (final block in layout.blocks) {
+    if (block.isImage) continue;
+    if (block.paraIndex == paraId) return block;
+  }
+  return null;
+}
+
+/// Paragraph offset for a point, preferring the `positionV2` element when the
+/// paragraph recorded its `<blk>` boundaries.
+int _paraOffset(
+  ReaderContentBlock block,
+  int paraOffset,
+  int? elementIndex,
+  int? elementOffset,
+) {
+  final spans = block.blkSpans;
+  // element_index < 0 means the upstream sent no element coordinate, and in that
+  // case element_offset already is the paragraph offset (official `S(-1, x)`
+  // returns x unchanged).
+  if (spans.isEmpty || elementIndex == null || elementIndex < 0) {
+    return paraOffset;
+  }
+  final offset = elementOffset ?? 0;
+  for (final span in spans) {
+    if (span.elementIndex < elementIndex) continue;
+    if (span.elementIndex == elementIndex) {
+      return span.start + offset.clamp(0, span.length);
+    }
+    break;
+  }
+  // The element is not in this paragraph: trust the paragraph-level offset,
+  // which the upstream sends alongside every positionV2.
+  return paraOffset;
+}
+
+/// A slice retains its original paragraph layout, including justification.
+/// Reflowing a substring here would change line breaks and repeat indentation.
+@immutable
+class ReaderPageFragment {
+  final ReaderContentBlock block;
+  final int firstLine;
+  final int lastLine;
+  final double top;
+
+  const ReaderPageFragment({
+    required this.block,
+    required this.firstLine,
+    required this.lastLine,
+    required this.top,
+  });
+
+  double get sourceTop => block.lines[firstLine].top;
+  double get height => block.lines[lastLine].bottom - sourceTop;
+  int get start => block.start + block.lines[firstLine].start;
+  int get end => block.start + block.lines[lastLine].end;
+  String get text =>
+      block.text.substring(start - block.start, end - block.start);
+}
+
+@immutable
+class ReaderTextPage {
+  final List<ReaderPageFragment> fragments;
+
+  const ReaderTextPage(this.fragments);
+
+  int get start => fragments.first.start;
+  int get end => fragments.last.end;
+  double get height => fragments.last.top + fragments.last.height;
+}
+
+// Note: 两种阅读方式共用行测量，进度保存规范化正文的文字偏移；见
+// .agents/notes/implemented/feature/2026-09-10-reader-pagination.md
+class _SourceBlock {
+  const _SourceBlock(
+    this.start,
+    this.text,
+    this.displayStart,
+    this.displayLength,
+    this.map,
+    this.sourceIndex,
+  );
+  final int start, displayStart, displayLength;
+  final String text;
+  final int? sourceIndex;
+  final TextOffsetMap? map;
+  int get end => start + text.length;
+}
+
+class ReaderChapterLayout {
+  final ReaderLayoutSpec spec;
+  final List<ReaderContentBlock> blocks;
+  final List<ReaderTextPage> pages;
+  final int textLength;
+  final double contentHeight;
+  final int legacyTextLength;
+  final List<_SourceBlock> _sourceBlocks;
+  final int sourceTextLength;
+
+  /// Lazy, presentation-only ranges: toggling marks never reflows the text.
+  late final Map<int, List<(int, int)>> dialogueRangesByBlock =
+      _dialogueRangesByBlock();
+
+  ReaderChapterLayout._(
+    this.spec,
+    this.blocks,
+    this.pages,
+    this.textLength,
+    this.contentHeight,
+    this.legacyTextLength,
+    this._sourceBlocks,
+    this.sourceTextLength,
+  );
+
+  factory ReaderChapterLayout({
+    required String title,
+    required ChapterContent content,
+    required ReaderLayoutSpec spec,
+    TextReplacementResult? replacement,
+    Map<int, int> paragraphBubbles = const {},
+    Map<int, ParagraphBubbleVariant> paragraphBubbleVariants = const {},
+    Set<int> underlinedParagraphs = const {},
+    Widget Function(int paraIndex, int count, ParagraphBubbleVariant variant)?
+    bubbleBuilder,
+  }) => _measureSteps(
+    title: title,
+    content: content,
+    spec: spec,
+    replacement: replacement,
+    paragraphBubbles: paragraphBubbles,
+    paragraphBubbleVariants: paragraphBubbleVariants,
+    underlinedParagraphs: underlinedParagraphs,
+    bubbleBuilder: bubbleBuilder,
+  ).last!;
+
+  /// Shares the exact measurements used by the synchronous constructor, while
+  /// allowing input and frame events between small batches of paragraphs.
+  /// A superseded chapter stops before measuring the rest of its text.
+  static Future<ReaderChapterLayout?> prepare({
+    required String title,
+    required ChapterContent content,
+    required ReaderLayoutSpec spec,
+    TextReplacementResult? replacement,
+    Map<int, int> paragraphBubbles = const {},
+    Map<int, ParagraphBubbleVariant> paragraphBubbleVariants = const {},
+    Set<int> underlinedParagraphs = const {},
+    Widget Function(int paraIndex, int count, ParagraphBubbleVariant variant)?
+    bubbleBuilder,
+    bool Function()? cancelled,
+    Duration batchBudget = const Duration(milliseconds: 4),
+  }) async {
+    final batch = Stopwatch()..start();
+    final total = kProfileMode ? (Stopwatch()..start()) : null;
+    var worstBatchMicros = 0;
+    for (final layout in _measureSteps(
+      title: title,
+      content: content,
+      spec: spec,
+      replacement: replacement,
+      paragraphBubbles: paragraphBubbles,
+      paragraphBubbleVariants: paragraphBubbleVariants,
+      underlinedParagraphs: underlinedParagraphs,
+      bubbleBuilder: bubbleBuilder,
+    )) {
+      if (cancelled?.call() == true) return null;
+      if (batch.elapsedMicroseconds > worstBatchMicros) {
+        worstBatchMicros = batch.elapsedMicroseconds;
+      }
+      if (layout != null) {
+        if (total != null) {
+          debugPrint(
+            'NOVEL_PERF prepare ms=${total.elapsedMilliseconds} '
+            'batch_us=$worstBatchMicros blocks=${layout.blocks.length}',
+          );
+        }
+        return layout;
+      }
+      if (batch.elapsed >= batchBudget) {
+        await Future<void>.delayed(Duration.zero);
+        batch.reset();
+      }
+    }
+    return null;
+  }
+
+  static Iterable<ReaderChapterLayout?> _measureSteps({
+    required String title,
+    required ChapterContent content,
+    required ReaderLayoutSpec spec,
+    TextReplacementResult? replacement,
+    Map<int, int> paragraphBubbles = const {},
+    Map<int, ParagraphBubbleVariant> paragraphBubbleVariants = const {},
+    Set<int> underlinedParagraphs = const {},
+    Widget Function(int paraIndex, int count, ParagraphBubbleVariant variant)?
+    bubbleBuilder,
+  }) sync* {
+    final source = replacement?.source ?? content;
+    final body = source.withoutLeadingTitle(title);
+    final sourceIndices = {
+      for (var i = 0; i < source.blocks.length; i++) source.blocks[i]: i,
+    };
+    final sourceBlocks = <_SourceBlock>[];
+    var sourceOffset = 0;
+    final legacyText = [
+      if (title.isNotEmpty) title,
+      ...splitChapterParagraphs(body.legacyText),
+    ].join('\n');
+    final blocks = <ReaderContentBlock>[];
+    var offset = 0;
+    var legacyCursor = 0;
+    var top = 0.0;
+    for (final element in [ChapterParagraph(title), ...body.blocks]) {
+      final sourceText = element is ChapterParagraph ? element.text : '\uFFFC';
+      final originalIndex = sourceIndices[element];
+      final transformed = originalIndex == null
+          ? element
+          : replacement?.content.blocks[originalIndex] ?? element;
+      final text = transformed is ChapterParagraph
+          ? transformed.text
+          : '\uFFFC';
+      sourceBlocks.add(
+        _SourceBlock(
+          sourceOffset,
+          sourceText,
+          offset,
+          text.length,
+          originalIndex == null
+              ? null
+              : replacement?.paragraphMaps[originalIndex],
+          originalIndex,
+        ),
+      );
+      sourceOffset +=
+          sourceText.length + (blocks.isEmpty && sourceText.isEmpty ? 0 : 1);
+      var legacyStart = legacyCursor;
+      if (element is ChapterParagraph) {
+        final found = legacyText.indexOf(sourceText, legacyCursor);
+        if (found >= 0) legacyStart = found;
+        legacyCursor = (legacyStart + sourceText.length).clamp(
+          0,
+          legacyText.length,
+        );
+      }
+      final paraIndex = element is ChapterParagraph ? element.paraIndex : null;
+      final startMs = element is ChapterParagraph ? element.startMs : null;
+      final blkSpans = element is ChapterParagraph
+          ? element.blkSpans
+          : const <ChapterBlkSpan>[];
+      final bubbleCount = paraIndex == null
+          ? null
+          : paragraphBubbles[paraIndex];
+      final bubbleVariant = paraIndex == null
+          ? ParagraphBubbleVariant.plain
+          : paragraphBubbleVariants[paraIndex] ?? ParagraphBubbleVariant.plain;
+      final bubble = bubbleCount == null || bubbleBuilder == null
+          ? null
+          : bubbleBuilder(paraIndex!, bubbleCount, bubbleVariant);
+      final blockIndex = blocks.length;
+      // The title is block 0 and is not an editable paragraph, so the ordinal
+      // used for identity starts at the first body paragraph. The title itself
+      // must not take a textId: its ordinal fallback would be -(-1 + 1) = 0,
+      // colliding with an upstream idx="0" on the first body paragraph.
+      final textId = element is ChapterParagraph && blockIndex > 0
+          ? paragraphUnderlineId(
+              paraIndex: paraIndex,
+              blockIndex: blockIndex - 1,
+            )
+          : null;
+      final underlined =
+          textId != null && underlinedParagraphs.contains(textId);
+      final block = element is ChapterImage
+          ? _measureImage(
+              element,
+              index: blockIndex,
+              start: offset,
+              legacyStart: legacyStart,
+              top: top,
+              spec: spec,
+            )
+          : _measureBlock(
+              text,
+              index: blockIndex,
+              start: offset,
+              legacyStart: legacyStart,
+              top: top,
+              spec: spec,
+              paraIndex: paraIndex,
+              textId: textId,
+              startMs: startMs,
+              blkSpans: blkSpans,
+              bubbleCount: bubbleCount,
+              bubbleVariant: bubbleVariant,
+              bubble: bubble,
+              underlined: underlined,
+            );
+      blocks.add(block);
+      // An absent title contributes neither text nor a leading newline.
+      offset += text.length + (block.isTitle && text.isEmpty ? 0 : 1);
+      if (block.lines.isNotEmpty) {
+        top += block.height + spec.paragraphSpacing;
+      }
+      yield null;
+    }
+    final pages = _paginate(blocks, spec);
+    yield ReaderChapterLayout._(
+      spec,
+      List.unmodifiable(blocks),
+      List.unmodifiable(pages),
+      math.max(0, offset - 1),
+      top,
+      legacyText.length,
+      List.unmodifiable(sourceBlocks),
+      math.max(0, sourceOffset - 1),
+    );
+  }
+
+  Map<int, List<(int, int)>> _dialogueRangesByBlock() {
+    if (blocks.length <= 1) return const {};
+    final body = blocks.skip(1);
+    final base = blocks[1].start;
+    final ranges = readerDialogueRanges(
+      body.map((block) => block.text).join('\n'),
+    );
+    if (ranges.isEmpty) return const {};
+    final byBlock = <int, List<(int, int)>>{};
+    var first = 0;
+    for (final block in body) {
+      if (block.isImage || block.text.isEmpty) continue;
+      while (first < ranges.length && ranges[first].$2 + base <= block.start) {
+        first++;
+      }
+      final local = <(int, int)>[];
+      for (var index = first; index < ranges.length; index++) {
+        final range = ranges[index];
+        if (range.$1 + base >= block.end) break;
+        local.add((
+          math.max(range.$1 + base, block.start) - block.start,
+          math.min(range.$2 + base, block.end) - block.start,
+        ));
+      }
+      if (local.isNotEmpty) byBlock[block.index] = List.unmodifiable(local);
+    }
+    return Map.unmodifiable(byBlock);
+  }
+
+  /// Maps a final display offset to the AI canonical paragraph/requestText
+  /// offset. The layout includes a synthetic title block and image blocks; the
+  /// AI snapshot excludes both, so using sourceOffsetForDisplay directly would
+  /// shift a selection by the title length or land on the wrong paragraph.
+  ({int paragraph, int offset})? snapshotLocationForDisplayOffset(
+    int offset,
+    AiChapterSnapshot snapshot, {
+    TextBoundaryBias bias = TextBoundaryBias.start,
+  }) {
+    final sourceOffset = sourceOffsetForDisplay(offset, bias: bias);
+    final index = _floorIndex(
+      _sourceBlocks.length,
+      (i) => _sourceBlocks[i].start <= sourceOffset,
+    );
+    final block = _sourceBlocks[index];
+    final sourceIndex = block.sourceIndex;
+    if (sourceIndex == null) return null;
+    final paragraph = snapshot.paragraphBlockIndices.indexOf(sourceIndex);
+    if (paragraph < 0) return null;
+    final local = (sourceOffset - block.start).clamp(0, block.text.length);
+    return (
+      paragraph: paragraph,
+      offset: snapshot.paragraphStarts[paragraph] + local,
+    );
+  }
+
+  int sourceOffsetForDisplay(
+    int offset, {
+    TextBoundaryBias bias = TextBoundaryBias.start,
+  }) {
+    final block =
+        _sourceBlocks[_floorIndex(
+          _sourceBlocks.length,
+          (i) => _sourceBlocks[i].displayStart <= offset,
+        )];
+    final local = (offset - block.displayStart).clamp(0, block.displayLength);
+    return (block.start + (block.map?.toSource(local, bias: bias) ?? local))
+        .clamp(0, sourceTextLength);
+  }
+
+  int displayOffsetForSource(
+    int offset, {
+    TextBoundaryBias bias = TextBoundaryBias.start,
+  }) {
+    var index = _floorIndex(
+      _sourceBlocks.length,
+      (i) => _sourceBlocks[i].start <= offset,
+    );
+    final block = _sourceBlocks[index];
+    if (block.displayLength == 0) {
+      while (++index < blocks.length) {
+        if (blocks[index].text.isNotEmpty) return blocks[index].start;
+      }
+      for (final previous in blocks.reversed) {
+        if (previous.text.isNotEmpty) return previous.end;
+      }
+      return 0;
+    }
+    final local = (offset - block.start).clamp(0, block.text.length);
+    return (block.displayStart +
+            (block.map?.toDisplay(local, bias: bias) ?? local))
+        .clamp(0, textLength);
+  }
+
+  String sourceTextInRange(int start, int end) {
+    final out = StringBuffer();
+    for (final block in _sourceBlocks) {
+      final from = math.max(start, block.start) - block.start;
+      final to = math.min(end, block.end) - block.start;
+      if (to > from) {
+        out.write(block.text.substring(from, to).replaceAll('\uFFFC', ''));
+      }
+    }
+    return out.toString();
+  }
+
+  double get maxScroll => math.max(
+    0,
+    contentHeight +
+        spec.verticalPadding * 2 +
+        spec.footerHeight +
+        32 -
+        spec.viewport.height,
+  );
+
+  int pageForOffset(int offset) =>
+      _floorIndex(pages.length, (index) => pages[index].start <= offset);
+
+  int offsetFromLegacyText(int offset) {
+    if (offset <= 0) return 0;
+    final target = offset.clamp(0, legacyTextLength);
+    var block = blocks.first;
+    for (final candidate in blocks) {
+      if (candidate.isImage || candidate.text.isEmpty) continue;
+      if (candidate.legacyStart > target) break;
+      block = candidate;
+    }
+    final raw = _sourceBlocks[block.index];
+    return displayOffsetForSource(
+      raw.start + (target - block.legacyStart).clamp(0, raw.text.length),
+    );
+  }
+
+  int legacyOffsetForText(int offset) {
+    if (offset <= 0) return 0;
+    final block =
+        blocks[_floorIndex(blocks.length, (i) => blocks[i].start <= offset)];
+    return (block.legacyStart +
+            (block.isImage
+                ? 0
+                : (sourceOffsetForDisplay(offset) -
+                          _sourceBlocks[block.index].start)
+                      .clamp(0, _sourceBlocks[block.index].text.length)))
+        .clamp(0, legacyTextLength);
+  }
+
+  /// The first visible line is the anchor, even when its top is partly clipped.
+  int textOffsetAtScroll(double scroll) {
+    final y = scroll - spec.verticalPadding;
+    if (y <= 0) return 0;
+    var index = _floorIndex(blocks.length, (index) => blocks[index].top <= y);
+    var block = blocks[index];
+    if (y >= block.top + block.height) {
+      if (++index >= blocks.length) return textLength;
+      block = blocks[index];
+      return block.start;
+    }
+    final line = _floorIndex(
+      block.lines.length,
+      (index) => block.lines[index].top <= y - block.top,
+    );
+    return block.start + block.lines[line].start;
+  }
+
+  double scrollForTextOffset(int offset) {
+    if (offset <= 0) return 0;
+    if (offset >= textLength) return maxScroll;
+    final block =
+        blocks[_floorIndex(
+          blocks.length,
+          (index) => blocks[index].start <= offset,
+        )];
+    if (block.lines.isEmpty) {
+      final visible = blocks.where(
+        (b) => b.lines.isNotEmpty && b.start >= offset,
+      );
+      return visible.isEmpty
+          ? maxScroll
+          : (spec.verticalPadding + visible.first.top).clamp(0, maxScroll);
+    }
+    final line =
+        block.lines[_floorIndex(
+          block.lines.length,
+          (index) => block.start + block.lines[index].start <= offset,
+        )];
+    return (spec.verticalPadding + block.top + line.top).clamp(0, maxScroll);
+  }
+
+  /// New positions are independent of font, page count and viewport size.
+  /// Old records remain readable; pixel ratios are used only for migration.
+  ({int textOffset, double scroll}) restore(
+    Map<String, dynamic>? saved, {
+    required String chapterId,
+    required bool startAtEnd,
+    required bool paged,
+  }) {
+    if (startAtEnd) {
+      return (
+        textOffset: paged ? pages.last.start : textOffsetAtScroll(maxScroll),
+        scroll: maxScroll,
+      );
+    }
+    if (saved?['chapterId']?.toString() != chapterId ||
+        (saved?['kind'] != null && saved?['kind'] != 'book')) {
+      return (textOffset: 0, scroll: 0);
+    }
+    final rawOffset = saved?['textOffset'];
+    if ((saved?['positionVersion'] == 1 || saved?['positionVersion'] == 2) &&
+        rawOffset is num &&
+        rawOffset.isFinite &&
+        rawOffset >= 0 &&
+        rawOffset == rawOffset.truncateToDouble()) {
+      final offset = saved?['positionVersion'] == 1
+          ? offsetFromLegacyText(rawOffset.clamp(0, legacyTextLength).toInt())
+          : displayOffsetForSource(
+              rawOffset.clamp(0, sourceTextLength).toInt(),
+            );
+      return (textOffset: offset, scroll: scrollForTextOffset(offset));
+    }
+    final rawPosition = saved?['position'];
+    final rawMax = saved?['maxScroll'];
+    var scroll = 0.0;
+    if (rawPosition is num && rawPosition.isFinite && rawPosition > 0) {
+      scroll = rawMax is num && rawMax.isFinite && rawMax > 0
+          ? maxScroll * (rawPosition / rawMax).clamp(0, 1)
+          : rawPosition.toDouble().clamp(0, maxScroll);
+    }
+    return (textOffset: textOffsetAtScroll(scroll), scroll: scroll);
+  }
+
+  /// First-line indent width. Shared by [_measureBlock] and [blockPainter] so
+  /// hit-testing and glyph boxes wrap exactly like the rendered text.
+  static double _indentWidth(TextStyle style, ReaderLayoutSpec spec) {
+    final scale = spec.textScaler.scale(style.fontSize!) / style.fontSize!;
+    return math.min(
+      (style.fontSize! + (style.letterSpacing ?? 0)) * 2,
+      math.max(0.0, spec.width / scale - style.fontSize!),
+    );
+  }
+
+  /// The indent placeholder: one per body block, bottom-aligned with zero
+  /// height (the indent only eats width).
+  static PlaceholderDimensions _indentPlaceholder(
+    TextStyle style,
+    ReaderLayoutSpec spec,
+  ) {
+    final scale = spec.textScaler.scale(style.fontSize!) / style.fontSize!;
+    return PlaceholderDimensions(
+      size: Size(_indentWidth(style, spec) * scale, 0),
+      alignment: PlaceholderAlignment.bottom,
+    );
+  }
+
+  /// The bubble placeholder sized so the trailing glyph and the bubble never
+  /// overlap; null when the block carries no bubble.
+  static PlaceholderDimensions? _bubblePlaceholder({
+    required TextStyle style,
+    required ReaderLayoutSpec spec,
+    required ParagraphBubbleVariant? variant,
+    required int? count,
+  }) {
+    if (count == null) return null;
+    final scale = spec.textScaler.scale(style.fontSize!) / style.fontSize!;
+    final metrics = ReaderBubbleMetrics.forFontSize(
+      spec.textScaler.scale(style.fontSize!),
+      variant: variant ?? ParagraphBubbleVariant.plain,
+    ).forCount(count);
+    // The bubble's own left gap is inside the widget, so its placeholder
+    // width has to include it. RenderParagraph wraps the WidgetSpan child in
+    // an auto-scaling box (the same `scale` the indent placeholder uses), so
+    // the measured box must be scaled too or the last line is measured short
+    // and the bubble is clipped.
+    return PlaceholderDimensions(
+      size: Size(
+        (metrics.width + ReaderBubbleMetrics.gap) * scale,
+        metrics.height * scale,
+      ),
+      alignment: PlaceholderAlignment.middle,
+    );
+  }
+
+  /// A laid-out painter matching what [ReaderBlockText] renders, for
+  /// selection hit-testing and per-glyph boxes. Placeholders mirror the
+  /// measured span exactly (indent, plus the bubble when the block carries
+  /// one) — [TextPainter.setPlaceholderDimensions] asserts the counts match.
+  /// The caller owns and disposes the painter.
+  static TextPainter blockPainter(
+    ReaderContentBlock block,
+    ReaderLayoutSpec spec,
+  ) {
+    final title = block.isTitle;
+    final style = title ? spec.titleStyle : spec.bodyStyle;
+    var placeholders = 0;
+    block.span.visitChildren((span) {
+      if (span is PlaceholderSpan) placeholders++;
+      return true;
+    });
+    final painter = TextPainter(
+      text: block.span,
+      textAlign: block.align,
+      textDirection: TextDirection.ltr,
+      textScaler: spec.textScaler,
+      locale: const Locale('zh', 'CN'),
+    );
+    if (!title) {
+      painter.setPlaceholderDimensions([
+        _indentPlaceholder(style, spec),
+        if (placeholders >= 2)
+          ?_bubblePlaceholder(
+            style: style,
+            spec: spec,
+            variant: block.bubbleVariant,
+            count: block.bubbleCount,
+          ),
+      ]);
+    }
+    painter.layout(minWidth: spec.width, maxWidth: spec.width);
+    return painter;
+  }
+
+  /// Chapter display text inside [start]..[end], assembled block by block.
+  /// Image placeholders (`\uFFFC`, one per illustration for offset math only)
+  /// are dropped so copied or underlined text is what a reader would quote.
+  String textInRange(int start, int end) {
+    final buffer = StringBuffer();
+    for (final block in blocks) {
+      if (block.start >= end) break;
+      if (block.end <= start) continue;
+      final from = math.max(start, block.start) - block.start;
+      final to = math.min(end, block.end) - block.start;
+      if (to <= from) continue;
+      buffer.write(block.text.substring(from, to).replaceAll('\uFFFC', ''));
+    }
+    return buffer.toString();
+  }
+
+  /// Bounds a selection may move within: the first editable text block's
+  /// start through the last one's end (the title and image-only chapters are
+  /// excluded — a selection cannot begin on a title).
+  (int, int)? get selectableTextRange {
+    for (final block in blocks) {
+      if (block.isTitle || block.isImage || block.lines.isEmpty) continue;
+      var last = block;
+      for (final candidate in blocks.reversed) {
+        if (candidate.isTitle || candidate.isImage || candidate.lines.isEmpty) {
+          continue;
+        }
+        last = candidate;
+        break;
+      }
+      return (block.start, last.end);
+    }
+    return null;
+  }
+
+  /// The text block holding [offset], or null past the last block.
+  ReaderContentBlock? blockAtOffset(int offset) {
+    for (final block in blocks) {
+      if (block.start <= offset && offset < block.end) return block;
+    }
+    return null;
+  }
+
+  /// The text block a selection bound at [offset] anchors its handle to: the
+  /// block holding [offset], or — when [offset] sits on the '\n' separator
+  /// between two blocks — the next block for a start bound, the previous one
+  /// for an end bound.
+  ReaderContentBlock? blockForAnchor(int offset, {required bool isStart}) {
+    final holding = blockAtOffset(offset);
+    if (holding != null) return holding;
+    ReaderContentBlock? previous;
+    for (final block in blocks) {
+      if (block.isTitle || block.isImage || block.lines.isEmpty) continue;
+      if (block.start >= offset) return isStart ? block : previous;
+      previous = block;
+    }
+    return previous;
+  }
+
+  static ReaderContentBlock _measureBlock(
+    String text, {
+    required int index,
+    required int start,
+    required int legacyStart,
+    required double top,
+    required ReaderLayoutSpec spec,
+    int? paraIndex,
+    int? textId,
+    int? startMs,
+    List<ChapterBlkSpan> blkSpans = const [],
+    int? bubbleCount,
+    ParagraphBubbleVariant? bubbleVariant,
+    Widget? bubble,
+    bool underlined = false,
+  }) {
+    final title = index == 0;
+    final style = title ? spec.titleStyle : spec.bodyStyle;
+    final decoration = underlined && !title
+        ? TextDecoration.underline
+        : TextDecoration.none;
+    final bodyStyle = style.copyWith(
+      decoration: decoration,
+      decorationColor: style.color,
+      decorationStyle: TextDecorationStyle.solid,
+      decorationThickness: 1.6,
+    );
+    final align = title ? spec.titleAlign : TextAlign.justify;
+    final indent = _indentWidth(style, spec);
+    // The bubble rides at the very end of the paragraph's text, so it follows
+    // the last line and wraps only when that line has no room left. Measuring it
+    // as a placeholder keeps paint and measurement in agreement.
+    final bubbleSpan = bubble == null || bubbleCount == null
+        ? null
+        : WidgetSpan(alignment: PlaceholderAlignment.middle, child: bubble);
+    final span = TextSpan(
+      style: underlined && !title ? bodyStyle : style,
+      children: [
+        // RenderParagraph wraps inline children in an auto-scaling box
+        // (_AutoScaleInlineWidget) using the surrounding span's font size, so
+        // the child stays in unscaled em and still paints at indent * scale.
+        // Note: 别把这里改成 indent * scale——会双重缩放。
+        // 见 .agents/notes/implemented/bug-fix/2026-09-13-code-review-fixes.md
+        if (!title) WidgetSpan(child: SizedBox(width: indent, height: 0)),
+        TextSpan(text: text),
+        ?bubbleSpan,
+      ],
+    );
+    if (text.isEmpty) {
+      return ReaderContentBlock(
+        index: index,
+        text: text,
+        start: start,
+        legacyStart: legacyStart,
+        top: top,
+        height: 0,
+        span: span,
+        align: align,
+        lines: const [],
+        paraIndex: paraIndex,
+        textId: textId,
+        startMs: startMs,
+        blkSpans: blkSpans,
+        bubbleCount: bubbleCount,
+        bubbleVariant: bubbleVariant,
+        underlined: underlined,
+      );
+    }
+    final painter = TextPainter(
+      text: span,
+      textAlign: align,
+      textDirection: TextDirection.ltr,
+      textScaler: spec.textScaler,
+      locale: const Locale('zh', 'CN'),
+    );
+    try {
+      if (!title) {
+        painter.setPlaceholderDimensions([
+          _indentPlaceholder(style, spec),
+          ?_bubblePlaceholder(
+            style: style,
+            spec: spec,
+            variant: bubbleVariant,
+            count: bubbleCount,
+          ),
+        ]);
+      }
+      painter.layout(minWidth: spec.width, maxWidth: spec.width);
+      final metricsList = painter.computeLineMetrics();
+      final starts = <int>[];
+      final tops = <double>[];
+      // One placeholder per `\uFFFC`: the paragraph indent, then the bubble.
+      final leading = title ? 0 : 1;
+      final plainText =
+          '${title ? '' : '\uFFFC'}$text${bubbleSpan == null ? '' : '\uFFFC'}';
+      var cursor = 0;
+      for (final line in metricsList) {
+        // Hit-testing by y can jump into another line's emoji/RTL glyph box.
+        // Walking logical line boundaries keeps offsets ordered in all fonts.
+        var range = painter.getLineBoundary(TextPosition(offset: cursor));
+        if (range.end <= cursor && cursor < plainText.length) {
+          range = painter.getLineBoundary(TextPosition(offset: ++cursor));
+        }
+        starts.add((range.start - leading).clamp(0, text.length));
+        tops.add(tops.isEmpty ? 0 : line.baseline - line.ascent);
+        cursor = range.end;
+        if (cursor < plainText.length && plainText.codeUnitAt(cursor) == 10) {
+          cursor++;
+        }
+      }
+      // Even an empty title has one measurable line in Flutter.
+      if (starts.isEmpty) {
+        starts.add(0);
+        tops.add(0);
+      }
+      final boundaries = <int>{0};
+      var characterOffset = 0;
+      for (final character in text.characters) {
+        boundaries.add(characterOffset += character.length);
+      }
+      // Some fallback fonts wrap a multi-codepoint emoji onto several lines.
+      // Such a cluster, and any indent-only line, must stay on the same page.
+      // A line holding only the bubble also has no cut of its own: it keeps
+      // riding with the previous line so the bubble never lands alone.
+      final cuts = <int>[0];
+      for (var i = 1; i < starts.length; i++) {
+        if (starts[i] > starts[cuts.last] &&
+            starts[i] < text.length &&
+            boundaries.contains(starts[i])) {
+          cuts.add(i);
+        }
+      }
+      return ReaderContentBlock(
+        index: index,
+        text: text,
+        start: start,
+        legacyStart: legacyStart,
+        top: top,
+        height: painter.height,
+        span: span,
+        align: align,
+        lines: List.unmodifiable([
+          for (var i = 0; i < cuts.length; i++)
+            ReaderTextLine(
+              starts[cuts[i]],
+              i + 1 < cuts.length ? starts[cuts[i + 1]] : text.length,
+              tops[cuts[i]],
+              i + 1 < cuts.length ? tops[cuts[i + 1]] : painter.height,
+            ),
+        ]),
+        paraIndex: paraIndex,
+        textId: textId,
+        startMs: startMs,
+        blkSpans: blkSpans,
+        bubbleCount: bubbleCount,
+        bubbleVariant: bubbleVariant,
+      );
+    } finally {
+      painter.dispose();
+    }
+  }
+
+  static ReaderContentBlock _measureImage(
+    ChapterImage image, {
+    required int index,
+    required int start,
+    required int legacyStart,
+    required double top,
+    required ReaderLayoutSpec spec,
+  }) {
+    final ratio = image.aspectRatio;
+    final usableRatio = ratio != null && ratio.isFinite && ratio > 0
+        ? ratio
+        : 3 / 4;
+    // Reserve the full slot before loading. A decoded image never repaginates
+    // the chapter or shifts saved text, and a tall image stays on one page.
+    final height = math.min(spec.pageHeight, spec.width / usableRatio);
+    return ReaderContentBlock(
+      index: index,
+      text: '\uFFFC',
+      start: start,
+      legacyStart: legacyStart,
+      top: top,
+      height: height,
+      span: const TextSpan(),
+      align: TextAlign.center,
+      lines: [ReaderTextLine(0, 1, 0, height)],
+      illustration: image,
+    );
+  }
+
+  static List<ReaderTextPage> _paginate(
+    List<ReaderContentBlock> blocks,
+    ReaderLayoutSpec spec,
+  ) {
+    final pages = <ReaderTextPage>[];
+    var fragments = <ReaderPageFragment>[];
+    var used = 0.0;
+    void finishPage() {
+      if (fragments.isEmpty) return;
+      pages.add(ReaderTextPage(List.unmodifiable(fragments)));
+      fragments = [];
+      used = 0;
+    }
+
+    for (final block in blocks) {
+      if (block.lines.isEmpty) continue;
+      for (var i = 0; i < block.lines.length; i++) {
+        final line = block.lines[i];
+        if (fragments.isNotEmpty &&
+            used + line.height > spec.pageHeight + .001) {
+          finishPage();
+        }
+        if (fragments.isNotEmpty && identical(fragments.last.block, block)) {
+          final previous = fragments.removeLast();
+          fragments.add(
+            ReaderPageFragment(
+              block: block,
+              firstLine: previous.firstLine,
+              lastLine: i,
+              top: previous.top,
+            ),
+          );
+        } else {
+          fragments.add(
+            ReaderPageFragment(
+              block: block,
+              firstLine: i,
+              lastLine: i,
+              top: used,
+            ),
+          );
+        }
+        used += line.height;
+      }
+      used += spec.paragraphSpacing;
+    }
+    finishPage();
+    return pages;
+  }
+}
+
+int _floorIndex(int length, bool Function(int) atOrBefore) {
+  var low = 0;
+  var high = length - 1;
+  while (low < high) {
+    final middle = (low + high + 1) ~/ 2;
+    if (atOrBefore(middle)) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return low;
+}
+
+/// Shared by the scroll list and clipped page fragments.
+class ReaderBlockContent extends StatelessWidget {
+  final ReaderContentBlock block;
+  final ReaderLayoutSpec spec;
+  final ReaderImageProviderFactory? imageProviderFactory;
+
+  /// Long-press target for a text paragraph (复制 / 从本段听 / 划线). The offset is
+  /// the touch point in global coordinates, which the floating action bar
+  /// anchors itself to.
+  final void Function(ReaderContentBlock block, Offset globalPosition)?
+  onParagraphLongPress;
+
+  /// 官方的不抬手拖动: while the finger stays down after a long press these
+  /// deliver its moves and release, so the selection reshapes without ever
+  /// grabbing a handle. Global coordinates.
+  final void Function(Offset globalPosition)? onParagraphLongPressMoveUpdate;
+  final void Function(Offset globalPosition)? onParagraphLongPressEnd;
+
+  /// Selection plumbing. Null = no selection support (marks layer skipped).
+  final ReaderSelectionScope? selectionScope;
+  final ReaderTextSelection? selection;
+  final List<ReaderRangeUnderline> rangeUnderlines;
+
+  /// The sentence being narrated, in chapter display-text coordinates.
+  final (int, int)? narrationRange;
+
+  const ReaderBlockContent({
+    super.key,
+    required this.block,
+    required this.spec,
+    this.imageProviderFactory,
+    this.onParagraphLongPress,
+    this.onParagraphLongPressMoveUpdate,
+    this.onParagraphLongPressEnd,
+    this.selectionScope,
+    this.selection,
+    this.rangeUnderlines = const [],
+    this.narrationRange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final image = block.illustration;
+    if (image != null) {
+      return ReaderIllustration(
+        key: ValueKey('reader-illustration-${block.index}'),
+        image: image,
+        providerFactory: imageProviderFactory,
+      );
+    }
+    Widget text = ReaderBlockText(block: block, spec: spec);
+    // Marks live in the block's own coordinate space, so they scroll with the
+    // text; the title never takes part in a selection.
+    if (selectionScope != null && !block.isTitle && block.lines.isNotEmpty) {
+      text = ReaderBlockMarkLayer(
+        key: ValueKey('reader-block-marks-${block.index}'),
+        block: block,
+        spec: spec,
+        scope: selectionScope!,
+        selection: selection,
+        rangeUnderlines: rangeUnderlines,
+        narrationRange: narrationRange,
+        child: text,
+      );
+    }
+    if (block.isTitle || onParagraphLongPress == null) return text;
+    return GestureDetector(
+      key: ValueKey('reader-paragraph-press-${block.index - 1}'),
+      behavior: HitTestBehavior.translucent,
+      onLongPressStart: (details) =>
+          onParagraphLongPress!(block, details.globalPosition),
+      onLongPressMoveUpdate: onParagraphLongPressMoveUpdate == null
+          ? null
+          : (details) =>
+                onParagraphLongPressMoveUpdate!(details.globalPosition),
+      onLongPressEnd: onParagraphLongPressEnd == null
+          ? null
+          : (details) => onParagraphLongPressEnd!(details.globalPosition),
+      child: text,
+    );
+  }
+}
+
+class ReaderBlockText extends StatelessWidget {
+  final ReaderContentBlock block;
+  final ReaderLayoutSpec spec;
+
+  const ReaderBlockText({super.key, required this.block, required this.spec});
+
+  @override
+  Widget build(BuildContext context) {
+    final key = block.isTitle
+        ? const ValueKey('reader-chapter-title')
+        : ValueKey('reader-paragraph-${block.index - 1}');
+    return block.isTitle
+        ? Text(
+            block.text,
+            key: key,
+            style: block.span.style,
+            textAlign: block.align,
+            textScaler: spec.textScaler,
+            textDirection: TextDirection.ltr,
+            locale: const Locale('zh', 'CN'),
+          )
+        : Text.rich(
+            block.span,
+            key: key,
+            style: block.span.style,
+            textAlign: block.align,
+            textScaler: spec.textScaler,
+            textDirection: TextDirection.ltr,
+            locale: const Locale('zh', 'CN'),
+            semanticsLabel: block.text,
+          );
+  }
+}
