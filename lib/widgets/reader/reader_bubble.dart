@@ -37,6 +37,11 @@ class ReaderBubbleMetrics {
   /// `ParaBubbleInlineConfig.margin`, whose default is 8dp.
   static const gap = 8.0;
 
+  /// Keep the skin at its original size; only the invisible touch box grows.
+  static const touchExtent = 44.0;
+  double get touchWidth => width < touchExtent ? touchExtent : width;
+  double get touchHeight => height < touchExtent ? touchExtent : height;
+
   /// Picks the size class from the reader's effective font size, exactly as the
   /// official client does: <=19sp small, <=29sp normal, above that large. The
   /// box tracks the chosen mask's own dp size (3x pixels / 3): the plain mask
@@ -164,19 +169,22 @@ class ReaderParagraphBubble extends StatelessWidget {
         ],
       ),
     );
-    if (onTap == null) {
-      return Padding(
-        padding: const EdgeInsets.only(left: ReaderBubbleMetrics.gap),
-        child: bubble,
-      );
-    }
     return Padding(
       padding: const EdgeInsets.only(left: ReaderBubbleMetrics.gap),
-      child: GestureDetector(
-        key: ValueKey('reader-para-bubble-$count'),
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: bubble,
+      child: Semantics(
+        button: onTap != null,
+        label: '$count条段评',
+        excludeSemantics: true,
+        child: GestureDetector(
+          key: ValueKey('reader-para-bubble-$count'),
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: SizedBox(
+            width: size.touchWidth,
+            height: size.touchHeight,
+            child: Center(child: bubble),
+          ),
+        ),
       ),
     );
   }

@@ -1,13 +1,13 @@
 part of 'app.dart';
 
 class _Cover extends StatelessWidget {
-  const _Cover(this.book, {this.width = 68});
+  const _Cover(this.book, {this.width = 72});
   final MediaItem book;
   final double width;
 
   @override
   Widget build(BuildContext context) => ClipRRect(
-    borderRadius: BorderRadius.circular(6),
+    borderRadius: BorderRadius.circular(8),
     child: SizedBox(
       width: width,
       height: width * 1.4,
@@ -54,7 +54,7 @@ class _BookRow extends StatelessWidget {
     key: ValueKey('book-${book.id}'),
     onTap: onTap ?? () => _openBook(context, book),
     child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -79,7 +79,10 @@ class _BookRow extends StatelessWidget {
                   book.author.isEmpty ? '作者信息暂缺' : book.author,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
                 if (subtitle != null || book.intro.isNotEmpty) ...[
                   const SizedBox(height: 8),
@@ -87,27 +90,42 @@ class _BookRow extends StatelessWidget {
                     subtitle ?? book.intro,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(height: 1.6),
+                    style: TextStyle(
+                      fontSize: 13,
+                      height: 1.55,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ],
                 if (book.badge.isNotEmpty ||
                     book.wordNumber > 0 ||
                     book.score != null) ...[
                   const SizedBox(height: 8),
-                  Text(
-                    [
-                      if (book.score != null) '${book.score} 分',
-                      if (book.badge.isNotEmpty) book.badge,
-                      if (book.wordNumber > 0)
-                        '${(book.wordNumber / 10000).toStringAsFixed(1)} 万字',
-                    ].join(' · '),
+                  Text.rich(
+                    TextSpan(
+                      children: [
+                        if (book.score != null)
+                          TextSpan(
+                            text: '${book.score} 分  ',
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.primary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        TextSpan(
+                          text: [
+                            if (book.badge.isNotEmpty) book.badge,
+                            if (book.wordNumber > 0)
+                              '${(book.wordNumber / 10000).toStringAsFixed(1)} 万字',
+                          ].join(' · '),
+                        ),
+                      ],
+                    ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 11,
-                      color: Theme.of(context).colorScheme.primary,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ],

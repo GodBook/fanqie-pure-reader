@@ -54,7 +54,7 @@ part 'categories.dart';
 part 'app_update.dart';
 
 const novelAppName = '番茄小说纯净版';
-const novelAccent = Color(0xFFD94C36);
+const novelAccent = Color(0xFFB84A38);
 
 Future<void> startNovelApp({bool guardErrors = true}) async {
   Future<void> launch() async {
@@ -134,7 +134,9 @@ class NovelRuntime {
 }
 
 class NovelApp extends StatelessWidget {
-  const NovelApp({super.key});
+  const NovelApp({super.key, this.home = const NovelLocalBootstrap()});
+
+  final Widget home;
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
@@ -155,28 +157,56 @@ class NovelApp extends StatelessWidget {
         ),
         child: child ?? const SizedBox.shrink(),
       ),
-      home: const NovelLocalBootstrap(),
+      home: home,
     ),
   );
 
   ThemeData _theme(Brightness brightness) {
     final dark = brightness == Brightness.dark;
-    final colors = ColorScheme.fromSeed(
-      seedColor: novelAccent,
-      brightness: brightness,
-    );
+    final colors =
+        ColorScheme.fromSeed(
+          seedColor: novelAccent,
+          brightness: brightness,
+        ).copyWith(
+          primary: dark ? const Color(0xFFF0A18E) : novelAccent,
+          onPrimary: dark ? const Color(0xFF482117) : Colors.white,
+          primaryContainer: dark
+              ? const Color(0xFF4C3029)
+              : const Color(0xFFF7E6DF),
+          onPrimaryContainer: dark
+              ? const Color(0xFFFFD9CE)
+              : const Color(0xFF833525),
+          surface: dark ? const Color(0xFF1C1B19) : const Color(0xFFFAF8F4),
+          surfaceContainerLow: dark
+              ? const Color(0xFF23221F)
+              : const Color(0xFFFFFDFA),
+          surfaceContainer: dark
+              ? const Color(0xFF292723)
+              : const Color(0xFFF3EFE8),
+          surfaceContainerHigh: dark
+              ? const Color(0xFF302D28)
+              : const Color(0xFFEDE7DE),
+          surfaceContainerHighest: dark
+              ? const Color(0xFF39352F)
+              : const Color(0xFFE6DFD4),
+          onSurface: dark ? const Color(0xFFEDE7DD) : const Color(0xFF2D2923),
+          onSurfaceVariant: dark
+              ? const Color(0xFFBEB6AA)
+              : const Color(0xFF746C60),
+          outline: dark ? const Color(0xFF91877A) : const Color(0xFF8D8274),
+          outlineVariant: dark
+              ? const Color(0xFF484239)
+              : const Color(0xFFE3DBCF),
+        );
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
       colorScheme: colors,
-      scaffoldBackgroundColor: dark
-          ? const Color(0xFF181817)
-          : const Color(0xFFFAF9F6),
+      scaffoldBackgroundColor: colors.surface,
       appBarTheme: AppBarTheme(
-        backgroundColor: dark
-            ? const Color(0xFF181817)
-            : const Color(0xFFFAF9F6),
+        backgroundColor: colors.surface,
         surfaceTintColor: Colors.transparent,
+        scrolledUnderElevation: 0,
         centerTitle: false,
         titleTextStyle: TextStyle(
           fontSize: 22,
@@ -187,13 +217,61 @@ class NovelApp extends StatelessWidget {
       dividerTheme: DividerThemeData(
         color: colors.outlineVariant.withValues(alpha: .5),
       ),
-      navigationBarTheme: const NavigationBarThemeData(height: 66),
+      navigationBarTheme: NavigationBarThemeData(
+        height: 68,
+        backgroundColor: colors.surfaceContainerLow,
+        surfaceTintColor: Colors.transparent,
+        indicatorColor: colors.primaryContainer,
+        labelTextStyle: WidgetStateProperty.resolveWith(
+          (states) => TextStyle(
+            fontSize: 12,
+            fontWeight: states.contains(WidgetState.selected)
+                ? FontWeight.w600
+                : FontWeight.w400,
+            color: states.contains(WidgetState.selected)
+                ? colors.primary
+                : colors.onSurfaceVariant,
+          ),
+        ),
+        iconTheme: WidgetStateProperty.resolveWith(
+          (states) => IconThemeData(
+            size: 23,
+            color: states.contains(WidgetState.selected)
+                ? colors.primary
+                : colors.onSurfaceVariant,
+          ),
+        ),
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: colors.surfaceContainerLow,
+        surfaceTintColor: Colors.transparent,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+      ),
+      popupMenuTheme: PopupMenuThemeData(
+        color: colors.surfaceContainerLow,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+      chipTheme: ChipThemeData(
+        side: BorderSide.none,
+        backgroundColor: colors.surfaceContainer,
+        selectedColor: colors.primaryContainer,
+        labelStyle: TextStyle(color: colors.onSurface),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
       filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(minimumSize: const Size(48, 48)),
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(48, 48),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: colors.surfaceContainerHighest.withValues(alpha: .45),
+        fillColor: colors.surfaceContainer,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: BorderSide.none,

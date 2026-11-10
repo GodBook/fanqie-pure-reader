@@ -134,4 +134,101 @@ void main() {
     expect(scroll.pixels, before);
     expect(find.byKey(const ValueKey('book-local-2')), findsOneWidget);
   });
+
+  testWidgets(
+    'returning to a recent category reuses its cursor without a request',
+    (tester) async {
+      final calls = <(String, int)>[];
+      await start(
+        tester,
+        NovelFeed(
+          pageLoader: (_, _, _) async {
+            calls.add(('精选', 0));
+            return HomepagePage(
+              items: [book('general')],
+              nextOffset: null,
+              sessionId: 'general-session',
+            );
+          },
+          categoryLoader: (query, offset, _) async {
+            calls.add((query, offset));
+            return NovelSearchPage(
+              items: [book('urban-$offset')],
+              hasMore: offset == 0,
+              nextOffset: offset + 10,
+            );
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('feed-genre-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('feed-genre-0')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('feed-genre-1')));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('book-urban-0')), findsOneWidget);
+      expect(calls, [('精选', 0), ('都市', 0)]);
+      await tester.tap(find.text('加载更多'));
+      await tester.pumpAndSettle();
+      expect(calls.last, ('都市', 10));
+      expect(find.byKey(const ValueKey('book-urban-10')), findsOneWidget);
+      await tester.tap(find.text('换一批'));
+      await tester.pumpAndSettle();
+      expect(calls.last, ('都市', 0));
+    },
+  );
+
+  testWidgets('strict filters finish after the first matching batch', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'novel_feed_score': 9.0});
+    final calls = <int>[];
+    await start(
+      tester,
+      NovelFeed(
+        pageLoader: (offset, _, _) async {
+          calls.add(offset);
+          return HomepagePage(
+            items: [book('match', score: 9.5)],
+            nextOffset: offset + 10,
+            sessionId: null,
+          );
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(calls, [0]);
+    expect(find.byKey(const ValueKey('book-match')), findsOneWidget);
+    expect(
+      tester
+          .widget<TextButton>(find.widgetWithText(TextButton, '换一批'))
+          .onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets('empty filtered pages still search the next batch', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'novel_feed_score': 9.0});
+    final calls = <int>[];
+    await start(
+      tester,
+      NovelFeed(
+        pageLoader: (offset, _, _) async {
+          calls.add(offset);
+          return HomepagePage(
+            items: [book('$offset', score: offset == 0 ? 8 : 9.5)],
+            nextOffset: offset + 10,
+            sessionId: null,
+          );
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(calls, [0, 10]);
+    expect(find.byKey(const ValueKey('book-0')), findsNothing);
+    expect(find.byKey(const ValueKey('book-10')), findsOneWidget);
+  });
 }

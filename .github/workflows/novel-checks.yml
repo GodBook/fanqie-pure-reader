@@ -17,4 +17,4 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter analyze --no-pub
-      - run: flutter test --no-pub test/novel_startup_test.dart test/novel_fast_feed_test.dart test/novel_app_update_test.dart test/novel_update_manifest_check_test.dart test/novel_catalog_test.dart test/novel_recommendation_filters_test.dart test/home_feed_cache_test.dart test/novel_download_manager_test.dart test/novel_download_persistence_test.dart test/novel_reading_assets_test.dart test/experience_audit_test.dart
+      - run: flutter test --no-pub test/novel_startup_test.dart test/novel_fast_feed_test.dart test/novel_visual_test.dart test/novel_app_update_test.dart test/novel_update_manifest_check_test.dart test/novel_catalog_test.dart test/novel_recommendation_filters_test.dart test/home_feed_cache_test.dart test/novel_download_manager_test.dart test/novel_download_persistence_test.dart test/novel_reading_assets_test.dart test/experience_audit_test.dart test/reader_bubble_test.dart test/reader_chapter_layout_test.dart test/reader_ideas_test.dart

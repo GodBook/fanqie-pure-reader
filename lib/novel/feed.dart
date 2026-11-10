@@ -38,6 +38,18 @@ class NovelFeed extends StatefulWidget {
   State<NovelFeed> createState() => _NovelFeedState();
 }
 
+class _NovelFeedVisit {
+  _NovelFeedVisit(this.books, this.offset, this.session, this.hasMore)
+    : savedAt = DateTime.now();
+  final List<MediaItem> books;
+  final int offset;
+  final String? session;
+  final bool hasMore;
+  final DateTime savedAt;
+  bool get fresh =>
+      DateTime.now().difference(savedAt) < const Duration(minutes: 10);
+}
+
 class _NovelFeedState extends State<NovelFeed> {
   BackendRequest? _request;
   final _scroll = ScrollController();
@@ -56,10 +68,22 @@ class _NovelFeedState extends State<NovelFeed> {
   bool _localShown = false;
   bool _seedShown = false;
   bool _firstFrameReported = false;
+  bool _showScrollTop = false;
+  final _visits = <int, _NovelFeedVisit>{};
   bool get _production =>
       widget.pageLoader == null && widget.categoryLoader == null;
 
-  void _showLocal() {
+  bool _showLocal() {
+    final visit = _visits[_filters.genre];
+    if (visit != null && visit.fresh) {
+      _books = visit.books;
+      _offset = visit.offset;
+      _session = visit.session;
+      _hasMore = visit.hasMore;
+      _localShown = false;
+      _seedShown = false;
+      return true;
+    }
     final cached = _production
         ? HomeFeedCache.instance.load(100 + _filters.genre)?.items
         : null;
@@ -72,6 +96,7 @@ class _NovelFeedState extends State<NovelFeed> {
     _offset = 0;
     _session = null;
     _hasMore = true;
+    return false;
   }
 
   void _restoreReadyCache() {
@@ -244,6 +269,10 @@ class _NovelFeedState extends State<NovelFeed> {
     super.initState();
     NovelRuntime.localReady.addListener(_restoreReadyCache);
     _scroll.addListener(() {
+      final showTop = _scroll.offset > 500;
+      if (showTop != _showScrollTop) {
+        setState(() => _showScrollTop = showTop);
+      }
       if (_scroll.position.extentAfter < 500 &&
           !_loading &&
           _hasMore &&
@@ -277,15 +306,28 @@ class _NovelFeedState extends State<NovelFeed> {
 
   void _change(NovelFeedFilters filters) {
     final categoryChanged = filters.genre != _filters.genre;
+    var reused = false;
+    if (categoryChanged) {
+      _request?.cancel();
+      ++_generation;
+    }
     setState(() {
       _filters = filters;
       _order = [];
-      if (categoryChanged) _showLocal();
+      if (categoryChanged) {
+        _loading = false;
+        _error = null;
+        reused = _showLocal();
+      }
     });
     if (_preferences != null) unawaited(filters.save(_preferences!));
     if (categoryChanged) {
-      _load(refresh: true);
-    } else if (!_loading && _hasMore && filters.select(_books).length < 8) {
+      if (!reused) {
+        unawaited(_load(refresh: true));
+      } else if (_visible.isEmpty && _hasMore) {
+        unawaited(_load());
+      }
+    } else if (!_loading && _hasMore && _visible.isEmpty) {
       _load();
     }
   }
@@ -367,6 +409,18 @@ class _NovelFeedState extends State<NovelFeed> {
           _session = session;
           _localShown = false;
         });
+        if (_books.length <= HomeFeedCache.maxItems) {
+          _visits[filters.genre] = _NovelFeedVisit(
+            _books,
+            cursor,
+            session,
+            hasMore,
+          );
+        } else {
+          // Do not retain an unbounded list per genre or keep a cursor after
+          // truncating its books. Disk snapshots revalidate from page one.
+          _visits.remove(filters.genre);
+        }
         if (_production) {
           unawaited(
             HomeFeedCache.instance.save(
@@ -382,7 +436,9 @@ class _NovelFeedState extends State<NovelFeed> {
             );
           }
         }
-        if (!hasMore || _filters.select(_books).length >= 8) break;
+        // Return as soon as the reader has matching books. Extra pages remain
+        // available on scroll / load more instead of holding refresh open.
+        if (!hasMore || _visible.isNotEmpty) break;
       }
     } catch (error) {
       if (mounted && generation == _generation) {
@@ -471,7 +527,14 @@ class _NovelFeedState extends State<NovelFeed> {
     final colors = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('书城'),
+        toolbarHeight: 68,
+        title: Text(
+          '书城',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+            fontSize: 28,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
         actions: [
           IconButton(
             tooltip: '搜索小说',
@@ -509,21 +572,19 @@ class _NovelFeedState extends State<NovelFeed> {
           slivers: [
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 6, 20, 22),
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 14),
                 child: InkWell(
                   key: const ValueKey('open-search'),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(16),
                   onTap: () => _openSearch(context),
                   child: Ink(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,
-                      vertical: 15,
+                      vertical: 14,
                     ),
                     decoration: BoxDecoration(
-                      color: colors.surfaceContainerHighest.withValues(
-                        alpha: .45,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
+                      color: colors.surfaceContainer,
+                      borderRadius: BorderRadius.circular(16),
                     ),
                     child: Row(
                       children: [
@@ -548,23 +609,10 @@ class _NovelFeedState extends State<NovelFeed> {
                 ),
               ),
             ),
-            const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 20),
-                child: Text(
-                  '今天想读什么',
-                  style: TextStyle(
-                    fontSize: 25,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -.7,
-                  ),
-                ),
-              ),
-            ),
             SliverToBoxAdapter(
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
                 child: Row(
                   children: [
                     for (var i = 0; i < NovelGenre.choices.length; i++)
@@ -575,20 +623,20 @@ class _NovelFeedState extends State<NovelFeed> {
                           label: Text(NovelGenre.choices[i].name),
                           selected: _filters.genre == i,
                           showCheckmark: false,
-                          selectedColor: colors.primary,
-                          labelStyle: TextStyle(
-                            color: _filters.genre == i
-                                ? colors.onPrimary
-                                : colors.onSurface,
-                            fontWeight: _filters.genre == i
-                                ? FontWeight.w600
-                                : FontWeight.w400,
-                          ),
+                          selectedColor: colors.primaryContainer,
+                          labelStyle: Theme.of(context).textTheme.labelLarge
+                              ?.copyWith(
+                                color: _filters.genre == i
+                                    ? colors.onPrimaryContainer
+                                    : colors.onSurfaceVariant,
+                                fontWeight: _filters.genre == i
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                              ),
                           side: BorderSide.none,
-                          backgroundColor: colors.surfaceContainerHighest
-                              .withValues(alpha: .40),
+                          backgroundColor: colors.surfaceContainer,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(10),
                           ),
                           onSelected: (_) =>
                               _change(_filters.copyWith(genre: i)),
@@ -656,7 +704,7 @@ class _NovelFeedState extends State<NovelFeed> {
                                 ? '为你精选'
                                 : '${_filters.category.name} · 分类推荐',
                             style: const TextStyle(
-                              fontSize: 18,
+                              fontSize: 20,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -740,15 +788,17 @@ class _NovelFeedState extends State<NovelFeed> {
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.small(
-        tooltip: '回到顶部调整筛选',
-        onPressed: () => _scroll.animateTo(
-          0,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        ),
-        child: const Icon(Icons.vertical_align_top),
-      ),
+      floatingActionButton: _showScrollTop
+          ? FloatingActionButton.small(
+              tooltip: '回到顶部调整筛选',
+              onPressed: () => _scroll.animateTo(
+                0,
+                duration: const Duration(milliseconds: 250),
+                curve: Curves.easeOut,
+              ),
+              child: const Icon(Icons.vertical_align_top),
+            )
+          : null,
     );
   }
 }

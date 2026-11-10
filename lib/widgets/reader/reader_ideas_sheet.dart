@@ -71,10 +71,9 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
   bool _failed = false;
   final ScrollController _scroll = ScrollController();
 
-  Color get _textColor =>
-      widget.preset.isDark ? widget.preset.textColor : const Color(0xFF111111);
+  Color get _textColor => widget.preset.textColor;
 
-  Color get _mutedColor => const Color(0xFF999999);
+  Color get _mutedColor => widget.preset.mutedTextColor;
 
   bool get _nearEnd => _scroll.hasClients && _scroll.position.extentAfter < 400;
 

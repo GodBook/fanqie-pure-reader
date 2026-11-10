@@ -859,8 +859,8 @@ class ReaderChapterLayout {
     // and the bubble is clipped.
     return PlaceholderDimensions(
       size: Size(
-        (metrics.width + ReaderBubbleMetrics.gap) * scale,
-        metrics.height * scale,
+        (metrics.touchWidth + ReaderBubbleMetrics.gap) * scale,
+        metrics.touchHeight * scale,
       ),
       alignment: PlaceholderAlignment.middle,
     );

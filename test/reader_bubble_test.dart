@@ -16,6 +16,7 @@ import 'package:fqapp/widgets/wenku/wenku_segments.dart';
 import 'package:fqapp/services/chapter_text_formatter.dart';
 import 'package:fqapp/services/reader_preferences.dart';
 import 'package:fqapp/widgets/reader/reader_bubble.dart';
+import 'package:fqapp/widgets/reader/reader_ideas_sheet.dart';
 
 import 'support/fakes.dart';
 import 'support/reader_settings_nav.dart';
@@ -306,7 +307,9 @@ void main() {
       // Measured from cni.webp: the body's top stroke sits ~4.5-5.5dp below
       // the top of the 24x24dp square box, above the label column (12dp from
       // the box's left edge).
-      const centreX = ReaderBubbleMetrics.gap + 12;
+      final centreX =
+          tester.getRect(find.byType(Image)).center.dx -
+          tester.getRect(find.byKey(boundary)).left;
       final centreY = height ~/ 2;
       // Small box: 24x24dp.
       final boxTop = centreY - 12;
@@ -381,6 +384,47 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+    }
+
+    for (final mode in [ReaderPageMode.paged, ReaderPageMode.scroll]) {
+      for (final scale in [1.0, 1.8]) {
+        testWidgets('tapping outside the original icon opens its paragraph '
+            'in $mode at scale $scale', (tester) async {
+          await pumpReader(
+            tester,
+            ideas: _ideas(),
+            mode: mode,
+            scaler: TextScaler.linear(scale),
+          );
+          final bubble = find.byType(ReaderParagraphBubble).first;
+          final icon = find.descendant(
+            of: bubble,
+            matching: find.byType(Image),
+          );
+          final original = ReaderBubbleMetrics.forFontSize(scale * 18);
+          final imageWidget = tester.widget<Image>(icon);
+          // The asset retains its original dimensions inside the larger box.
+          expect(imageWidget.width, original.width);
+          final bounds = tester.getRect(icon);
+          final touch = tester.getRect(
+            find.descendant(of: bubble, matching: find.byType(GestureDetector)),
+          );
+          expect(touch.width, greaterThanOrEqualTo(44));
+          expect(touch.height, greaterThanOrEqualTo(44));
+          final point = Offset(bounds.right + 4, bounds.center.dy);
+          expect(bounds.contains(point), isFalse);
+          expect(touch.contains(point), isTrue);
+          await tester.tapAt(point);
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<ReaderIdeasSheet>(find.byType(ReaderIdeasSheet))
+                .initialParaIndex,
+            0,
+          );
+          expect(tester.takeException(), isNull);
+        });
+      }
     }
 
     testWidgets('draws a bubble for every paragraph that has ideas', (
@@ -647,8 +691,27 @@ void main() {
       expect(bubble.top, greaterThanOrEqualTo(paragraph.top - 0.01));
       expect(bubble.bottom, lessThanOrEqualTo(paragraph.bottom + 0.01));
       expect(bubble.left, greaterThan(paragraph.left));
-      // On the last line: it trails the paragraph instead of interrupting it.
-      expect(bubble.center.dy, greaterThan(paragraph.center.dy));
+      // Compare against the actual final glyph, rather than assuming the
+      // paragraph wraps onto multiple lines at every font / touch-box size.
+      final rich = find.descendant(
+        of: find.byKey(const ValueKey('reader-paragraph-0')),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is RichText && widget.text.toPlainText().contains('第一段话。'),
+        ),
+      );
+      final rendered = tester.renderObject<RenderParagraph>(rich);
+      final length = rendered.text.toPlainText().length;
+      final lastGlyph = rendered
+          .getBoxesForSelection(
+            TextSelection(baseOffset: length - 2, extentOffset: length - 1),
+          )
+          .last;
+      final glyphRight = rendered.localToGlobal(
+        Offset(lastGlyph.right, lastGlyph.top),
+      );
+      expect(bubble.left, greaterThanOrEqualTo(glyphRight.dx));
+      expect(bubble.bottom, greaterThan(glyphRight.dy));
     });
   });
 }
