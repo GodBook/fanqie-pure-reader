@@ -48,6 +48,29 @@ pub fn match_rest_path(path: &str, query: &Params) -> Option<RouteMatch> {
         "articles" => match_articles(tail, query),
         "items" => match_items(tail, query),
         "comments" => match_comments(tail, query),
+        "community" => {
+            if tail.len() < 2
+                || tail[0] != "topics"
+                || tail.len() > 3
+                || (tail.len() == 3 && tail[2] != "comments")
+            {
+                return None;
+            }
+            let mut params = query.clone();
+            params.set("topic_id", tail[1]);
+            params.set(
+                "community_part",
+                if tail.len() == 3 {
+                    "comments"
+                } else {
+                    "detail"
+                },
+            );
+            Some(RouteMatch {
+                api: "community_topic",
+                params,
+            })
+        }
         "forum-id" => Some(RouteMatch {
             api: "forum_id",
             params: query.clone(),

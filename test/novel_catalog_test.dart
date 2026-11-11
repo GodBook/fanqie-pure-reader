@@ -387,6 +387,12 @@ void main() {
       );
       await tester.tap(find.byKey(const ValueKey('feed-filter-score')));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.ancestor(
+          of: find.text('9.0 分以上'),
+          matching: find.byType(CheckedPopupMenuItem<double>),
+        ),
+      );
       await tester.tap(
         find.ancestor(
           of: find.text('9.0 分以上'),

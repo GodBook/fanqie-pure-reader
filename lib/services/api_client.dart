@@ -20,6 +20,7 @@ import '../models/chapter_summary.dart';
 import '../models/comment_reply.dart';
 import '../models/media_item.dart';
 import '../models/media_id.dart';
+import '../models/novel_community.dart';
 import '../models/playlet_comment.dart';
 import '../models/rank.dart';
 import '../models/related_series.dart';
@@ -58,6 +59,58 @@ class ApiClient {
                : BackendService.instance.transport);
 
   static final ApiClient instance = ApiClient();
+
+  /// Official bookstore square cell. The regular book parser intentionally
+  /// drops topic cards, so retain and parse its separate topic_data here.
+  Future<NovelTopicsPage> novelTopics({int offset = 0, String? session}) async {
+    final payload = await _decodeAsync(
+      await _get(
+        _url('/api/v1/recommend/series-feed', {
+          'cell_id': '6914906572011339784',
+          'cell_name': '书荒广场',
+          'tab_type': '2',
+          'client_template': '0',
+          'client_req_type': '1',
+          'offset': '$offset',
+          if (session != null && session.isNotEmpty) 'session_id': session,
+        }),
+      ),
+    );
+    return NovelTopicsPage.parse(payload);
+  }
+
+  Future<NovelTopic> novelTopic(String id) async {
+    final payload = await _decodeAsync(
+      await _get(
+        _url('/api/v1/community/topics/${Uri.encodeComponent(id)}', {}),
+      ),
+    );
+    final data = payload['data'];
+    if (data is! Map) throw const ApiException('话题暂时不可用，请重试');
+    final topic = NovelTopic.fromRaw(Map<String, dynamic>.from(data));
+    if (topic.id != id || topic.title.isEmpty) {
+      throw const ApiException('话题暂时不可用，请重试');
+    }
+    return topic;
+  }
+
+  Future<NovelTopicPostsPage> novelTopicPosts(
+    String id, {
+    int offset = 0,
+    String? session,
+    bool newest = false,
+  }) async {
+    final payload = await _decodeAsync(
+      await _get(
+        _url('/api/v1/community/topics/${Uri.encodeComponent(id)}/comments', {
+          'offset': '$offset',
+          'sort': newest ? 'create_time' : 'smart_hot',
+          if (session != null && session.isNotEmpty) 'session_id': session,
+        }),
+      ),
+    );
+    return NovelTopicPostsPage.parse(payload);
+  }
 
   /// Fixed read-only library resources; credentials stay in the POST body.
   Future<Map<String, dynamic>> fanqieLibraryResource({

@@ -302,8 +302,7 @@ extension _ReaderPageBuild on _ReaderPageState {
     ),
   );
 
-  /// Wenku8's transparent header rides above the progressive edge; fqapp-only
-  /// actions move to a real overflow menu instead of squeezing the book title.
+  /// Keep the shelf action beside the title in the novel reader.
   Widget _buildToolbar(ReaderThemePreset preset) => Material(
     key: const ValueKey('reader-toolbar'),
     color:
@@ -317,7 +316,7 @@ extension _ReaderPageBuild on _ReaderPageState {
         child: Row(
           children: [
             SizedBox(
-              width: 88,
+              width: widget.novelOnly ? 44 : 88,
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: GlassIconButton(
@@ -332,7 +331,9 @@ extension _ReaderPageBuild on _ReaderPageState {
               child: Text(
                 widget.title,
                 key: const ValueKey('reader-header-book-title'),
-                textAlign: TextAlign.center,
+                textAlign: widget.novelOnly
+                    ? TextAlign.start
+                    : TextAlign.center,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -343,19 +344,42 @@ extension _ReaderPageBuild on _ReaderPageState {
                 ),
               ),
             ),
-            SizedBox(
-              width: 44,
-              child: widget.novelOnly
-                  ? const SizedBox.shrink()
-                  : GlassIconButton(
-                      key: const ValueKey('reader-header-listen'),
-                      icon: CupertinoIcons.headphones,
-                      label: '听书',
-                      onPressed: _loading || _error != null
-                          ? null
-                          : () => unawaited(_openListening(fromPage: true)),
+            if (widget.novelOnly)
+              ValueListenableBuilder<int>(
+                valueListenable: ShelfStore.instance.listenable,
+                builder: (context, _, _) {
+                  final added = inShelf(_shelfEntry);
+                  return TextButton(
+                    key: const ValueKey('reader-header-shelf'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: preset.textColor,
+                      minimumSize: const Size(80, 44),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
                     ),
-            ),
+                    onPressed: () =>
+                        unawaited(toggleShelf(context, _shelfEntry)),
+                    child: Text(
+                      added ? '已在书架' : '加入书架',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  );
+                },
+              )
+            else
+              SizedBox(
+                width: 44,
+                child: GlassIconButton(
+                  key: const ValueKey('reader-header-listen'),
+                  icon: CupertinoIcons.headphones,
+                  label: '听书',
+                  onPressed: _loading || _error != null
+                      ? null
+                      : () => unawaited(_openListening(fromPage: true)),
+                ),
+              ),
             SizedBox(
               width: 44,
               child: GlassMenuAnchor(

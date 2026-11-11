@@ -13,6 +13,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/book_detail.dart';
 import '../models/media_item.dart';
 import '../models/chapter_ideas.dart';
+import '../models/novel_community.dart';
 import '../models/category_front.dart';
 import '../widgets/reader/reader_ideas_sheet.dart';
 import '../services/reader_preferences.dart';
@@ -52,6 +53,7 @@ part 'widgets.dart';
 part 'library.dart';
 part 'categories.dart';
 part 'app_update.dart';
+part 'community.dart';
 
 const novelAppName = '番茄小说纯净版';
 const novelAccent = Color(0xFFB84A38);

@@ -24,6 +24,30 @@ MediaItem book(
 
 void main() {
   test(
+    'every tenth-point score survives restart and excludes unknown scores',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      expect(novelScoreOptions, [0.0, for (var n = 70; n <= 99; n++) n / 10]);
+      for (final score in novelScoreOptions) {
+        await NovelFeedFilters(minScore: score).save(preferences);
+        expect(NovelFeedFilters.load(preferences).minScore, score);
+      }
+      expect(
+        const NovelFeedFilters(minScore: 9.3)
+            .select([
+              book('unknown'),
+              book('below', score: 9.2),
+              book('exact', score: 9.3),
+              book('above', score: 9.8),
+            ])
+            .map((b) => b.id),
+        ['exact', 'above'],
+      );
+    },
+  );
+
+  test(
     'metadata genre, rating and completion compose with stable score sorting',
     () {
       final source = [

@@ -54,6 +54,7 @@ import '../services/reader_preferences.dart';
 import '../services/reader_tap_zones.dart';
 import '../services/reader_underline_store.dart';
 import '../services/shelf_toggle.dart';
+import '../services/shelf_store.dart';
 import '../services/system_tts.dart';
 import '../widgets/chapter_cache_sheet.dart';
 import '../widgets/reader/reader_appearance_sheet.dart';

@@ -5,6 +5,44 @@ enum NovelSort { recommended, score, longest, shortest }
 
 enum NovelStatus { any, ongoing, completed }
 
+/// Shared by discovery and search. Integer tenths avoid floating-point steps.
+const novelScoreOptions = <double>[
+  0,
+  7.0,
+  7.1,
+  7.2,
+  7.3,
+  7.4,
+  7.5,
+  7.6,
+  7.7,
+  7.8,
+  7.9,
+  8.0,
+  8.1,
+  8.2,
+  8.3,
+  8.4,
+  8.5,
+  8.6,
+  8.7,
+  8.8,
+  8.9,
+  9.0,
+  9.1,
+  9.2,
+  9.3,
+  9.4,
+  9.5,
+  9.6,
+  9.7,
+  9.8,
+  9.9,
+];
+
+String novelScoreLabel(double score) =>
+    score == 0 ? '评分不限' : '${score.toStringAsFixed(1)} 分以上';
+
 class NovelGenre {
   const NovelGenre(this.name, this.tags);
   final String name;
@@ -107,7 +145,7 @@ class NovelFeedFilters {
     final score = preferences.getDouble('novel_feed_score') ?? 0;
     return NovelFeedFilters(
       genre: genre >= 0 && genre < NovelGenre.choices.length ? genre : 0,
-      minScore: [0.0, 8.0, 9.0, 9.5].contains(score) ? score : 0,
+      minScore: novelScoreOptions.contains(score) ? score : 0,
       status: NovelStatus.values.firstWhere(
         (value) => value.name == preferences.getString('novel_feed_status'),
         orElse: () => NovelStatus.any,

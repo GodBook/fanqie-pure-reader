@@ -12,6 +12,7 @@ pub mod author;
 pub mod base;
 pub mod book;
 pub mod comments;
+pub mod community;
 pub mod content;
 pub mod content_util;
 pub mod dhcontent;
@@ -184,6 +185,7 @@ pub mod server {
         toutiao::register(s);
         wkcontent::register(s);
         comments::register(s);
+        community::register(s);
         author::register(s);
         audio::register(s);
         video::register(s);

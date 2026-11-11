@@ -610,6 +610,67 @@ class _NovelFeedState extends State<NovelFeed> {
               ),
             ),
             SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                child: Material(
+                  color: colors.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(14),
+                  child: InkWell(
+                    key: const ValueKey('open-community'),
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => const NovelCommunity(),
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.forum_outlined,
+                            size: 21,
+                            color: colors.primary,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  '书荒广场',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                Text(
+                                  '看看读者都在推荐什么',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: colors.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Icon(
+                            Icons.chevron_right,
+                            size: 20,
+                            color: colors.onSurfaceVariant,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            SliverToBoxAdapter(
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
@@ -660,10 +721,8 @@ class _NovelFeedState extends State<NovelFeed> {
                       value: _filters.minScore,
                       active: _filters.minScore > 0,
                       options: {
-                        0: '评分不限',
-                        8: '8.0 分以上',
-                        9: '9.0 分以上',
-                        9.5: '9.5 分以上',
+                        for (final score in novelScoreOptions)
+                          score: novelScoreLabel(score),
                       },
                       onChanged: (value) =>
                           _change(_filters.copyWith(minScore: value)),
@@ -1172,10 +1231,10 @@ class _NovelSearchState extends State<NovelSearch> {
                           _resultFilters = _resultFilters.copyWith(minScore: v),
                     ),
                     itemBuilder: (_) => [
-                      for (final v in [0.0, 8.0, 9.0, 9.5])
+                      for (final v in novelScoreOptions)
                         PopupMenuItem(
                           value: v,
-                          child: Text(v == 0 ? '评分不限' : '$v 分以上'),
+                          child: Text(novelScoreLabel(v)),
                         ),
                     ],
                     child: Padding(
