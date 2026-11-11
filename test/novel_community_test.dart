@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fqapp/models/book_comment.dart';
 import 'package:fqapp/models/novel_community.dart';
+import 'package:fqapp/models/media_item.dart';
 import 'package:fqapp/novel/app.dart';
 
 const topic = NovelTopic(
@@ -18,6 +19,97 @@ NovelRecommendationPost post(String id, String text) => NovelRecommendationPost(
 );
 
 void main() {
+  for (final scale in [1.0, 1.8]) {
+    testWidgets(
+      'reader books scroll horizontally without paging posts at scale $scale',
+      (tester) async {
+        var calls = 0;
+        final books = List.generate(
+          8,
+          (i) => MediaItem(
+            id: 'book$i',
+            title: '荐书作品$i',
+            cover: '',
+            author: '作者',
+            badge: '',
+            ep: '',
+            kind: 'book',
+            score: i == 0 ? 9.3 : null,
+          ),
+        );
+        await tester.binding.setSurfaceSize(const Size(320, 900));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(scale)),
+              child: child!,
+            ),
+            home: NovelTopicPage(
+              topic: const NovelTopic(id: 'horizontal', title: '求书'),
+              topicLoader: (_, _) async =>
+                  const NovelTopic(id: 'horizontal', title: '求书'),
+              postsLoader: (_, _, _, _, _) async {
+                calls++;
+                return NovelTopicPostsPage(
+                  posts: [
+                    NovelRecommendationPost(
+                      const BookComment(
+                        id: 'first',
+                        text: '第一位的荐书',
+                        userName: '书友甲',
+                      ),
+                      books,
+                    ),
+                    NovelRecommendationPost(
+                      const BookComment(
+                        id: 'second',
+                        text: '第二位的荐书',
+                        userName: '书友乙',
+                      ),
+                      [books.last],
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final strip = find.byKey(
+          const PageStorageKey('community-books-post-horizontal-first'),
+        );
+        await tester.ensureVisible(strip);
+        await tester.pumpAndSettle();
+        final first = find.byKey(
+          const ValueKey('community-book-post-horizontal-first-book0'),
+        );
+        final second = find.byKey(
+          const ValueKey('community-book-post-horizontal-first-book1'),
+        );
+        expect(tester.getTopLeft(first).dy, tester.getTopLeft(second).dy);
+        expect(
+          tester.getTopLeft(second).dx,
+          greaterThan(tester.getTopLeft(first).dx),
+        );
+        expect(find.text('9.3分'), findsOneWidget);
+        final postY = tester.getTopLeft(find.text('第一位的荐书')).dy;
+        await tester.drag(strip, const Offset(-720, 0));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(
+            const ValueKey('community-book-post-horizontal-first-book7'),
+          ),
+          findsOneWidget,
+        );
+        expect(tester.getTopLeft(find.text('第一位的荐书')).dy, postY);
+        expect(calls, 1);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
   test(
     'official topic cards retain author and counters, deduplicate and reject missing identity',
     () {

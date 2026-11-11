@@ -1,5 +1,7 @@
 part of 'app.dart';
 
+final _recommendationSettingsChanged = ValueNotifier(0);
+
 typedef NovelFeedPageLoader =
     Future<HomepagePage> Function(
       int offset,
@@ -268,6 +270,7 @@ class _NovelFeedState extends State<NovelFeed> {
   void initState() {
     super.initState();
     NovelRuntime.localReady.addListener(_restoreReadyCache);
+    _recommendationSettingsChanged.addListener(_restoreHidden);
     _scroll.addListener(() {
       final showTop = _scroll.offset > 500;
       if (showTop != _showScrollTop) {
@@ -295,9 +298,20 @@ class _NovelFeedState extends State<NovelFeed> {
     await _load(refresh: true);
   }
 
+  void _restoreHidden() {
+    if (!mounted) return;
+    setState(() {
+      _hiddenBooks = (_preferences?.getStringList('novel_hidden_books') ?? [])
+          .toSet();
+      _hiddenAuthors =
+          (_preferences?.getStringList('novel_hidden_authors') ?? []).toSet();
+    });
+  }
+
   @override
   void dispose() {
     NovelRuntime.localReady.removeListener(_restoreReadyCache);
+    _recommendationSettingsChanged.removeListener(_restoreHidden);
     _request?.cancel();
     _generation++;
     _scroll.dispose();
@@ -545,22 +559,6 @@ class _NovelFeedState extends State<NovelFeed> {
             tooltip: '全部分类',
             onPressed: _categories,
             icon: const Icon(Icons.grid_view_outlined),
-          ),
-          IconButton(
-            tooltip: '设置',
-            onPressed: () async {
-              await _showNovelSettings(context);
-              if (mounted) {
-                _hiddenBooks =
-                    (_preferences?.getStringList('novel_hidden_books') ?? [])
-                        .toSet();
-                _hiddenAuthors =
-                    (_preferences?.getStringList('novel_hidden_authors') ?? [])
-                        .toSet();
-                setState(() {});
-              }
-            },
-            icon: const Icon(Icons.tune),
           ),
         ],
       ),

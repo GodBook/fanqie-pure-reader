@@ -54,6 +54,7 @@ part 'library.dart';
 part 'categories.dart';
 part 'app_update.dart';
 part 'community.dart';
+part 'settings.dart';
 
 const novelAppName = '番茄小说纯净版';
 const novelAccent = Color(0xFFB84A38);
@@ -367,14 +368,15 @@ class _LocalBootstrapState extends State<NovelLocalBootstrap> {
 }
 
 class NovelShell extends StatefulWidget {
-  const NovelShell({super.key});
+  const NovelShell({super.key, this.feed = const NovelFeed()});
+  final Widget feed;
   @override
   State<NovelShell> createState() => _NovelShellState();
 }
 
 class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
   int _selected = 0;
-  final Map<int, Widget> _pages = {0: const NovelFeed()};
+  late final Map<int, Widget> _pages = {0: widget.feed};
   Timer? _updateTimer;
   Timer? _updateKickoff;
   StreamSubscription<List<ConnectivityResult>>? _network;
@@ -429,39 +431,54 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() {
       _selected = index;
-      _pages.putIfAbsent(index, () => const NovelShelf());
+      _pages.putIfAbsent(
+        index,
+        () => index == 1 ? const NovelShelf() : const NovelSettings(),
+      );
     });
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: IndexedStack(
-      index: _selected,
-      children: [
-        for (var i = 0; i < 2; i++)
-          TickerMode(
-            enabled: _selected == i,
-            child: _pages[i] ?? const SizedBox.shrink(),
+  Widget build(BuildContext context) => PopScope(
+    canPop: _selected == 0,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop) unawaited(_select(0));
+    },
+    child: Scaffold(
+      body: IndexedStack(
+        index: _selected,
+        children: [
+          for (var i = 0; i < 3; i++)
+            TickerMode(
+              enabled: _selected == i,
+              child: _pages[i] ?? const SizedBox.shrink(),
+            ),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _selected,
+        onDestinationSelected: _select,
+        destinations: const [
+          NavigationDestination(
+            key: ValueKey('nav-discover'),
+            icon: Icon(Icons.explore_outlined),
+            selectedIcon: Icon(Icons.explore),
+            label: '书城',
           ),
-      ],
-    ),
-    bottomNavigationBar: NavigationBar(
-      selectedIndex: _selected,
-      onDestinationSelected: _select,
-      destinations: const [
-        NavigationDestination(
-          key: ValueKey('nav-discover'),
-          icon: Icon(Icons.explore_outlined),
-          selectedIcon: Icon(Icons.explore),
-          label: '书城',
-        ),
-        NavigationDestination(
-          key: ValueKey('nav-shelf'),
-          icon: Icon(Icons.bookmarks_outlined),
-          selectedIcon: Icon(Icons.bookmarks),
-          label: '书架',
-        ),
-      ],
+          NavigationDestination(
+            key: ValueKey('nav-shelf'),
+            icon: Icon(Icons.bookmarks_outlined),
+            selectedIcon: Icon(Icons.bookmarks),
+            label: '书架',
+          ),
+          NavigationDestination(
+            key: ValueKey('nav-settings'),
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: '设置',
+          ),
+        ],
+      ),
     ),
   );
 }

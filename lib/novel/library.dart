@@ -390,7 +390,6 @@ extension _NovelShelfLibrary on _NovelShelfState {
                 _selection.clear();
               });
             }
-            if (action == 'settings') _showNovelSettings(context);
             if (action == 'search') _openSearch(context);
           },
           itemBuilder: (_) => [
@@ -400,7 +399,6 @@ extension _NovelShelfLibrary on _NovelShelfState {
               child: Text(_managing ? '完成管理' : '多选管理'),
             ),
             const PopupMenuItem(value: 'groups', child: Text('管理分组')),
-            const PopupMenuItem(value: 'settings', child: Text('设置与备份')),
           ],
         ),
       ],

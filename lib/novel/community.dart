@@ -417,9 +417,11 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                   ),
                 ),
               ),
-              SliverList.builder(
-                itemCount: _topic.books.length,
-                itemBuilder: (_, i) => _BookRow(_topic.books[i]),
+              SliverToBoxAdapter(
+                child: _CommunityBooks(
+                  books: _topic.books,
+                  storageId: 'topic-${_topic.id}',
+                ),
               ),
             ],
             SliverToBoxAdapter(
@@ -480,17 +482,56 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            [
-                              comment.userName.isEmpty
-                                  ? '读者'
-                                  : comment.userName,
-                              comment.paragraphTime(),
-                            ].where((s) => s.isNotEmpty).join(' · '),
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: colors.onSurfaceVariant,
-                            ),
+                          Row(
+                            children: [
+                              ClipOval(
+                                child: SizedBox.square(
+                                  dimension: 36,
+                                  child: comment.userAvatar.isEmpty
+                                      ? Icon(
+                                          Icons.person_outline,
+                                          color: colors.onSurfaceVariant,
+                                        )
+                                      : CachedNetworkImage(
+                                          imageUrl: comment.userAvatar,
+                                          fit: BoxFit.cover,
+                                          memCacheWidth:
+                                              (36 *
+                                                      MediaQuery.devicePixelRatioOf(
+                                                        context,
+                                                      ))
+                                                  .round(),
+                                          errorWidget: (_, _, _) =>
+                                              const Icon(Icons.person_outline),
+                                        ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      comment.userName.isEmpty
+                                          ? '读者'
+                                          : comment.userName,
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    if (comment.paragraphTime().isNotEmpty)
+                                      Text(
+                                        comment.paragraphTime(),
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: colors.onSurfaceVariant,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           ),
                           if (comment.text.isNotEmpty) ...[
                             const SizedBox(height: 10),
@@ -505,7 +546,11 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                         ],
                       ),
                     ),
-                    for (final book in post.books) _BookRow(book),
+                    if (post.books.isNotEmpty)
+                      _CommunityBooks(
+                        books: post.books,
+                        storageId: 'post-${_topic.id}-${comment.id}',
+                      ),
                     const Padding(
                       padding: EdgeInsets.symmetric(horizontal: 20),
                       child: Divider(height: 1),
@@ -528,4 +573,93 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
       ),
     );
   }
+}
+
+/// Each reader's books stay together; horizontal scrolling never pages posts.
+class _CommunityBooks extends StatelessWidget {
+  const _CommunityBooks({required this.books, required this.storageId});
+  final List<MediaItem> books;
+  final String storageId;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final width = ((constraints.maxWidth - 64) / 3.4).clamp(88.0, 112.0);
+      final titleHeight =
+          (MediaQuery.textScalerOf(context).scale(14) * 1.5).ceilToDouble() * 2;
+      return SizedBox(
+        height: width * 1.4 + 8 + titleHeight + 20,
+        child: ListView.separated(
+          key: PageStorageKey('community-books-$storageId'),
+          primary: false,
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+          itemCount: books.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 12),
+          itemBuilder: (context, index) {
+            final book = books[index];
+            return SizedBox(
+              width: width,
+              child: InkWell(
+                key: ValueKey('community-book-$storageId-${book.id}'),
+                borderRadius: BorderRadius.circular(8),
+                onTap: () => _openBook(context, book),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Stack(
+                      children: [
+                        _Cover(book, width: width),
+                        if (book.score != null)
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: Container(
+                              padding: const EdgeInsets.fromLTRB(6, 12, 6, 5),
+                              decoration: const BoxDecoration(
+                                borderRadius: BorderRadius.vertical(
+                                  bottom: Radius.circular(8),
+                                ),
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.transparent,
+                                    Color(0xCC000000),
+                                  ],
+                                ),
+                              ),
+                              child: Text(
+                                '${book.score}分',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      book.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        height: 1.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      );
+    },
+  );
 }
