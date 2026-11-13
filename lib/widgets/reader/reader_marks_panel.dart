@@ -3,6 +3,7 @@ import '../../models/media_item.dart';
 import '../../services/reader_bookmark_store.dart';
 import '../../services/reader_underline_store.dart';
 import '../../services/reader_preferences.dart';
+import 'reader_note_editor_dialog.dart';
 import 'reader_theme.dart';
 
 /// One place to revisit the reader's own words and saved source excerpts.
@@ -86,37 +87,11 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
   }
 
   Future<void> _edit(ReaderBookmark mark) async {
-    final input = TextEditingController(text: mark.note);
-    final note = await showDialog<String>(
+    final saved = await showReaderNoteEditor(
       context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('编辑笔记'),
-        content: TextField(
-          controller: input,
-          minLines: 3,
-          maxLines: 6,
-          maxLength: 2000,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () {
-              if (input.text.trim().isNotEmpty) {
-                Navigator.pop(c, input.text.trim());
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    Future<void>.delayed(const Duration(seconds: 1), input.dispose);
-    if (note == null) return;
-    try {
-      await widget.bookmarks.add(
+      title: '编辑笔记',
+      initialValue: mark.note,
+      onSave: (note) => widget.bookmarks.add(
         ReaderBookmark(
           bookId: mark.bookId,
           chapterId: mark.chapterId,
@@ -127,11 +102,9 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
           note: note,
           noteId: mark.noteId,
         ),
-      );
-      await _load();
-    } catch (_) {
-      if (mounted) setState(() => _error = '笔记保存失败，请重试');
-    }
+      ),
+    );
+    if (saved == true && mounted) await _load();
   }
 
   Future<void> _delete(
@@ -174,7 +147,7 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
           (e) => switch (_filter) {
             '笔记' => e.mark.note.isNotEmpty,
             '划线' => e.underlineKey != null,
-            '书签' => e.underlineKey == null,
+            '书签' => e.underlineKey == null && e.mark.note.isEmpty,
             _ => true,
           },
         )

@@ -172,8 +172,10 @@ class ReaderParagraphBubble extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(left: ReaderBubbleMetrics.gap),
       child: Semantics(
+        container: true,
         button: onTap != null,
         label: '$count条段评',
+        onTap: onTap,
         excludeSemantics: true,
         child: GestureDetector(
           key: ValueKey('reader-para-bubble-$count'),

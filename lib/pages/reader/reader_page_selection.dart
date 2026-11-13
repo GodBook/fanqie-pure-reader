@@ -339,47 +339,56 @@ extension _ReaderPageSelection on _ReaderPageState {
           if (mounted) _showMessage('书签保存失败，请重试');
         }
       case ReaderParagraphAction.note:
-        final controller = TextEditingController();
-        final note = await showDialog<String>(
+        // The editor can remain open while a catalogue or body refresh lands.
+        // Capture the selected source before awaiting the dialog so its old
+        // offsets can never be interpreted against a different chapter.
+        final chapterId = _chapter.itemId;
+        final chapterVersion = _chapter.version;
+        final chapterTitle = _chapter.title;
+        final content = _content;
+        final replacement = _replacement;
+        final loadGeneration = _loadGeneration;
+        final sourceOffset = layout.sourceOffsetForDisplay(selection.start);
+        final excerpt = layout
+            .textInRange(selection.start, selection.end)
+            .trim();
+        final createdAt = DateTime.now().millisecondsSinceEpoch;
+        final noteId = _bookmarkStore.newNoteId();
+        final saved = await showReaderNoteEditor(
           context: context,
-          builder: (c) => AlertDialog(
-            title: const Text('写下阅读笔记'),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              minLines: 3,
-              maxLines: 6,
-              maxLength: 2000,
-              decoration: const InputDecoration(hintText: '记录想法，仅保存在本机'),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(c),
-                child: const Text('取消'),
-              ),
-              TextButton(
-                onPressed: () {
-                  if (controller.text.trim().isNotEmpty) {
-                    Navigator.pop(c, controller.text.trim());
-                  }
-                },
-                child: const Text('保存'),
-              ),
-            ],
-          ),
-        );
-        // The route may animate after its result resolves; defer disposing.
-        Future<void>.delayed(const Duration(seconds: 1), controller.dispose);
-        if (note != null) {
-          try {
-            final saved = await _addBookmark(selection: selection, note: note);
-            if (mounted) {
-              _showMessage(saved == null ? '阅读位置尚未就绪' : '笔记已保存，可在书签与标注中回看');
+          title: '写下阅读笔记',
+          hintText: '记录想法，仅保存在本机',
+          autofocus: true,
+          onSave: (note) async {
+            if (!mounted ||
+                _index < 0 ||
+                _index >= widget.chapters.length ||
+                _chapter.itemId != chapterId ||
+                _chapter.version != chapterVersion ||
+                _loadGeneration != loadGeneration ||
+                _content != content ||
+                !identical(_replacement, replacement)) {
+              throw const ReaderNoteSaveException(
+                '正文已更新，无法保存到原位置。请复制内容后重新选择原文。',
+              );
             }
-          } catch (_) {
-            if (mounted) _showMessage('笔记保存失败，请重试');
-          }
-        }
+            await _bookmarkStore.addNote(
+              ReaderBookmark(
+                bookId: widget.bookId,
+                chapterId: chapterId,
+                title: chapterTitle,
+                text: excerpt.length > 240
+                    ? excerpt.substring(0, 240)
+                    : excerpt,
+                sourceOffset: sourceOffset,
+                createdAt: createdAt,
+                note: note,
+                noteId: noteId,
+              ),
+            );
+          },
+        );
+        if (mounted && saved == true) _showMessage('笔记已保存，可在书签与标注中回看');
       case ReaderParagraphAction.underline:
       case ReaderParagraphAction.removeUnderline:
         await _toggleSelectionUnderline(

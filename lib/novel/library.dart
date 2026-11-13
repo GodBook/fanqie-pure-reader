@@ -12,18 +12,39 @@ Future<void> _globalReaderSettings(BuildContext context) async {
     await device.close();
     return;
   }
+  var brightnessRevision = 0;
+  Future<void> savePreferences(ReaderPreferences value) async {
+    try {
+      await value.save();
+    } catch (_) {
+      if (context.mounted) _notice(context, '阅读设置保存失败');
+    }
+  }
+
+  void applyBrightness(ReaderPreferences value) {
+    final revision = ++brightnessRevision;
+    unawaited(
+      device
+          .setBrightness(
+            followSystem: value.followSystemBrightness,
+            brightness: value.brightness,
+          )
+          .then((applied) {
+            if (!applied && revision == brightnessRevision && context.mounted) {
+              _notice(context, '暂时无法调整亮度，请重新进入阅读设置');
+            }
+          }),
+    );
+  }
+
   try {
     await showReaderSettingsSheet(
       context: context,
       initialValue: preferences,
       novelOnly: true,
-      onChanged: (value) async {
+      onChanged: (value) {
         preferences = value;
-        try {
-          await value.save();
-        } catch (_) {
-          if (context.mounted) _notice(context, '阅读设置保存失败');
-        }
+        unawaited(savePreferences(value));
       },
       onPickFont: device.pickFont,
       deviceAvailable: status != null,
@@ -33,18 +54,19 @@ Future<void> _globalReaderSettings(BuildContext context) async {
           brightness: level,
           followSystemBrightness: false,
         );
-        unawaited(device.setBrightness(followSystem: false, brightness: level));
+        applyBrightness(preferences);
       },
-      onBrightnessEnd: () => unawaited(preferences.save()),
+      onBrightnessEnd: () => unawaited(savePreferences(preferences)),
       onFollowSystem: () {
-        preferences = preferences.copyWith(followSystemBrightness: true);
-        unawaited(preferences.save());
-        unawaited(
-          device.setBrightness(
-            followSystem: true,
-            brightness: preferences.brightness,
-          ),
+        final followSystem = !preferences.followSystemBrightness;
+        preferences = preferences.copyWith(
+          followSystemBrightness: followSystem,
+          brightness: followSystem
+              ? preferences.brightness
+              : status?.systemBrightness ?? preferences.brightness,
         );
+        unawaited(savePreferences(preferences));
+        applyBrightness(preferences);
       },
       autoTurnActive: false,
       onAutoTurn: null,

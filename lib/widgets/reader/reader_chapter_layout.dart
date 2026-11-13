@@ -681,11 +681,18 @@ class ReaderChapterLayout {
 
   String sourceTextInRange(int start, int end) {
     final out = StringBuffer();
-    for (final block in _sourceBlocks) {
+    for (var i = 0; i < _sourceBlocks.length; i++) {
+      final block = _sourceBlocks[i];
       final from = math.max(start, block.start) - block.start;
       final to = math.min(end, block.end) - block.start;
       if (to > from) {
         out.write(block.text.substring(from, to).replaceAll('\uFFFC', ''));
+      }
+      if (i + 1 < _sourceBlocks.length &&
+          start <= block.end &&
+          end > block.end &&
+          _sourceBlocks[i + 1].start > block.end) {
+        out.write('\n');
       }
     }
     return out.toString();
@@ -910,13 +917,19 @@ class ReaderChapterLayout {
   /// are dropped so copied or underlined text is what a reader would quote.
   String textInRange(int start, int end) {
     final buffer = StringBuffer();
-    for (final block in blocks) {
-      if (block.start >= end) break;
-      if (block.end <= start) continue;
+    for (var i = 0; i < blocks.length; i++) {
+      final block = blocks[i];
       final from = math.max(start, block.start) - block.start;
       final to = math.min(end, block.end) - block.start;
-      if (to <= from) continue;
-      buffer.write(block.text.substring(from, to).replaceAll('\uFFFC', ''));
+      if (to > from) {
+        buffer.write(block.text.substring(from, to).replaceAll('\uFFFC', ''));
+      }
+      if (i + 1 < blocks.length &&
+          start <= block.end &&
+          end > block.end &&
+          blocks[i + 1].start > block.end) {
+        buffer.write('\n');
+      }
     }
     return buffer.toString();
   }
@@ -1307,32 +1320,74 @@ class ReaderBlockText extends StatelessWidget {
   final ReaderContentBlock block;
   final ReaderLayoutSpec spec;
 
-  const ReaderBlockText({super.key, required this.block, required this.spec});
+  /// Spoken text for a paginated fragment; null reads the whole block.
+  final String? semanticText;
+
+  /// Only the fragment containing the paragraph end exposes its bubble.
+  final bool exposeBubbleSemantics;
+
+  const ReaderBlockText({
+    super.key,
+    required this.block,
+    required this.spec,
+    this.semanticText,
+    this.exposeBubbleSemantics = true,
+  });
 
   @override
   Widget build(BuildContext context) {
     final key = block.isTitle
         ? const ValueKey('reader-chapter-title')
         : ValueKey('reader-paragraph-${block.index - 1}');
-    return block.isTitle
-        ? Text(
-            block.text,
-            key: key,
-            style: block.span.style,
-            textAlign: block.align,
-            textScaler: spec.textScaler,
-            textDirection: TextDirection.ltr,
-            locale: const Locale('zh', 'CN'),
-          )
-        : Text.rich(
-            block.span,
-            key: key,
-            style: block.span.style,
-            textAlign: block.align,
-            textScaler: spec.textScaler,
-            textDirection: TextDirection.ltr,
-            locale: const Locale('zh', 'CN'),
-            semanticsLabel: block.text,
-          );
+    // Keep each paragraph's spoken text separate from neighbouring blocks.
+    // Inline bubbles introduce their own semantic boundary below this one.
+    return Semantics(
+      container: true,
+      child: block.isTitle
+          ? Text(
+              block.text,
+              key: key,
+              style: block.span.style,
+              textAlign: block.align,
+              textScaler: spec.textScaler,
+              textDirection: TextDirection.ltr,
+              locale: const Locale('zh', 'CN'),
+              semanticsLabel: semanticText,
+            )
+          : Text.rich(
+              semanticText == null && exposeBubbleSemantics
+                  ? block.span
+                  : TextSpan(
+                      style: block.span.style,
+                      children: [
+                        for (final child
+                            in block.span.children ?? const <InlineSpan>[])
+                          if (child is TextSpan && child.text != null)
+                            TextSpan(
+                              text: child.text,
+                              style: child.style,
+                              semanticsLabel: semanticText,
+                            )
+                          else if (child is WidgetSpan &&
+                              child.child is ReaderParagraphBubble &&
+                              !exposeBubbleSemantics)
+                            WidgetSpan(
+                              alignment: child.alignment,
+                              baseline: child.baseline,
+                              style: child.style,
+                              child: ExcludeSemantics(child: child.child),
+                            )
+                          else
+                            child,
+                      ],
+                    ),
+              key: key,
+              style: block.span.style,
+              textAlign: block.align,
+              textScaler: spec.textScaler,
+              textDirection: TextDirection.ltr,
+              locale: const Locale('zh', 'CN'),
+            ),
+    );
   }
 }

@@ -37,6 +37,7 @@ import '../services/chapter_download.dart';
 import '../services/fair_memory.dart';
 import '../services/library_store.dart';
 import '../services/novel_download_manager.dart';
+import '../services/novel_image_store.dart';
 import '../services/reader_history.dart';
 import '../services/shelf_store.dart';
 import '../services/shelf_group_store.dart';

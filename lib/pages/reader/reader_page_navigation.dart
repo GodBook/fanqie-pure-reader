@@ -112,10 +112,163 @@ extension _ReaderPageNavigation on _ReaderPageState {
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
+  /// One reversible, reader-initiated jump. Ordinary page turns do not change
+  /// the anchor; a second explicit jump replaces it with its own origin.
+  bool get _hasReturnReadingPosition => _returnReadingPosition != null;
+
+  ({String chapterId, int sourceOffset})? _captureTemporaryJumpOrigin() {
+    if (!widget.novelOnly || _loading || !_progressReady) return null;
+    final joined = _joined ? _joinedKey.currentState?.position : null;
+    if (joined != null) {
+      // The joined window may still hold its previous indexes while a changed
+      // catalogue is being rebuilt. Its body carries the stable identity.
+      final sourceId = joined.chapter.sourceChapter?.itemId;
+      final String chapterId;
+      if (sourceId != null) {
+        if (!widget.chapters.any((chapter) => chapter.itemId == sourceId)) {
+          return null;
+        }
+        chapterId = sourceId;
+      } else if (joined.index == _index &&
+          joined.index >= 0 &&
+          joined.index < widget.chapters.length &&
+          identical(joined.chapter.layout, _chapterLayout) &&
+          (_contentSourceChapter == null ||
+              _contentSourceChapter!.itemId == _chapter.itemId)) {
+        // Only fall back to an index when it is also the active layout.
+        chapterId = _chapter.itemId;
+      } else {
+        return null;
+      }
+      final layout = joined.chapter.layout;
+      return (
+        chapterId: chapterId,
+        sourceOffset: layout.sourceOffsetForDisplay(
+          layout.textOffsetAtScroll(joined.scroll),
+        ),
+      );
+    }
+    final layout = _chapterLayout;
+    if (layout == null || _index < 0 || _index >= widget.chapters.length) {
+      return null;
+    }
+    _captureScrollProgress(updateTextOffset: true);
+    return (
+      chapterId: _chapter.itemId,
+      sourceOffset: layout.sourceOffsetForDisplay(_textOffset),
+    );
+  }
+
+  void _rememberTemporaryJump(
+    ({String chapterId, int sourceOffset})? origin,
+    int generation,
+  ) {
+    if (!mounted ||
+        origin == null ||
+        generation != _readerNavigationGeneration) {
+      return;
+    }
+    // A cancelled or no-op jump should leave an earlier return option intact.
+    final current = _captureTemporaryJumpOrigin();
+    if (current == origin) return;
+    _setState(() => _returnReadingPosition = origin);
+  }
+
+  /// Used by the directory after it has resolved the selected chapter by ID.
+  Future<void> _jumpFromDirectory(
+    int index, {
+    required int navigationGeneration,
+  }) async {
+    if (index < 0 || index >= widget.chapters.length || index == _index) return;
+    final origin = _captureTemporaryJumpOrigin();
+    final targetId = widget.chapters[index].itemId;
+    await _jumpToChapter(index, navigationGeneration: navigationGeneration);
+    if (!mounted ||
+        navigationGeneration != _readerNavigationGeneration ||
+        _index < 0 ||
+        _index >= widget.chapters.length ||
+        _chapter.itemId != targetId) {
+      return;
+    }
+    // Keep a way back even when the destination chapter failed to load.
+    _rememberTemporaryJump(origin, navigationGeneration);
+  }
+
+  Future<void> _returnToReadingPosition() async {
+    final origin = _returnReadingPosition;
+    if (origin == null) return;
+    if (_loading || _changingChapter) {
+      _showMessage('正文正在加载，请稍后返回原位置');
+      return;
+    }
+    final index = widget.chapters.indexWhere(
+      (c) => c.itemId == origin.chapterId,
+    );
+    if (index < 0) {
+      _setState(() => _returnReadingPosition = null);
+      _showMessage('原阅读章节已不在目录中');
+      return;
+    }
+    final generation = ++_readerNavigationGeneration;
+    if (index != _index) {
+      await _jumpToChapter(index, navigationGeneration: generation);
+    } else if (_error != null) {
+      // A previous return already selected this chapter but its load failed.
+      // Retry the load while retaining the original return anchor.
+      await _load();
+    }
+    if (!mounted || generation != _readerNavigationGeneration) return;
+    if (_index < 0 ||
+        _index >= widget.chapters.length ||
+        _chapter.itemId != origin.chapterId ||
+        _error != null) {
+      _showMessage('暂时无法返回原位置，请重试');
+      return;
+    }
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || generation != _readerNavigationGeneration) return;
+    if (_index < 0 ||
+        _index >= widget.chapters.length ||
+        _chapter.itemId != origin.chapterId) {
+      return;
+    }
+    final layout = _chapterLayout;
+    if (layout == null || !_progressReady) {
+      _showMessage('正文尚未就绪，请稍后返回原位置');
+      return;
+    }
+    if (origin.sourceOffset > layout.sourceTextLength) {
+      _setState(() => _returnReadingPosition = null);
+      _showMessage('正文已更新，原位置不再可用');
+      return;
+    }
+    final targetOffset = layout.displayOffsetForSource(origin.sourceOffset);
+    final landed = await _landAtOffset(
+      targetOffset,
+      highlight: false,
+      navigationGeneration: generation,
+    );
+    if (mounted &&
+        landed &&
+        generation == _readerNavigationGeneration &&
+        _returnReadingPosition == origin &&
+        identical(_chapterLayout, layout) &&
+        (!_paged || _pageIndex == layout.pageForOffset(targetOffset))) {
+      _setState(() {
+        // The return row shortens the viewport. Its page start can precede
+        // the exact saved origin; preserve that origin when removing the row
+        // makes the pages taller again, instead of restoring to the old start.
+        if (_paged) _textOffset = targetOffset;
+        _returnReadingPosition = null;
+      });
+    }
+  }
+
   Future<void> _showFind() async {
-    ++_readerNavigationGeneration;
+    final generation = ++_readerNavigationGeneration;
     final layout = _chapterLayout;
     if (_loading || !_progressReady || layout == null) return;
+    final origin = _captureTemporaryJumpOrigin();
     final chapterId = _chapter.itemId;
     final replacement = _replacement;
     _readerPanelOpen = true;
@@ -134,18 +287,32 @@ extension _ReaderPageNavigation on _ReaderPageState {
         preset: preset,
       ),
     );
-    if (!mounted || match == null || _chapter.itemId != chapterId) return;
+    if (!mounted ||
+        match == null ||
+        generation != _readerNavigationGeneration ||
+        _chapter.itemId != chapterId) {
+      return;
+    }
     // Geometry changes do not change display-text offsets. Mapping a match
     // through source offsets would expand a hit inside a replacement to the
     // entire replacement, so retain its exact range while the text is stable.
     await WidgetsBinding.instance.endOfFrame;
-    if (!mounted || _chapter.itemId != chapterId) return;
+    if (!mounted ||
+        generation != _readerNavigationGeneration ||
+        _chapter.itemId != chapterId) {
+      return;
+    }
     final current = _chapterLayout;
     if (current == null || !identical(replacement, _replacement)) {
       _showMessage('正文已更新，请重新查找');
       return;
     }
-    await _landAtOffset(match.start, end: match.end);
+    final landed = await _landAtOffset(
+      match.start,
+      end: match.end,
+      navigationGeneration: generation,
+    );
+    if (landed) _rememberTemporaryJump(origin, generation);
   }
 
   Future<ReaderBookmark?> _addBookmark({
@@ -256,9 +423,18 @@ extension _ReaderPageNavigation on _ReaderPageState {
       _showMessage('目录中已找不到这条书签的章节');
       return;
     }
+    final origin = _captureTemporaryJumpOrigin();
     _takeOverListening();
     if (target != _index) {
       await _jumpToChapter(target, navigationGeneration: generation);
+      if (mounted &&
+          generation == _readerNavigationGeneration &&
+          _index >= 0 &&
+          _index < widget.chapters.length &&
+          _chapter.itemId == mark.chapterId &&
+          _error != null) {
+        _rememberTemporaryJump(origin, generation);
+      }
     }
     if (!mounted ||
         generation != _readerNavigationGeneration ||
@@ -308,35 +484,58 @@ extension _ReaderPageNavigation on _ReaderPageState {
       if (target != null) offset = target.start;
     }
     final block = layout.blockAtOffset(offset);
-    await _landAtOffset(offset, end: block?.end);
+    final landed = await _landAtOffset(
+      offset,
+      end: block?.end,
+      navigationGeneration: generation,
+    );
+    if (landed) _rememberTemporaryJump(origin, generation);
   }
 
-  Future<void> _landAtOffset(int offset, {int? end}) async {
+  Future<bool> _landAtOffset(
+    int offset, {
+    int? end,
+    bool highlight = true,
+    int? navigationGeneration,
+  }) async {
     final layout = _chapterLayout;
-    if (layout == null || !_progressReady || _loading) return;
+    if (layout == null || !_progressReady || _loading) return false;
     _takeOverListening();
     _closeSelectionBar(clearSelection: true);
     final start = offset.clamp(0, layout.textLength);
+    final targetPage = layout.pageForOffset(start);
     if (_paged) {
-      _pagedKey.currentState?.followPage(layout.pageForOffset(start));
+      final paged = _pagedKey.currentState;
+      if (paged == null) return false;
+      paged.followPage(targetPage);
     } else {
+      if (!_scrollController.hasClients) return false;
       _jumpScroll(layout.scrollForTextOffset(start));
     }
     // Reuse the non-layout-affecting selection paint, not its handles/menu.
     _locationHighlightTimer?.cancel();
     _setState(() {
       final stop = (end ?? start + 1).clamp(start, layout.textLength);
-      _locationHighlight = stop > start
+      _locationHighlight = highlight && stop > start
           ? ReaderTextSelection(start: start, end: stop)
           : null;
     });
-    _locationHighlightTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) _clearLocationHighlight();
-    });
+    if (highlight) {
+      _locationHighlightTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) _clearLocationHighlight();
+      });
+    }
     await WidgetsBinding.instance.endOfFrame;
-    if (!mounted || !identical(_chapterLayout, layout)) return;
+    if (!mounted ||
+        !identical(_chapterLayout, layout) ||
+        (navigationGeneration != null &&
+            navigationGeneration != _readerNavigationGeneration) ||
+        (_paged && _pageIndex != targetPage)) {
+      return false;
+    }
     _captureScrollProgress(updateTextOffset: true);
     await _persistProgress();
+    return true;
   }
 
   Widget _readerOverlay(ReaderThemePreset preset, Widget child) => Theme(

@@ -6,10 +6,12 @@ import 'secure_key_provider.dart';
 
 /// Bounded encrypted paragraph indices. Comment bodies remain online.
 class ChapterIdeasStore {
-  ChapterIdeasStore({this.keys, this.capacity = 128});
+  ChapterIdeasStore({this.keys, this.capacity = 128, DateTime Function()? now})
+    : _now = now ?? DateTime.now;
   static final instance = ChapterIdeasStore();
   final SecureKeyProvider? keys;
   final int capacity;
+  final DateTime Function() _now;
   Future<void> _writes = Future<void>.value();
 
   String _key(String bookId, String chapterId) =>
@@ -46,8 +48,16 @@ class ChapterIdeasStore {
     final next = _writes.then((_) async {
       final box = await _box();
       final key = _key(bookId, chapterId);
+      // Coarse platform clocks can give several writes the same timestamp.
+      // Refreshing an older entry must still make it newer than every saved
+      // entry, including after reopening or a system-clock correction.
+      var savedAt = _now().microsecondsSinceEpoch;
+      for (final value in box.values) {
+        final previous = value is Map ? value['savedAt'] : null;
+        if (previous is int && previous >= savedAt) savedAt = previous + 1;
+      }
       await box.put(key, {
-        'savedAt': DateTime.now().microsecondsSinceEpoch,
+        'savedAt': savedAt,
         'version': version,
         'ideas': {
           'code': 0,

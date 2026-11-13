@@ -280,7 +280,17 @@ class ReaderDevicePlugin : FlutterPlugin, ActivityAware,
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
         val systemBrightness = runCatching {
-            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255.0
+            val raw = Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+            // Vendor overlays can use 0..4095 even when the current value is
+            // below 255. Read the declared range instead of guessing from the
+            // current setting, so switching to manual does not jump to 100%.
+            val maximum = runCatching {
+                val resource = context.resources.getIdentifier(
+                    "config_screenBrightnessSettingMaximum", "integer", "android"
+                )
+                if (resource == 0) null else context.resources.getInteger(resource)
+            }.getOrNull()
+            NativeGestureLevels.normaliseBrightness(raw, maximum).toDouble()
         }.getOrNull()
         return mapOf(
             "session" to session,

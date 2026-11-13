@@ -60,7 +60,12 @@ void main() {
   );
 
   test('indices are bounded and refreshed entries survive pruning', () async {
-    final store = ChapterIdeasStore(keys: keys, capacity: 2);
+    final fixedTime = DateTime.fromMicrosecondsSinceEpoch(1000);
+    final store = ChapterIdeasStore(
+      keys: keys,
+      capacity: 2,
+      now: () => fixedTime,
+    );
     await store.save('b', '1', '', ChapterIdeas.empty);
     await store.save('b', '2', '', ChapterIdeas.empty);
     await store.save(
@@ -73,5 +78,15 @@ void main() {
     expect(await store.load('b', '2', ''), isNull);
     expect((await store.load('b', '1', ''))!.total, 4);
     expect(await store.load('b', '3', ''), isNotNull);
+    final reopened = ChapterIdeasStore(
+      keys: keys,
+      capacity: 2,
+      now: () => fixedTime.subtract(const Duration(days: 1)),
+    );
+    await reopened.save('b', '1', '', ChapterIdeas.empty);
+    await reopened.save('b', '4', '', ChapterIdeas.empty);
+    expect(await reopened.load('b', '3', ''), isNull);
+    expect(await reopened.load('b', '1', ''), isNotNull);
+    expect(await reopened.load('b', '4', ''), isNotNull);
   });
 }

@@ -11,6 +11,7 @@ import 'chapter_cache_store.dart';
 import 'chapter_download.dart';
 import 'connectivity_status.dart';
 import 'app_log.dart';
+import 'novel_image_store.dart';
 
 /// Foreground update checks only. A saved catalogue tail makes a partial
 /// download follow new chapters without downloading the existing backlog.
@@ -21,9 +22,11 @@ class NovelDownloadManager extends ChangeNotifier {
     required this.contentLoader,
     required this.connectivity,
     required this.downloadedBooks,
+    this.imageStore,
   });
 
   static final instance = NovelDownloadManager(
+    imageStore: NovelImageStore.instance,
     cache: ChapterCacheStore.instance,
     directoryLoader: (id) async {
       await BackendService.instance.start();
@@ -46,12 +49,14 @@ class NovelDownloadManager extends ChangeNotifier {
   final Future<String> Function(Chapter) contentLoader;
   final Future<ConnectivityView?> Function() connectivity;
   final Future<List<CachedBook>> Function() downloadedBooks;
+  final NovelImageStore? imageStore;
   final active = ValueNotifier<ChapterDownload?>(null);
 
   /// The most recent user-requested task, including while an automatic batch
   /// temporarily occupies [active].
   final manualTask = ValueNotifier<ChapterDownload?>(null);
   final Expando<int> _batchStarts = Expando<int>();
+  final Expando<bool> _imagesOnly = Expando<bool>();
   SharedPreferences? _preferences;
   Future<void>? _opening;
   Map<String, String> _tails = {};
@@ -99,24 +104,38 @@ class NovelDownloadManager extends ChangeNotifier {
             book.chapters.length - start,
           );
           final ids = await cache.cachedChapterIds(book.id);
-          final completed = book.chapters
+          final selectedIds = book.chapters
               .skip(start)
               .take(count)
               .where((c) => ids.contains(c.itemId))
-              .length;
+              .map((c) => c.itemId)
+              .toSet();
+          final completed = selectedIds.length;
+          final imagesOnly = raw['imagesOnly'] == true;
+          final total = imagesOnly ? completed : count;
           final batch = ChapterDownload(
             cache: cache,
             book: book,
             loader: contentLoader,
+            imageStore: imageStore,
           );
+          final imageSummary = await imageStore?.summary(book.id, selectedIds);
+          final incompleteImages = imageSummary == null
+              ? 0
+              : imageSummary.uncheckedChapters +
+                    (imageSummary.saved < imageSummary.total ? 1 : 0);
           batch.value = ChapterDownloadState(
             completed: completed,
-            total: count,
-            message: completed == count
-                ? '下载完成 · $completed/$count 章'
-                : '已保存 $completed/$count 章 · 上次任务已恢复，点“继续”',
+            total: total,
+            incompleteImages: incompleteImages,
+            message: incompleteImages > 0
+                ? '正文已保存 $completed/$total 章 · 插图待补存，可继续'
+                : completed == total
+                ? '下载完成 · $completed/$total 章'
+                : '已保存 $completed/$total 章 · 上次任务已恢复，点“继续”',
           );
           _batchStarts[batch] = start;
+          _imagesOnly[batch] = imagesOnly;
           manualTask.value = batch;
           active.value = batch;
         }
@@ -190,9 +209,15 @@ class NovelDownloadManager extends ChangeNotifier {
     } on FormatException {
       await _preferences!.remove('novel_manual_task');
     }
+    await imageStore?.removeBook(bookId);
   }
 
-  Future<void> start(CachedBook book, {int? count, int startIndex = 0}) async {
+  Future<void> start(
+    CachedBook book, {
+    int? count,
+    int startIndex = 0,
+    bool imagesOnly = false,
+  }) async {
     await initialize();
     final generation = ++_manualGeneration;
     _checkGeneration++;
@@ -207,6 +232,7 @@ class NovelDownloadManager extends ChangeNotifier {
           0,
           book.chapters.length - startIndex.clamp(0, book.chapters.length),
         ),
+        'imagesOnly': imagesOnly,
       }),
     );
     if (book.chapters.isNotEmpty) {
@@ -218,8 +244,10 @@ class NovelDownloadManager extends ChangeNotifier {
       cache: cache,
       book: book,
       loader: contentLoader,
+      imageStore: imageStore,
     );
     _batchStarts[batch] = startIndex;
+    _imagesOnly[batch] = imagesOnly;
     manualTask.value = batch;
     active.value = batch;
     unawaited(
@@ -227,6 +255,7 @@ class NovelDownloadManager extends ChangeNotifier {
         startIndex: startIndex,
         count: count ?? book.chapters.length,
         pin: true,
+        onlyCached: imagesOnly,
       ),
     );
   }
@@ -237,11 +266,18 @@ class NovelDownloadManager extends ChangeNotifier {
     active.value?.cancel();
   }
 
-  Future<void> resume(ChapterDownload download) => start(
-    download.book,
-    count: download.value.total,
-    startIndex: _batchStarts[download] ?? 0,
-  );
+  Future<void> resume(ChapterDownload download) {
+    final imagesOnly =
+        _imagesOnly[download] == true ||
+        (download.value.completed == download.value.total &&
+            download.value.incompleteImages > 0);
+    return start(
+      download.book,
+      count: imagesOnly ? download.book.chapters.length : download.value.total,
+      startIndex: imagesOnly ? 0 : _batchStarts[download] ?? 0,
+      imagesOnly: imagesOnly,
+    );
+  }
 
   Future<bool> _allowed({bool manual = false}) async {
     if ((!enabled && !manual) || !_foreground || _disposed) return false;
@@ -289,6 +325,7 @@ class NovelDownloadManager extends ChangeNotifier {
 
     var downloaded = 0;
     var failures = 0;
+    var incompleteImages = 0;
     try {
       if (!await canContinue()) {
         _lastCheck = null;
@@ -344,6 +381,7 @@ class NovelDownloadManager extends ChangeNotifier {
           final batch = ChapterDownload(
             cache: cache,
             book: updated,
+            imageStore: imageStore,
             loader: (chapter) async {
               if (!await canContinue()) {
                 throw StateError('Update check paused');
@@ -375,6 +413,7 @@ class NovelDownloadManager extends ChangeNotifier {
             return;
           }
           if (batch.value.completed == fresh.length) {
+            incompleteImages += batch.value.incompleteImages;
             _tails[book.id] = chapters.last.itemId;
             await _saveTails();
             downloaded += fresh.length;
@@ -397,6 +436,8 @@ class NovelDownloadManager extends ChangeNotifier {
       _lastCheck = failures == 0 ? DateTime.now() : null;
       lastMessage = failures > 0
           ? '已补下载 $downloaded 章，部分书籍暂未更新，可稍后重试'
+          : incompleteImages > 0
+          ? '已补下载 $downloaded 章正文，$incompleteImages 章插图待补存，可在离线下载中补存'
           : downloaded > 0
           ? '已补下载 $downloaded 个新章节'
           : '已检查，暂时没有新章节';

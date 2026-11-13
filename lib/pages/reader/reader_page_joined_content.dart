@@ -309,6 +309,8 @@ extension _ReaderJoinedContent on _ReaderPageState {
     ReaderSelectionScope scope,
   ) {
     final adjacentScopes = <ReaderChapterLayout, ReaderSelectionScope>{};
+    final adjacentUnderlines =
+        <ReaderChapterLayout, List<ReaderRangeUnderline>>{};
     return ReaderJoinedScroll(
       key: _joinedKey,
       controller: _scrollController,
@@ -347,15 +349,49 @@ extension _ReaderJoinedContent on _ReaderPageState {
       },
       blockBuilder: (index, chapterLayout, block) {
         final active = index == _index;
+        final chapter = active
+            ? null
+            : _joinedKey.currentState?.chapterAt(index);
+        final marks = active
+            ? _displayRangeUnderlines
+            : adjacentUnderlines.putIfAbsent(chapterLayout, () {
+                final result = <ReaderRangeUnderline>[];
+                for (final mark
+                    in chapter?.rangeUnderlines ??
+                        const <ReaderRangeUnderline>[]) {
+                  final start = chapterLayout.displayOffsetForSource(
+                    mark.start,
+                  );
+                  final end = chapterLayout.displayOffsetForSource(
+                    mark.end,
+                    bias: TextBoundaryBias.end,
+                  );
+                  if (end <= start) continue;
+                  result.add(
+                    ReaderRangeUnderline(
+                      bookId: mark.bookId,
+                      chapterId: mark.chapterId,
+                      start: start,
+                      end: end,
+                      text: mark.text,
+                      createdAt: mark.createdAt,
+                      dashed: mark.dashed,
+                      deletion: mark.deletion,
+                      payload: mark.payload,
+                    ),
+                  );
+                }
+                return result;
+              });
         return ReaderBlockContent(
           block: block,
           spec: chapterLayout.spec,
           imageProviderFactory: widget.imageProviderFactory,
-          // Adjacent chapters need dialogue marks too, but must not register
-          // their paragraph indices in the active chapter's selection map.
+          // Keep adjacent marks in a separate geometry registry: block indices
+          // repeat across chapters and must never enter the active selection.
           selectionScope: active
               ? scope
-              : _preferences.dialogueHighlight
+              : _preferences.dialogueHighlight || marks.isNotEmpty
               ? adjacentScopes.putIfAbsent(
                   chapterLayout,
                   () => _marksScopeFor(
@@ -366,7 +402,7 @@ extension _ReaderJoinedContent on _ReaderPageState {
                 )
               : null,
           selection: active ? _paintedSelection : null,
-          rangeUnderlines: active ? _displayRangeUnderlines : const [],
+          rangeUnderlines: marks,
           narrationRange: active ? _narrationRange : null,
           onParagraphLongPress: (block, global) {
             if (!active) {

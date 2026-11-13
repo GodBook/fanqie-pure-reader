@@ -70,6 +70,7 @@ mixin _ReaderPageFields on State<ReaderPage> {
   int? _settingsPreviewSourceOffset;
   int _settingsPreviewRevision = 0;
   int _readerNavigationGeneration = 0;
+  ({String chapterId, int sourceOffset})? _returnReadingPosition;
   Future<void>? _bookmarkNavigationTask;
   bool _progressPreviewActive = false;
   bool _readerPanelOpen = false;

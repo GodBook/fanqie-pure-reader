@@ -155,6 +155,40 @@ extension _ReaderPageBuild on _ReaderPageState {
                                       ),
                                     ),
                                   ),
+                                  if (_hasReturnReadingPosition)
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        Flexible(
+                                          child: TextButton.icon(
+                                            key: const ValueKey(
+                                              'reader-return-position',
+                                            ),
+                                            onPressed: () => unawaited(
+                                              _returnToReadingPosition(),
+                                            ),
+                                            icon: const Icon(
+                                              Icons.keyboard_return,
+                                              size: 18,
+                                            ),
+                                            label: const Text('返回原阅读处'),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          key: const ValueKey(
+                                            'reader-dismiss-return-position',
+                                          ),
+                                          tooltip: '关闭返回原阅读处',
+                                          onPressed: () => _setState(
+                                            () => _returnReadingPosition = null,
+                                          ),
+                                          icon: const Icon(
+                                            Icons.close,
+                                            size: 18,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                   if (_preferences.showReadingInfo)
                                     ReaderStatusBar(
                                       key: const ValueKey('reader-status-bar'),

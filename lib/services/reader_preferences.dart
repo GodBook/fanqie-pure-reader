@@ -29,6 +29,9 @@ enum ReaderPageTurnStyle { cover, slide, curl, none }
 class ReaderPreferences {
   static Future<void>? _writes;
   static const _fontSizeKey = 'reader_font_size';
+  static const _commentFontFollowsReadingKey =
+      'reader_comment_font_follows_reading';
+  static const _commentFontSizeKey = 'reader_comment_font_size';
   static const _fontWeightKey = 'reader_font_weight';
   static const _lineHeightKey = 'reader_line_height';
   static const _paragraphSpacingKey = 'reader_paragraph_spacing';
@@ -69,6 +72,18 @@ class ReaderPreferences {
   static const _videoChapterSyncKey = 'reader_video_chapter_sync';
 
   final double fontSize;
+
+  /// Comments, replies and the source excerpt can follow the reader's font
+  /// size or use an independently chosen size. Bound both modes so the sheet
+  /// retains useful space for its comment list.
+  final bool commentFontFollowsReading;
+  final double commentFontSize;
+
+  double get effectiveCommentFontSize {
+    final size = commentFontFollowsReading ? fontSize : commentFontSize;
+    return size.isFinite ? size.clamp(16.0, 28.0) : 18.0;
+  }
+
   final int fontWeight;
   final double lineHeight;
   final double paragraphSpacing;
@@ -179,6 +194,8 @@ class ReaderPreferences {
 
   const ReaderPreferences({
     this.fontSize = 18,
+    this.commentFontFollowsReading = true,
+    this.commentFontSize = 18,
     this.fontWeight = 400,
     this.lineHeight = 1.8,
     this.paragraphSpacing = 12,
@@ -222,6 +239,8 @@ class ReaderPreferences {
 
   ReaderPreferences copyWith({
     double? fontSize,
+    bool? commentFontFollowsReading,
+    double? commentFontSize,
     int? fontWeight,
     double? lineHeight,
     double? paragraphSpacing,
@@ -269,6 +288,9 @@ class ReaderPreferences {
   }) {
     return ReaderPreferences(
       fontSize: fontSize ?? this.fontSize,
+      commentFontFollowsReading:
+          commentFontFollowsReading ?? this.commentFontFollowsReading,
+      commentFontSize: commentFontSize ?? this.commentFontSize,
       fontWeight: fontWeight ?? this.fontWeight,
       lineHeight: lineHeight ?? this.lineHeight,
       paragraphSpacing: paragraphSpacing ?? this.paragraphSpacing,
@@ -326,6 +348,10 @@ class ReaderPreferences {
         .clamp(300, 700);
     return ReaderPreferences(
       fontSize: fontSize.isFinite ? fontSize.clamp(14, 32) : 18,
+      commentFontFollowsReading: commentFontFollowsReading,
+      commentFontSize: commentFontSize.isFinite
+          ? commentFontSize.clamp(16, 28)
+          : 18,
       fontWeight: normalizedWeight,
       lineHeight: lineHeight.isFinite ? lineHeight.clamp(1.2, 2.4) : 1.8,
       paragraphSpacing: paragraphSpacing.isFinite
@@ -383,6 +409,9 @@ class ReaderPreferences {
     );
     return ReaderPreferences(
       fontSize: _number(preferences, _fontSizeKey) ?? 18,
+      commentFontFollowsReading:
+          _boolean(preferences, _commentFontFollowsReadingKey) ?? true,
+      commentFontSize: _number(preferences, _commentFontSizeKey) ?? 18,
       fontWeight: (_number(preferences, _fontWeightKey) ?? 400).round(),
       lineHeight: _number(preferences, _lineHeightKey) ?? 1.8,
       paragraphSpacing: _number(preferences, _paragraphSpacingKey) ?? 12,
@@ -473,6 +502,11 @@ class ReaderPreferences {
     final value = normalized();
     await Future.wait<bool>([
       preferences.setDouble(_fontSizeKey, value.fontSize),
+      preferences.setBool(
+        _commentFontFollowsReadingKey,
+        value.commentFontFollowsReading,
+      ),
+      preferences.setDouble(_commentFontSizeKey, value.commentFontSize),
       preferences.setInt(_fontWeightKey, value.fontWeight),
       preferences.setDouble(_lineHeightKey, value.lineHeight),
       preferences.setDouble(_paragraphSpacingKey, value.paragraphSpacing),

@@ -1,4 +1,6 @@
 import 'package:cached_network_image/cached_network_image.dart';
+import 'dart:io';
+import 'package:flutter/foundation.dart' show SynchronousFuture;
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
@@ -6,6 +8,7 @@ import '../../services/app_theme.dart';
 import '../../services/audio_floating_routes.dart';
 import '../../services/chapter_text_formatter.dart';
 import '../../services/poster_cache.dart';
+import '../../services/novel_image_store.dart';
 import 'eink_image_provider.dart';
 
 typedef ReaderImageProviderFactory =
@@ -14,12 +17,14 @@ typedef ReaderImageProviderFactory =
 class ReaderIllustration extends StatefulWidget {
   final ChapterImage image;
   final ReaderImageProviderFactory? providerFactory;
+  final NovelImageStore? imageStore;
   final bool allowFullscreen;
 
   const ReaderIllustration({
     super.key,
     required this.image,
     this.providerFactory,
+    this.imageStore,
     this.allowFullscreen = true,
   });
 
@@ -28,9 +33,10 @@ class ReaderIllustration extends StatefulWidget {
 }
 
 class _ReaderIllustrationState extends State<ReaderIllustration> {
-  late ImageProvider<Object> _provider = _createProvider();
+  late Future<ImageProvider<Object>> _provider = _createProvider();
   int _attempt = 0;
   bool _retrying = false;
+  NovelImageStore get _images => widget.imageStore ?? NovelImageStore.instance;
 
   @override
   void didChangeDependencies() {
@@ -44,11 +50,13 @@ class _ReaderIllustrationState extends State<ReaderIllustration> {
   void initState() {
     super.initState();
     einkModeNotifier.addListener(_onEinkChanged);
+    _images.changes.addListener(_onEinkChanged);
   }
 
   @override
   void dispose() {
     einkModeNotifier.removeListener(_onEinkChanged);
+    _images.changes.removeListener(_onEinkChanged);
     super.dispose();
   }
 
@@ -60,17 +68,31 @@ class _ReaderIllustrationState extends State<ReaderIllustration> {
     });
   }
 
-  ImageProvider<Object> _createProvider() {
-    final base =
-        widget.providerFactory?.call(widget.image) ??
-        CachedNetworkImageProvider(
-          widget.image.url,
-          maxWidth: 2048,
-          maxHeight: 4096,
-          // 与海报共用 PosterCache（2000 对象 / 256MiB）：默认的
-          // DefaultCacheManager 只有 200 对象上限，插图更容易被挤出重下。
-          cacheManager: PosterCache.instance,
-        );
+  Future<ImageProvider<Object>> _createProvider() {
+    final factory = widget.providerFactory;
+    if (factory != null) {
+      // Attach Image's listener in this same build. An injected provider may
+      // already own an eager decoding future which can fail on the next tick.
+      final base = factory(widget.image);
+      return SynchronousFuture(
+        einkModeNotifier.value ? EinkImageProvider(base) : base,
+      );
+    }
+    return _createStoredProvider();
+  }
+
+  Future<ImageProvider<Object>> _createStoredProvider() async {
+    final File? local = await _images.localFile(widget.image.url);
+    final ImageProvider<Object> base = local != null
+        ? FileImage(local)
+        : CachedNetworkImageProvider(
+            widget.image.url,
+            maxWidth: 2048,
+            maxHeight: 4096,
+            // 与海报共用 PosterCache（2000 对象 / 256MiB）：默认的
+            // DefaultCacheManager 只有 200 对象上限，插图更容易被挤出重下。
+            cacheManager: PosterCache.instance,
+          );
     // 墨水屏：包一层灰度抖动处理，彩色插图不再靠屏幕自己量化。
     if (einkModeNotifier.value) return EinkImageProvider(base);
     return base;
@@ -79,7 +101,14 @@ class _ReaderIllustrationState extends State<ReaderIllustration> {
   @override
   void didUpdateWidget(covariant ReaderIllustration oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.imageStore != widget.imageStore) {
+      (oldWidget.imageStore ?? NovelImageStore.instance).changes.removeListener(
+        _onEinkChanged,
+      );
+      _images.changes.addListener(_onEinkChanged);
+    }
     if (oldWidget.image.url != widget.image.url ||
+        oldWidget.imageStore != widget.imageStore ||
         oldWidget.providerFactory != widget.providerFactory) {
       _provider = _createProvider();
       ++_attempt;
@@ -91,9 +120,10 @@ class _ReaderIllustrationState extends State<ReaderIllustration> {
     setState(() => _retrying = true);
     try {
       if (widget.providerFactory == null) {
+        await _images.invalidate(widget.image.url);
         await CachedNetworkImage.evictFromCache(widget.image.url);
       }
-      await _provider.evict();
+      await (await _provider).evict();
     } catch (_) {
       // An unavailable cache must not prevent a fresh network attempt.
     }
@@ -109,6 +139,7 @@ class _ReaderIllustrationState extends State<ReaderIllustration> {
     final navigator = Navigator.of(context);
     final image = widget.image;
     final factory = widget.providerFactory;
+    final imageStore = widget.imageStore;
     // 墨水屏：查看器也用白底黑字，黑底在墨水屏上是大块反色残影。
     final eink = einkModeNotifier.value;
     final chrome = eink ? Colors.white : Colors.black;
@@ -136,6 +167,7 @@ class _ReaderIllustrationState extends State<ReaderIllustration> {
                 child: ReaderIllustration(
                   image: image,
                   providerFactory: factory,
+                  imageStore: imageStore,
                   allowFullscreen: false,
                 ),
               ),
@@ -154,17 +186,25 @@ class _ReaderIllustrationState extends State<ReaderIllustration> {
     child: GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: widget.allowFullscreen ? _open : null,
-      child: Image(
-        key: ValueKey(_attempt),
-        image: _provider,
-        fit: BoxFit.contain,
-        width: double.infinity,
-        height: double.infinity,
-        excludeFromSemantics: true,
-        frameBuilder: (context, child, frame, synchronous) =>
-            frame == null ? _message(context, failed: false) : child,
-        errorBuilder: (context, error, stack) =>
-            _message(context, failed: true),
+      child: FutureBuilder<ImageProvider<Object>>(
+        future: _provider,
+        builder: (context, provider) {
+          if (!provider.hasData) {
+            return _message(context, failed: provider.hasError);
+          }
+          return Image(
+            key: ValueKey(_attempt),
+            image: provider.data!,
+            fit: BoxFit.contain,
+            width: double.infinity,
+            height: double.infinity,
+            excludeFromSemantics: true,
+            frameBuilder: (context, child, frame, synchronous) =>
+                frame == null ? _message(context, failed: false) : child,
+            errorBuilder: (context, error, stack) =>
+                _message(context, failed: true),
+          );
+        },
       ),
     ),
   );

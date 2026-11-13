@@ -40,6 +40,10 @@ class ReaderIdeasSheet extends StatefulWidget {
   final String scope;
   final String excerpt;
 
+  /// A live reader may supply its current preference; other entry points load
+  /// the saved preference when this is omitted.
+  final double? fontSize;
+
   const ReaderIdeasSheet({
     super.key,
     required this.ideas,
@@ -50,6 +54,7 @@ class ReaderIdeasSheet extends StatefulWidget {
     this.replyPageLoader,
     this.scope = '本段评论',
     this.excerpt = '',
+    this.fontSize,
   });
 
   @override
@@ -89,6 +94,13 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
   bool _loading = false;
   bool _failed = false;
   final ScrollController _scroll = ScrollController();
+  double _savedFontSize = 18;
+  bool _excerptExpanded = false;
+
+  double get _fontSize {
+    final size = widget.fontSize ?? _savedFontSize;
+    return size.isFinite ? size.clamp(16.0, 28.0) : 18;
+  }
 
   Color get _textColor => widget.preset.textColor;
 
@@ -99,6 +111,7 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
   @override
   void initState() {
     super.initState();
+    if (widget.fontSize == null) unawaited(_loadFontSize());
     final paragraphs = widget.ideas.withIdeas;
     if (paragraphs.isEmpty) return;
     _paragraph = paragraphs.firstWhere(
@@ -106,6 +119,17 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
       orElse: () => paragraphs.first,
     );
     unawaited(_load());
+  }
+
+  Future<void> _loadFontSize() async {
+    try {
+      final preferences = await ReaderPreferences.load();
+      if (mounted && widget.fontSize == null) {
+        setState(() => _savedFontSize = preferences.effectiveCommentFontSize);
+      }
+    } catch (_) {
+      // A preference read failure leaves the readable default in place.
+    }
   }
 
   @override
@@ -276,28 +300,80 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
               ],
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Text(
-              '${widget.scope} · 只读浏览，暂不支持发布和点赞',
-              style: TextStyle(color: _mutedColor, fontSize: 12),
-            ),
-          ),
-          if (widget.excerpt.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-              child: Text(
-                '原文：${widget.excerpt}',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: _textColor, fontSize: 13),
-              ),
-            ),
-          Expanded(child: _commentArea()),
+          Flexible(flex: 2, fit: FlexFit.loose, child: _details()),
+          Expanded(flex: 3, child: _commentArea()),
         ],
       ),
     );
   }
+
+  Widget _details() => LayoutBuilder(
+    builder: (context, constraints) {
+      final excerpt = '原文：${widget.excerpt}';
+      final style = TextStyle(
+        color: _textColor,
+        fontSize: _fontSize,
+        height: 1.4,
+      );
+      var canExpand = false;
+      if (widget.excerpt.isNotEmpty && constraints.maxWidth > 32) {
+        final painter = TextPainter(
+          text: TextSpan(text: excerpt, style: style),
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+          maxLines: 2,
+        )..layout(maxWidth: constraints.maxWidth - 32);
+        canExpand = painter.didExceedMaxLines;
+        painter.dispose();
+      }
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            fit: FlexFit.loose,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Text(
+                      '${widget.scope} · 只读浏览，暂不支持发布和点赞',
+                      style: TextStyle(color: _mutedColor, fontSize: 12),
+                    ),
+                  ),
+                  if (widget.excerpt.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Text(
+                        excerpt,
+                        key: const ValueKey('reader-ideas-excerpt'),
+                        maxLines: _excerptExpanded ? null : 2,
+                        overflow: _excerptExpanded
+                            ? null
+                            : TextOverflow.ellipsis,
+                        style: style,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (canExpand || _excerptExpanded)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                key: const ValueKey('reader-ideas-excerpt-toggle'),
+                onPressed: () =>
+                    setState(() => _excerptExpanded = !_excerptExpanded),
+                child: Text(_excerptExpanded ? '收起原文' : '展开原文'),
+              ),
+            ),
+        ],
+      );
+    },
+  );
 
   Widget _commentArea() {
     if (_loading) {
@@ -351,6 +427,7 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
             comment: comments[index],
             textColor: _textColor,
             mutedColor: _mutedColor,
+            fontSize: _fontSize,
             replyLoader: widget.replyLoader,
             replyPageLoader: widget.replyPageLoader,
             cachedReply: _cachedReplyState(comments[index].id),
@@ -471,6 +548,7 @@ class _CommentRow extends StatefulWidget {
   final BookComment comment;
   final Color textColor;
   final Color mutedColor;
+  final double fontSize;
   final Future<CommentReplyPage> Function(String commentId)? replyLoader;
   final Future<CommentReplyPage> Function(String commentId, String cursor)?
   replyPageLoader;
@@ -482,6 +560,7 @@ class _CommentRow extends StatefulWidget {
     required this.comment,
     required this.textColor,
     required this.mutedColor,
+    required this.fontSize,
     this.replyLoader,
     this.replyPageLoader,
     this.cachedReply,
@@ -589,7 +668,7 @@ class _CommentRowState extends State<_CommentRow> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(text, style: metaStyle),
+          Flexible(child: Text(text, style: metaStyle)),
           const SizedBox(width: 2),
           // 官方是把同一个箭头旋转 0°/180°，这里用上下箭头等价表达。
           AnimatedRotation(
@@ -653,7 +732,7 @@ class _CommentRowState extends State<_CommentRow> {
                     text: comment.text,
                     style: TextStyle(
                       color: textColor,
-                      fontSize: 16,
+                      fontSize: widget.fontSize,
                       height: 1.5,
                     ),
                   ),
@@ -667,6 +746,7 @@ class _CommentRowState extends State<_CommentRow> {
                     page: _replies!,
                     textColor: textColor,
                     mutedColor: mutedColor,
+                    fontSize: widget.fontSize,
                   ),
                   if (_replies!.hasMore && widget.replyPageLoader != null)
                     TextButton(
@@ -689,19 +769,14 @@ class _CommentRowState extends State<_CommentRow> {
                   ),
                 ],
                 const SizedBox(height: 10),
-                Row(
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 12,
+                  runSpacing: 4,
                   children: [
-                    Expanded(
-                      child: Wrap(
-                        spacing: 12,
-                        runSpacing: 4,
-                        children: [
-                          if (time.isNotEmpty) Text(time, style: metaStyle),
-                          if (_hasReplies) _replyCounter(metaStyle),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
+                    if (time.isNotEmpty) Text(time, style: metaStyle),
+                    if (_hasReplies) _replyCounter(metaStyle),
                     // The backend exposes counts but no reaction writes. Keep
                     // these as read-only indicators, without fake tap handlers.
                     Semantics(
@@ -735,11 +810,13 @@ class _ReplyList extends StatelessWidget {
   final CommentReplyPage page;
   final Color textColor;
   final Color mutedColor;
+  final double fontSize;
 
   const _ReplyList({
     required this.page,
     required this.textColor,
     required this.mutedColor,
+    required this.fontSize,
   });
 
   @override
@@ -759,6 +836,7 @@ class _ReplyList extends StatelessWidget {
               reply: reply,
               textColor: textColor,
               mutedColor: mutedColor,
+              fontSize: fontSize,
             ),
           if (page.hasMore)
             Padding(
@@ -778,11 +856,13 @@ class _ReplyTile extends StatelessWidget {
   final CommentReply reply;
   final Color textColor;
   final Color mutedColor;
+  final double fontSize;
 
   const _ReplyTile({
     required this.reply,
     required this.textColor,
     required this.mutedColor,
+    required this.fontSize,
   });
 
   @override
@@ -805,10 +885,11 @@ class _ReplyTile extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 RichText(
+                  textScaler: MediaQuery.textScalerOf(context),
                   text: TextSpan(
                     style: TextStyle(
                       color: textColor,
-                      fontSize: 13.5,
+                      fontSize: fontSize,
                       height: 1.4,
                     ),
                     children: [
@@ -826,7 +907,10 @@ class _ReplyTile extends StatelessWidget {
                         ),
                       // Image-only replies would otherwise leave a blank line.
                       if (reply.text.isNotEmpty)
-                        ...commentEmojiSpans('\n${reply.text}', fontSize: 13.5),
+                        ...commentEmojiSpans(
+                          '\n${reply.text}',
+                          fontSize: fontSize,
+                        ),
                     ],
                   ),
                 ),

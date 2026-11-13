@@ -22,6 +22,21 @@ class NativeGestureLevelsTest {
     }
 
     @Test
+    fun declaredPanelRangeWorksAtBothLowAndMidBrightness() {
+        assertEquals(713f / 4095f, NativeGestureLevels.normaliseBrightness(713, 4095), 0.0001f)
+        assertEquals(128f / 4095f, NativeGestureLevels.normaliseBrightness(128, 4095), 0.0001f)
+        assertEquals(128f / 255f, NativeGestureLevels.normaliseBrightness(128, 255), 0.0001f)
+        assertEquals(1f, NativeGestureLevels.normaliseBrightness(4095, 4095), 0.0001f)
+    }
+
+    @Test
+    fun missingOrInconsistentRangeKeepsTheLegacyFallback() {
+        assertEquals(0.5f, NativeGestureLevels.normaliseBrightness(2048, 255), 0.001f)
+        assertEquals(128f / 255f, NativeGestureLevels.normaliseBrightness(128, 0), 0.0001f)
+        assertEquals(0.02f, NativeGestureLevels.normaliseBrightness(-1, 4095), 0.0001f)
+    }
+
+    @Test
     fun brightnessNeverFallsBelowTheScreenOffFloor() {
         assertEquals(0.02f, NativeGestureLevels.normaliseBrightness(-5), 0.0001f)
     }

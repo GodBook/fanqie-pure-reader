@@ -202,18 +202,34 @@ class ReaderBookmarkStore {
   Future<void> add(ReaderBookmark record) =>
       _serialize((box) => _put(box, record));
 
+  /// Allocate once per editor so retries address the same draft, even if a
+  /// previous storage write completed before reporting an error.
+  String newNoteId() => List.generate(
+    16,
+    (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+
   /// A reader choosing to write a new note creates a new record, even when
-  /// another note already begins at the same source offset. Allocation and
-  /// insertion share the write queue so concurrent requests cannot collide.
+  /// another note already begins at the same source offset. A supplied ID is
+  /// stable across retries; callers without one retain automatic allocation.
   Future<ReaderBookmark> addNote(ReaderBookmark record) =>
       _serialize((box) async {
         if (record.note.trim().isEmpty) throw const FormatException('笔记不能为空');
+        if (record.noteId != null) {
+          final previous = ReaderBookmark.fromMap(box.get(record.key));
+          if (box.containsKey(record.key) &&
+              (previous == null ||
+                  previous.createdAt != record.createdAt ||
+                  previous.title != record.title ||
+                  previous.text != record.text)) {
+            throw StateError('笔记标识冲突，请复制草稿后重新创建');
+          }
+          await _put(box, record);
+          return record;
+        }
         late ReaderBookmark note;
         do {
-          final id = List.generate(
-            16,
-            (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
-          ).join();
+          final id = newNoteId();
           note = ReaderBookmark(
             bookId: record.bookId,
             chapterId: record.chapterId,

@@ -5,11 +5,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fqapp/models/media_item.dart';
+import 'package:fqapp/services/encrypted_hive.dart';
 import 'package:fqapp/services/library_store.dart';
 import 'package:fqapp/services/novel_backup_service.dart';
 import 'package:fqapp/services/reader_bookmark_store.dart';
 import 'package:fqapp/services/reader_preferences.dart';
 import 'package:fqapp/services/reader_underline_store.dart';
+import 'package:fqapp/services/secure_key_provider.dart';
 import 'package:fqapp/services/shelf_group_store.dart';
 import 'package:fqapp/services/shelf_store.dart';
 import 'package:fqapp/widgets/reader/reader_marks_panel.dart';
@@ -18,6 +20,73 @@ import 'support/reader_widget_io.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'R02 a reported failure after a real write retries the same note',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('note-retry-');
+      final previousReady = ReaderBookmarkStore.hiveReady;
+      Hive.init(directory.path);
+      final keys = SecureKeyProvider(storage: InMemorySecureKeyStorage());
+      await EncryptedHive.openBox<dynamic>(
+        Hive,
+        'reader_bookmarks_v1',
+        keys: keys,
+      );
+      ReaderBookmarkStore.hiveReady = true;
+      final store = _FailureAfterWriteStore();
+      addTearDown(() async {
+        store.changes.dispose();
+        ReaderBookmarkStore.hiveReady = previousReady;
+        await Hive.close();
+        await directory.delete(recursive: true);
+      });
+
+      final noteId = store.newNoteId();
+      ReaderBookmark draft(String text, {int createdAt = 7, String? id}) =>
+          ReaderBookmark(
+            bookId: 'book',
+            chapterId: 'chapter',
+            title: '第一章',
+            text: '选中的正文',
+            sourceOffset: 12,
+            createdAt: createdAt,
+            note: text,
+            noteId: id,
+          );
+      await expectLater(
+        store.addNote(draft('首次内容', id: noteId)),
+        throwsStateError,
+      );
+      expect(await store.loadBook('book'), hasLength(1));
+
+      final saved = await store.addNote(draft('重试前修改', id: noteId));
+      expect(saved.noteId, noteId);
+      final afterRetry = await store.loadBook('book');
+      expect(afterRetry, hasLength(1));
+      expect(afterRetry.single.note, '重试前修改');
+      await expectLater(
+        store.addNote(draft('不得覆盖', createdAt: 8, id: noteId)),
+        throwsStateError,
+      );
+      // Legacy callers without an ID still create distinct notes at one offset.
+      final independent = await store.addNote(draft('独立笔记'));
+      expect(independent.noteId, isNot(noteId));
+
+      await Hive.close();
+      await EncryptedHive.openBox<dynamic>(
+        Hive,
+        'reader_bookmarks_v1',
+        keys: keys,
+      );
+      final reopened = await store.loadBook('book');
+      expect(reopened, hasLength(2));
+      expect(
+        reopened.singleWhere((entry) => entry.noteId == noteId).note,
+        '重试前修改',
+      );
+    },
+  );
 
   testWidgets(
     'U03 edit retains only the chosen note and real backup restores both',
@@ -150,4 +219,18 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+}
+
+class _FailureAfterWriteStore extends ReaderBookmarkStore {
+  bool _failOnce = true;
+
+  @override
+  Future<ReaderBookmark> addNote(ReaderBookmark record) async {
+    final saved = await super.addNote(record);
+    if (_failOnce) {
+      _failOnce = false;
+      throw StateError('simulated error after the real write completed');
+    }
+    return saved;
+  }
 }

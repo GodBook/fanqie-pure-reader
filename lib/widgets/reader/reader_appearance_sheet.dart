@@ -435,6 +435,33 @@ class _ReaderAppearanceSheetState
         ),
       ),
       _typography(ReaderTypographyCategory.font),
+      if (widget.novelOnly) ...[
+        _adjustment(_commentFontMode()),
+        if (value.commentFontFollowsReading)
+          _adjustment(
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: Text(
+                '跟随正文时，评论字号限制为 16–28 pt',
+                style: TextStyle(
+                  color: _displayPreset.mutedTextColor,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
+        if (!value.commentFontFollowsReading)
+          _slider(
+            id: 'reader-comment-font-size',
+            label: '评论字号',
+            current: value.commentFontSize,
+            min: 16,
+            max: 28,
+            divisions: 12,
+            format: (n) => '${n.round()} pt',
+            apply: (prefs, n) => prefs.copyWith(commentFontSize: n),
+          ),
+      ],
     ],
     'paragraph' => [
       _adjustment(_spacingRow()),
@@ -694,14 +721,38 @@ class _ReaderAppearanceSheetState
       onPressed: () {
         if (!_alive) return;
         _flushAll();
-        setState(
-          () => value = value.copyWith(
-            followSystemBrightness: !value.followSystemBrightness,
-          ),
-        );
+        final followSystem = !value.followSystemBrightness;
+        setState(() {
+          value = value.copyWith(
+            followSystemBrightness: followSystem,
+            brightness: followSystem
+                ? value.brightness
+                : widget.systemBrightness ?? value.brightness,
+          );
+        });
         widget.onFollowSystem();
       },
       child: const Text('跟随系统', style: TextStyle(fontSize: 12)),
+    ),
+  );
+
+  Widget _commentFontMode() => ReaderSettingsRow(
+    label: '评论字号',
+    child: ReaderSettingsChipRow(
+      children: [
+        ReaderSettingsChip(
+          key: const ValueKey('reader-comment-font-follow'),
+          label: '跟随正文',
+          selected: value.commentFontFollowsReading,
+          onTap: () => _apply(value.copyWith(commentFontFollowsReading: true)),
+        ),
+        ReaderSettingsChip(
+          key: const ValueKey('reader-comment-font-independent'),
+          label: '单独设置',
+          selected: !value.commentFontFollowsReading,
+          onTap: () => _apply(value.copyWith(commentFontFollowsReading: false)),
+        ),
+      ],
     ),
   );
 

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../models/media_item.dart';
 import 'chapter_cache_store.dart';
 import 'chapter_text_formatter.dart';
+import 'novel_image_store.dart';
 
 /// Progress of one chapter batch, in the shape both surfaces render: the
 /// reader's cache panel and the detail page's download action.
@@ -22,7 +23,7 @@ class ChapterDownloadState {
   final int completed;
   final int total;
 
-  /// Saved without fresh illustrations: one online view still refreshes them.
+  /// Chapters with unverified or unavailable illustration data/pixels.
   final int incompleteImages;
 
   /// Final report, or the stop notice. Null before the first batch and while
@@ -49,12 +50,14 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
     required this.book,
     required this.loader,
     this.onContentAvailable,
+    this.imageStore,
   }) : super(const ChapterDownloadState());
 
   final ChapterCache cache;
   final CachedBook book;
   final Future<String> Function(Chapter chapter) loader;
   final void Function(Chapter chapter, String text)? onContentAvailable;
+  final NovelImageStore? imageStore;
 
   int _job = 0;
   bool _disposed = false;
@@ -69,10 +72,11 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
     required int startIndex,
     required int count,
     bool pin = false,
+    bool onlyCached = false,
   }) async {
     if (_disposed || value.running) return;
     final job = ++_job;
-    final chapters = book.chapters
+    var chapters = book.chapters
         .skip(startIndex.clamp(0, book.chapters.length))
         .take(count <= 0 ? 0 : count)
         .toList(growable: false);
@@ -81,6 +85,12 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
     var stage = 'storage';
     value = ChapterDownloadState(running: true, total: chapters.length);
     try {
+      if (onlyCached) {
+        final ids = await cache.cachedChapterIds(book.id);
+        if (!_alive(job)) return;
+        chapters = chapters.where((c) => ids.contains(c.itemId)).toList();
+        value = ChapterDownloadState(running: true, total: chapters.length);
+      }
       await cache.saveBook(book);
       for (final chapter in chapters) {
         if (!_alive(job)) return;
@@ -93,7 +103,21 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
         if (!_alive(job)) return;
         var content = _readCachedChapter(cached, chapter.title);
         var shouldWrite = false;
-        if (content == null || content.needsImageRefresh()) {
+        var offlineImagesComplete = false;
+        if (pin &&
+            imageStore != null &&
+            content?.illustrationsChecked == true) {
+          offlineImagesComplete = true;
+          for (final image in content!.images) {
+            if (await imageStore!.localFile(image.url) == null) {
+              offlineImagesComplete = false;
+              break;
+            }
+          }
+          if (!_alive(job)) return;
+        }
+        if (content == null ||
+            (content.needsImageRefresh() && !offlineImagesComplete)) {
           stage = 'network';
           final text = await loader(
             chapter,
@@ -133,7 +157,29 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
         }
         if (!_alive(job)) return;
         completed++;
-        if (content.needsImageRefresh()) incompleteImages++;
+        var imagesComplete = !content.needsImageRefresh();
+        final images = imageStore;
+        if (images != null && pin) {
+          value = ChapterDownloadState(
+            running: true,
+            completed: completed,
+            total: chapters.length,
+            incompleteImages: incompleteImages + 1,
+            message: '正文已保存 $completed/${chapters.length} 章 · 正在保存插图',
+          );
+          try {
+            imagesComplete = await images.saveChapter(
+              bookId: book.id,
+              chapterId: chapter.itemId,
+              content: content,
+              cancelled: () => !_alive(job),
+            );
+          } catch (_) {
+            imagesComplete = false;
+          }
+        }
+        if (!_alive(job)) return;
+        if (!imagesComplete) incompleteImages++;
         value = ChapterDownloadState(
           running: true,
           completed: completed,
@@ -148,18 +194,22 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
         incompleteImages: incompleteImages,
         message: incompleteImages == 0
             ? '缓存完成，可从书架的离线缓存入口继续阅读'
-            : '已保存 $completed/${chapters.length} 章，其中 $incompleteImages 章插图未更新，联网后可重试',
+            : imageStore == null
+            ? '正文已保存 $completed/${chapters.length} 章，其中 $incompleteImages 章插图未更新，联网后可重试'
+            : '正文已保存 $completed/${chapters.length} 章，其中 $incompleteImages 章插图未完整保存，可补存插图',
       );
     } catch (_) {
       if (_alive(job)) {
         value = ChapterDownloadState(
           completed: completed,
           total: chapters.length,
-          message: '缓存未完成，已保存 $completed/${chapters.length} 章。${switch (stage) {
-            'storage' => '本机存储写入失败，请检查可用空间后重试',
-            'empty' => '本章正文为空，可稍后重试或跳过本章',
-            _ => '网络读取失败，请检查网络后重试',
-          }}',
+          incompleteImages: incompleteImages,
+          message:
+              '缓存未完成，已保存 $completed/${chapters.length} 章。${switch (stage) {
+                'storage' => '本机存储写入失败，请检查可用空间后重试',
+                'empty' => '本章正文为空，可稍后重试或跳过本章',
+                _ => '网络读取失败，请检查网络后重试',
+              }}',
         );
       }
     }

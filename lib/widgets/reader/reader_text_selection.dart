@@ -353,6 +353,10 @@ class _ReaderBlockMarkLayerState extends State<ReaderBlockMarkLayer> {
   @override
   void didUpdateWidget(ReaderBlockMarkLayer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.scope, widget.scope) ||
+        oldWidget.block.index != widget.block.index) {
+      oldWidget.scope.geometry.unregister(oldWidget.block.index);
+    }
     if (!identical(oldWidget.block, widget.block) ||
         oldWidget.spec != widget.spec) {
       _painter?.dispose();

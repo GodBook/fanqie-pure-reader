@@ -142,6 +142,7 @@ kotlin {
         kotlin.setIncludes(listOf(
             "**/MainActivity.kt", "**/ReaderDevicePlugin.kt",
             "**/ReaderBrightnessSession.kt", "**/ReaderSystemBarsSession.kt",
+            "**/NativeGestureLevels.kt",
             "**/RendererCompatibility.kt", "**/EinkRefreshPlugin.kt",
             "**/FairMemoryPlugin.kt", "**/SharePlugin.kt", "**/DownloadsPlugin.kt",
             "**/LibraryBackupPlugin.kt", "**/AppUpdatePlugin.kt",

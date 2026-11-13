@@ -490,7 +490,7 @@ extension _ReaderPagePreferences on _ReaderPageState {
     }
     final jumpDirectory = widget.chapters;
     final generation = ++_readerNavigationGeneration;
-    await _jumpToChapter(target, navigationGeneration: generation);
+    await _jumpFromDirectory(target, navigationGeneration: generation);
     if (mounted &&
         generation == _readerNavigationGeneration &&
         !identical(jumpDirectory, widget.chapters) &&

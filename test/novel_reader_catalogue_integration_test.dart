@@ -129,6 +129,7 @@ void main() {
         late StateSetter update;
         final pending = Completer<String>();
         var requested = 0;
+        final requestedIdeasVersions = <String>[];
         final cache = MemoryChapterCache()
           ..content['book'] = {'a': _body('甲'), 'b': _body('旧正文')};
         const oldIdeas = ChapterIdeas(
@@ -156,9 +157,11 @@ void main() {
                     requested++;
                     return pending.future;
                   },
-                  ideasLoader: (id) async => id == 'b'
-                      ? (chapters.last.version == '1' ? oldIdeas : newIdeas)
-                      : ChapterIdeas.empty,
+                  ideasLoader: (id) async {
+                    if (id != 'b') return ChapterIdeas.empty;
+                    requestedIdeasVersions.add(chapters.last.version);
+                    return chapters.last.version == '1' ? oldIdeas : newIdeas;
+                  },
                 );
               },
             ),
@@ -182,11 +185,32 @@ void main() {
           pending.completeError(StateError('offline'));
         }
         await tester.pumpAndSettle();
+        if (succeeds) {
+          // Layout preparation can yield via a zero-duration timer after the
+          // frame is settled. Await its observable result with a finite bound.
+          for (var i = 0; i < 100; i++) {
+            final current = joined.chapterAt(1);
+            if (current?.ideas.forParagraph(0)?.count == 9 &&
+                current!.layout.blocks.any(
+                  (block) => block.paraIndex == 0 && block.bubbleCount == 9,
+                )) {
+              break;
+            }
+            await tester.pump(const Duration(milliseconds: 20));
+          }
+        }
         final result = joined.chapterAt(1)!;
         expect(result.text, contains(succeeds ? '新正文' : '旧正文'));
         expect(result.sourceChapter!.version, succeeds ? '2' : '1');
         if (succeeds) {
-          expect(result.ideas, same(newIdeas));
+          expect(requestedIdeasVersions, contains('2'));
+          expect(result.ideas.forParagraph(0)?.count, 9);
+          expect(
+            result.layout.blocks.any(
+              (block) => block.paraIndex == 0 && block.bubbleCount == 9,
+            ),
+            isTrue,
+          );
         } else {
           expect(result.ideas.isEmpty, isTrue);
         }

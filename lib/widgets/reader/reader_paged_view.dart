@@ -984,6 +984,9 @@ class ReaderPageContent extends StatelessWidget {
                   final text = ReaderBlockText(
                     block: fragment.block,
                     spec: spec,
+                    semanticText: fragment.text,
+                    exposeBubbleSemantics:
+                        fragment.lastLine == fragment.block.lines.length - 1,
                   );
                   final marked =
                       selectionScope != null &&
@@ -1022,35 +1025,31 @@ class ReaderPageContent extends StatelessWidget {
                           spec: spec,
                           imageProviderFactory: imageProviderFactory,
                         )
-                      : Semantics(
-                          label: fragment.text,
-                          excludeSemantics: true,
-                          child: GestureDetector(
-                            // Same key the scroll list uses, so both page modes
-                            // expose one stable paragraph target.
-                            key: ValueKey(
-                              'reader-paragraph-press-${fragment.block.index - 1}',
-                            ),
-                            behavior: HitTestBehavior.translucent,
-                            onLongPressStart: onParagraphLongPress == null
-                                ? null
-                                : (details) => onParagraphLongPress!(
-                                    fragment.block,
-                                    details.globalPosition,
-                                  ),
-                            onLongPressMoveUpdate:
-                                onParagraphLongPressMoveUpdate == null
-                                ? null
-                                : (details) => onParagraphLongPressMoveUpdate!(
-                                    details.globalPosition,
-                                  ),
-                            onLongPressEnd: onParagraphLongPressEnd == null
-                                ? null
-                                : (details) => onParagraphLongPressEnd!(
-                                    details.globalPosition,
-                                  ),
-                            child: body,
+                      : GestureDetector(
+                          // Same key the scroll list uses, so both page modes
+                          // expose one stable paragraph target.
+                          key: ValueKey(
+                            'reader-paragraph-press-${fragment.block.index - 1}',
                           ),
+                          behavior: HitTestBehavior.translucent,
+                          onLongPressStart: onParagraphLongPress == null
+                              ? null
+                              : (details) => onParagraphLongPress!(
+                                  fragment.block,
+                                  details.globalPosition,
+                                ),
+                          onLongPressMoveUpdate:
+                              onParagraphLongPressMoveUpdate == null
+                              ? null
+                              : (details) => onParagraphLongPressMoveUpdate!(
+                                  details.globalPosition,
+                                ),
+                          onLongPressEnd: onParagraphLongPressEnd == null
+                              ? null
+                              : (details) => onParagraphLongPressEnd!(
+                                  details.globalPosition,
+                                ),
+                          child: body,
                         );
                 },
               ),

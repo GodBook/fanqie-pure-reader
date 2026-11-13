@@ -2,7 +2,9 @@
 [CmdletBinding()]
 param(
     [string]$JdkRoot = 'D:\dev\jdk-17',
-    [string]$BuildRoot = 'D:\dev\fanqie-pure'
+    [string]$BuildRoot = 'D:\dev\fanqie-pure',
+    [string]$DartTarget = 'integration_test/novel_resume_safety_test.dart',
+    [string]$Driver = 'test_driver/novel_resume_safety.dart'
 )
 $ErrorActionPreference = 'Stop'
 $resumeDevices = @(& adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '^\S+\s+device$' } | ForEach-Object { ($_ -split '\s+')[0] })
@@ -22,7 +24,7 @@ try {
     $env:JAVA_HOME = $JdkRoot
     $env:PATH = (Join-Path $JdkRoot 'bin') + ';' + $env:PATH
     Invoke-ResumeChecked 'flutter' @('--no-version-check', 'build', 'apk', '--no-pub', '--profile',
-        '--target-platform', 'android-arm64', '--target', 'integration_test/novel_resume_safety_test.dart')
+        '--target-platform', 'android-arm64', '--target', $DartTarget)
     Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'install', '-r', '-t', 'build/app/outputs/flutter-apk/app-profile.apk')
     Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'shell', 'am', 'force-stop', 'com.fanqie.pure.reader.test')
     Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'shell', 'am', 'start', '-n',
@@ -40,7 +42,7 @@ try {
     }
     if (-not $resumeVmReady) { throw 'The isolated test VM did not become ready.' }
     Invoke-ResumeChecked 'flutter' @('--no-version-check', 'drive', '--no-pub', '--no-dds', '--profile',
-        '--keep-app-running', "--use-existing-app=http://127.0.0.1:$resumePort/", '--driver', 'test_driver/novel_resume_safety.dart')
+        '--keep-app-running', "--use-existing-app=http://127.0.0.1:$resumePort/", '--driver', $Driver)
 } finally {
     if ($resumePort) { & adb -s $resumeSerial forward --remove "tcp:$resumePort" }
     & adb -s $resumeSerial shell am force-stop com.fanqie.pure.reader.test

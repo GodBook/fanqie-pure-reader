@@ -7,7 +7,7 @@ if (Test-Path -LiteralPath $targetRoot) { throw 'Choose a new, empty destination
 if ($targetRoot.StartsWith($sourceRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or $targetRoot -eq $sourceRoot) { throw 'Destination must be separate from the source checkout.' }
 $allowedRoots = @('lib', 'android', 'assets', 'rust', 'native', 'third_party', 'test', 'integration_test', 'test_driver', 'scripts', 'linux', 'windows', 'ios', 'macos', 'web', '.cargo')
 $allowedFiles = @('.gitattributes', '.gitignore', '.metadata', 'LICENSE', 'README.md', 'UPSTREAM_README.md', 'RELEASING.md', 'CHANGELOG.md', 'analysis_options.yaml', 'pubspec.yaml', 'pubspec.lock', 'flutter_rust_bridge.yaml')
-$files = @(& git -C $sourceRoot ls-files --cached --others --exclude-standard | Sort-Object -Unique | Where-Object {
+$files = @(& git -C $sourceRoot -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique | Where-Object {
     $root = ($_ -split '/')[0]
     ($root -in $allowedRoots -or $_ -in $allowedFiles -or $_ -eq '.github/workflows/novel-checks.yml') -and
     $_ -notmatch '(?i)(device_pool\.json$|keystore\.properties$|local\.properties$|\.(p12|jks|keystore|pepk|hive|db|apk|aab|so|log)$|(^|/)(build|target|\.dart_tool|\.gradle|\.cxx)/)'

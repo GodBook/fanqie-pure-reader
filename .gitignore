@@ -92,6 +92,6 @@ _sessionzip/
 /docs/*
 !/docs/project/
 
-# Public distribution excludes all machine-local recovery and device records.
+# Local project records are not published.
 /docs/
 /AGENTS.md

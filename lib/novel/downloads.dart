@@ -270,7 +270,8 @@ class _DownloadProgress extends StatelessWidget {
               Expanded(
                 child: Text(
                   state.running
-                      ? '正在下载 ${state.completed} / ${state.total} 章'
+                      ? state.message ??
+                            '正在下载 ${state.completed} / ${state.total} 章'
                       : state.message ?? '已暂停',
                   style: const TextStyle(fontSize: 12, height: 1.6),
                 ),
@@ -279,14 +280,19 @@ class _DownloadProgress extends StatelessWidget {
                 key: const ValueKey('download-pause-resume'),
                 onPressed: state.running
                     ? manager.pause
-                    : state.completed == state.total
+                    : state.completed == state.total &&
+                          state.incompleteImages == 0
                     ? null
                     : () => manager.resume(download),
                 child: Text(
                   state.running
                       ? '暂停'
-                      : state.completed == state.total
+                      : state.completed == state.total &&
+                            state.incompleteImages == 0
                       ? '已完成'
+                      : state.completed == state.total &&
+                            state.incompleteImages > 0
+                      ? '补存插图'
                       : '继续',
                 ),
               ),
@@ -309,6 +315,7 @@ class NovelDownloads extends StatefulWidget {
 
 class _NovelDownloadsState extends State<NovelDownloads> {
   List<CachedBookSummary> _books = [];
+  Map<String, NovelImageSummary> _imageSummaries = {};
   Timer? _reloadTimer;
   bool _loading = true;
   String? _error;
@@ -319,6 +326,7 @@ class _NovelDownloadsState extends State<NovelDownloads> {
   void initState() {
     super.initState();
     ChapterCacheStore.instance.changes.addListener(_changed);
+    NovelImageStore.instance.changes.addListener(_changed);
     _reload();
   }
 
@@ -333,9 +341,17 @@ class _NovelDownloadsState extends State<NovelDownloads> {
     final generation = ++_generation;
     try {
       final books = await ChapterCacheStore.instance.books();
+      final images = <String, NovelImageSummary>{};
+      for (final book in books) {
+        images[book.book.id] = await NovelImageStore.instance.summary(
+          book.book.id,
+          await ChapterCacheStore.instance.cachedChapterIds(book.book.id),
+        );
+      }
       if (mounted && generation == _generation) {
         setState(() {
           _books = books;
+          _imageSummaries = images;
           _loading = false;
           _error = null;
         });
@@ -541,6 +557,15 @@ class _NovelDownloadsState extends State<NovelDownloads> {
               onTap: () => Navigator.pop(context, 'resume'),
             ),
             ListTile(
+              key: const ValueKey('download-repair-images'),
+              leading: const Icon(Icons.image_outlined),
+              title: const Text('补存已下载章节插图'),
+              subtitle: Text(
+                _imageSummaries[book.id]?.label ?? '保留正文，仅核验已下载章节和插图',
+              ),
+              onTap: () => Navigator.pop(context, 'images'),
+            ),
+            ListTile(
               leading: const Icon(Icons.delete_outline),
               title: const Text('删除本书下载'),
               onTap: () => Navigator.pop(context, 'delete'),
@@ -553,13 +578,17 @@ class _NovelDownloadsState extends State<NovelDownloads> {
     if (action == 'resume') {
       await _chooseDownload(context, _item(book), book.chapters);
     }
+    if (action == 'images') {
+      await NovelDownloadManager.instance.start(book, imagesOnly: true);
+      if (mounted) _notice(context, '已开始核验插图，可暂停后继续；原正文会保留');
+    }
     if (!mounted) return;
     if (action == 'delete') {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('删除下载？'),
-          content: Text('仅删除《${book.title}》的本地正文，书架和阅读进度会保留。'),
+          content: Text('仅删除《${book.title}》的本地正文及下载插图，书架和阅读进度会保留。'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -592,6 +621,7 @@ class _NovelDownloadsState extends State<NovelDownloads> {
     _generation++;
     _reloadTimer?.cancel();
     ChapterCacheStore.instance.changes.removeListener(_changed);
+    NovelImageStore.instance.changes.removeListener(_changed);
     super.dispose();
   }
 
@@ -632,7 +662,8 @@ class _NovelDownloadsState extends State<NovelDownloads> {
                   _item(summary.book),
                   subtitle: _openingId == summary.book.id
                       ? '正在打开…'
-                      : '已保存 ${summary.stats.chapterCount} / ${summary.book.chapters.length} 章 · ${(summary.stats.byteCount / 1024 / 1024).toStringAsFixed(1)} MB',
+                      : '已保存 ${summary.stats.chapterCount} / ${summary.book.chapters.length} 章 · 正文 ${(summary.stats.byteCount / 1024 / 1024).toStringAsFixed(1)} MB\n${_imageSummaries[summary.book.id]?.label ?? '插图待核验'}',
+                  subtitleMaxLines: null,
                   onTap: () => _open(summary.book),
                   trailing: IconButton(
                     tooltip: '下载操作',

@@ -281,6 +281,9 @@ extension _ReaderPageIdeas on _ReaderPageState {
     if (ideaSnapshot.isEmpty) return;
     final chapter = sourceChapter ?? widget.chapters[_index];
     if (_unverifiedChapterVersions.containsKey(chapter.itemId)) return;
+    // A comment can be opened directly from an in-text bubble while the
+    // timer is running. Keep the reading position stable behind the sheet.
+    _stopAutoTurn();
     _setControlsVisible(false);
     final sourceIndex = widget.chapters.indexWhere(
       (entry) => entry.itemId == chapter.itemId,
@@ -324,6 +327,7 @@ extension _ReaderPageIdeas on _ReaderPageState {
           child: ReaderIdeasSheet(
             ideas: ideaSnapshot,
             preset: _effectivePreset,
+            fontSize: _preferences.effectiveCommentFontSize,
             // Each bubble opens only that paragraph's comments.
             initialParaIndex: focusParaIndex,
             scope: focusParaIndex == chapterEnd ? '本章评论' : '本段评论',

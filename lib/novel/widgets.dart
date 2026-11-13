@@ -43,11 +43,18 @@ class _Cover extends StatelessWidget {
 }
 
 class _BookRow extends StatelessWidget {
-  const _BookRow(this.book, {this.onTap, this.trailing, this.subtitle});
+  const _BookRow(
+    this.book, {
+    this.onTap,
+    this.trailing,
+    this.subtitle,
+    this.subtitleMaxLines = 2,
+  });
   final MediaItem book;
   final VoidCallback? onTap;
   final Widget? trailing;
   final String? subtitle;
+  final int? subtitleMaxLines;
 
   @override
   Widget build(BuildContext context) => InkWell(
@@ -88,7 +95,7 @@ class _BookRow extends StatelessWidget {
                   const SizedBox(height: 8),
                   Text(
                     subtitle ?? book.intro,
-                    maxLines: 2,
+                    maxLines: subtitleMaxLines,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13,

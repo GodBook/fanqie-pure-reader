@@ -58,6 +58,16 @@ extension ReaderThemeColors on ReaderThemePreset {
     if (isEink) return Colors.black;
     // 纯黑底上 60% 的前景色只剩 #7E7E7E，12sp 提示字偏灰；OLED 用固定值。
     if (isOled) return const Color(0xFF9E9A94);
+    // Keep the body palette unchanged, but make small secondary text legible
+    // against the reading background and the lighter panel/field surfaces.
+    if (!isDark) {
+      return switch (this) {
+        ReaderThemePreset.light => const Color(0xFF625D56),
+        ReaderThemePreset.eyeCare => const Color(0xFF515F50),
+        ReaderThemePreset.parchment => const Color(0xFF665743),
+        _ => textColor,
+      };
+    }
     return textColor.withValues(alpha: 0.6);
   }
 

@@ -64,6 +64,7 @@ import '../widgets/reader/reader_joined_scroll.dart';
 import '../widgets/reader/cue_index.dart';
 import '../widgets/reader/reader_bookmarks_panel.dart';
 import '../widgets/reader/reader_marks_panel.dart';
+import '../widgets/reader/reader_note_editor_dialog.dart';
 import '../widgets/reader/reader_chrome.dart';
 import '../widgets/reader/reader_find_panel.dart';
 import '../widgets/reader/reader_controls.dart';

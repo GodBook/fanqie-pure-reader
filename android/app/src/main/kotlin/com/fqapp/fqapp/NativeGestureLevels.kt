@@ -17,9 +17,10 @@ object NativeGestureLevels {
      * 标准量程是 0..255，但 ColorOS 等 12bit 面板会写入 0..4095；一律按
      * 255 归一化会把 4095 读成 1600%，夹完后亮度起点永远停在 100%。
      */
-    fun normaliseBrightness(raw: Int): Float {
+    fun normaliseBrightness(raw: Int, maximum: Int? = null): Float {
         val value = raw.coerceAtLeast(0)
         val scale = when {
+            maximum != null && maximum > 0 && value <= maximum -> maximum.toFloat()
             value <= 255 -> 255f
             value <= 1023 -> 1023f
             value <= 2047 -> 2047f
