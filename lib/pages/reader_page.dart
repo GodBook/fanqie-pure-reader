@@ -135,6 +135,7 @@ class ReaderPage extends StatefulWidget {
   /// The dedicated novel app disables media and AI integrations entirely.
   final bool novelOnly;
   final Future<void> Function()? ensureOnline;
+  final Future<void> Function()? onRefreshCatalogue;
   final Future<void> Function(BuildContext, List<Chapter>)? onDownload;
   final ChapterTextLoader? chapterLoader;
   final ReaderStore? readerStore;
@@ -172,6 +173,7 @@ class ReaderPage extends StatefulWidget {
     this.localOnly = false,
     this.novelOnly = false,
     this.ensureOnline,
+    this.onRefreshCatalogue,
     this.onDownload,
     this.chapterLoader,
     this.readerStore,
@@ -413,9 +415,44 @@ class _ReaderPageState extends State<ReaderPage>
         oldWidget.chapters.isEmpty) {
       return;
     }
-    final chapterId = oldWidget.chapters[_index].itemId;
+    final oldIndex = _index.clamp(0, oldWidget.chapters.length - 1);
+    final chapterId = oldWidget.chapters[oldIndex].itemId;
     final next = widget.chapters.indexWhere((c) => c.itemId == chapterId);
-    _index = next < 0 ? _index.clamp(0, widget.chapters.length - 1) : next;
+    final previousById = {
+      for (final chapter in oldWidget.chapters) chapter.itemId: chapter,
+    };
+    for (final chapter in widget.chapters) {
+      final previous = previousById[chapter.itemId];
+      if (previous == null || previous.version == chapter.version) continue;
+      _unverifiedChapterSources.putIfAbsent(chapter.itemId, () => previous);
+      _unverifiedChapterVersions[chapter.itemId] = chapter.version;
+      _attemptedVersionRefreshes.remove(chapter.itemId);
+      if (chapter.itemId == chapterId) {
+        // Old text stays readable, but new-version ideas cannot describe it.
+        _ideas = ChapterIdeas.empty;
+        ++_ideasRevision;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _startVersionRefresh(chapter);
+        });
+      }
+    }
+    final structureChanged = !listEquals(
+      [for (final chapter in oldWidget.chapters) chapter.itemId],
+      [for (final chapter in widget.chapters) chapter.itemId],
+    );
+    if (structureChanged) {
+      final position = _joinedKey.currentState?.position;
+      if (next >= 0 && position != null && position.index == oldIndex) {
+        // ReaderJoinedScroll restores the actual screen anchor while rebuilding
+        // its window. Keep the reader's own chapter-relative progress in sync.
+        _lastPosition = position.scroll;
+        _lastMaxScroll = position.chapter.layout.maxScroll;
+        _textOffset = position.chapter.layout.textOffsetAtScroll(
+          position.scroll,
+        );
+      }
+    }
+    _index = next < 0 ? oldIndex.clamp(0, widget.chapters.length - 1) : next;
     _catalogFuture = null;
     if (!widget.localOnly) unawaited(_ensureCatalog().catchError((_) {}));
     if (next < 0) unawaited(_load());

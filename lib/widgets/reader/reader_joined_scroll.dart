@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/chapter_ideas.dart';
+import '../../models/media_item.dart';
 import '../../services/ai_reading/ai_controller.dart';
 import '../../services/chapter_text_formatter.dart';
 import '../../services/reader_underline_store.dart';
@@ -23,6 +25,7 @@ class JoinedReaderChapter {
     this.rangeUnderlines = const [],
     this.displayRevision = -1,
     this.aiView,
+    this.sourceChapter,
   });
   final String text;
   final ChapterContent content;
@@ -39,6 +42,7 @@ class JoinedReaderChapter {
   /// Travels with the content/layout so adopting a neighbor also adopts its
   /// chapter-specific snapshot, rather than reusing the previously read one.
   final AiChapterView? aiView;
+  final Chapter? sourceChapter;
 
   JoinedReaderChapter withLayout(ReaderChapterLayout value) =>
       JoinedReaderChapter(
@@ -51,6 +55,7 @@ class JoinedReaderChapter {
         rangeUnderlines: rangeUnderlines,
         displayRevision: displayRevision,
         aiView: aiView,
+        sourceChapter: sourceChapter,
       );
 }
 
@@ -77,12 +82,19 @@ class ReaderJoinedScroll extends StatefulWidget {
     required this.blockBuilder,
     this.showParagraphBubbles = true,
     this.onChapterComments,
+    this.catalogueIds,
+    this.catalogueVersions,
   });
 
   final ScrollController controller;
   final int index;
   final JoinedReaderChapter chapter;
   final int chapterCount;
+
+  /// Stable chapter identities detect insertions and reordering, not just a
+  /// change in the number of catalogue entries.
+  final List<String>? catalogueIds;
+  final List<String>? catalogueVersions;
   final Future<JoinedReaderChapter> Function(int, ReaderLayoutSpec) loader;
   final ValueChanged<JoinedReaderPosition> onPosition;
   final VoidCallback onDragStart;
@@ -100,6 +112,8 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
   final _chapters = <int, JoinedReaderChapter>{};
   final _pending = <int>{};
   final _errors = <int>{};
+  late List<String>? _catalogueSnapshot;
+  late List<String>? _catalogueVersionSnapshot;
   int _generation = 0;
   bool _adjusting = false;
   bool _scheduled = false;
@@ -107,9 +121,11 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
   int _restoreRevision = 0;
   double _pendingCorrection = 0;
   bool _refreshing = false;
+  bool _refreshRequested = false;
 
   List<int> get _indices => _chapters.keys.toList()..sort();
   JoinedReaderChapter? chapterAt(int index) => _chapters[index];
+  int get generation => _generation;
 
   double _height(JoinedReaderChapter chapter) =>
       chapter.layout.contentHeight +
@@ -155,6 +171,12 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
   @override
   void initState() {
     super.initState();
+    _catalogueSnapshot = widget.catalogueIds == null
+        ? null
+        : List.of(widget.catalogueIds!);
+    _catalogueVersionSnapshot = widget.catalogueVersions == null
+        ? null
+        : List.of(widget.catalogueVersions!);
     _chapters[widget.index] = widget.chapter;
     widget.controller.addListener(_schedulePosition);
     _schedulePosition();
@@ -175,8 +197,19 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
     final textChanged =
         oldWidget.index == widget.index &&
         oldWidget.chapter.text != widget.chapter.text;
+    final oldCatalogue = _catalogueSnapshot;
+    final catalogueChanged =
+        !listEquals(oldCatalogue, widget.catalogueIds) ||
+        !listEquals(_catalogueVersionSnapshot, widget.catalogueVersions);
+    _catalogueSnapshot = widget.catalogueIds == null
+        ? null
+        : List.of(widget.catalogueIds!);
+    _catalogueVersionSnapshot = widget.catalogueVersions == null
+        ? null
+        : List.of(widget.catalogueVersions!);
     if (oldWidget.chapter.layout.spec != spec ||
         oldWidget.showParagraphBubbles != widget.showParagraphBubbles ||
+        catalogueChanged ||
         textChanged) {
       // A font/width/text change invalidates adjacent measurements. An AI
       // replacement on the current chapter does NOT: keep the measured
@@ -187,9 +220,19 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
       _pendingCorrection = 0;
       _chapters.clear();
       _chapters[widget.index] = widget.chapter;
-      if (oldWidget.chapter.layout.spec == spec &&
-          before?.index == widget.index) {
-        final textOffset = before!.chapter.layout.textOffsetAtScroll(
+      final beforeWasCurrent =
+          before != null &&
+          (before.index == oldWidget.index ||
+              (oldCatalogue != null &&
+                  widget.catalogueIds != null &&
+                  before.index >= 0 &&
+                  before.index < oldCatalogue.length &&
+                  widget.index >= 0 &&
+                  widget.index < widget.catalogueIds!.length &&
+                  oldCatalogue[before.index] ==
+                      widget.catalogueIds![widget.index]));
+      if (oldWidget.chapter.layout.spec == spec && beforeWasCurrent) {
+        final textOffset = before.chapter.layout.textOffsetAtScroll(
           before.scroll,
         );
         _correctBy(
@@ -232,35 +275,64 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
     _schedulePosition();
   }
 
-  /// Loads already-cached neighboring chapters again and swaps only those
-  /// whose AI display revision changed. The visible chapter is owned by the
-  /// host through `didUpdateWidget`; this method never replaces it.
+  /// Applies a late neighbor update only to the exact window and chapter for
+  /// which it was prepared. The host owns the active chapter separately.
+  void updateNeighbor({
+    required int index,
+    required int generation,
+    required JoinedReaderChapter previous,
+    required JoinedReaderChapter updated,
+  }) {
+    if (!mounted ||
+        generation != _generation ||
+        index == widget.index ||
+        !identical(_chapters[index], previous)) {
+      return;
+    }
+    _replaceChapter(index, updated);
+  }
+
+  /// Refreshes already-cached neighboring chapters. The visible chapter is
+  /// owned by the host through `didUpdateWidget`; this never replaces it.
   Future<void> refreshChapters() async {
-    if (!mounted || _chapters.isEmpty || _refreshing) return;
+    if (!mounted || _chapters.isEmpty) return;
+    if (_refreshing) {
+      // A chapter already visited in this pass may have changed while a later
+      // chapter was loading. Run another pass rather than dropping the update.
+      _refreshRequested = true;
+      return;
+    }
     _refreshing = true;
     try {
-      final generation = _generation;
-      final indices = _chapters.keys
-          .where((index) => index != widget.index)
-          .toList(growable: false);
-      for (final index in indices) {
-        final old = _chapters[index];
-        if (old == null) continue;
-        JoinedReaderChapter fresh;
-        try {
-          fresh = await widget.loader(index, old.layout.spec);
-        } catch (_) {
-          continue;
+      do {
+        _refreshRequested = false;
+        final generation = _generation;
+        final indices = _chapters.keys
+            .where((index) => index != widget.index)
+            .toList(growable: false);
+        for (final index in indices) {
+          final old = _chapters[index];
+          if (old == null) continue;
+          JoinedReaderChapter fresh;
+          try {
+            fresh = await widget.loader(index, old.layout.spec);
+          } catch (_) {
+            continue;
+          }
+          if (!mounted) return;
+          if (generation != _generation || !_chapters.containsKey(index)) {
+            break;
+          }
+          if (index == widget.index) continue;
+          if (fresh.displayRevision == old.displayRevision &&
+              fresh.text == old.text &&
+              identical(fresh.ideas, old.ideas) &&
+              fresh.sourceChapter?.version == old.sourceChapter?.version) {
+            continue;
+          }
+          _replaceChapter(index, fresh);
         }
-        if (!mounted ||
-            generation != _generation ||
-            !_chapters.containsKey(index)) {
-          return;
-        }
-        if (index == widget.index) continue;
-        if (fresh.displayRevision == old.displayRevision) continue;
-        _replaceChapter(index, fresh);
-      }
+      } while (mounted && _refreshRequested);
     } finally {
       _refreshing = false;
     }
@@ -288,6 +360,8 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
         _correctBy(
           chapterStart(index) +
               chapter.layout.scrollForTextOffset(textOffset) -
+              before.chapter.layout.scrollForTextOffset(textOffset) +
+              before.scroll -
               (before.start + before.scroll),
         );
       }

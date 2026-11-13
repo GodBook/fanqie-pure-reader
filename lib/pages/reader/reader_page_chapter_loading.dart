@@ -361,6 +361,7 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
     _replacementCancellation?.cancel();
     ++_replacementGeneration;
     final chapter = _chapter;
+    _startVersionRefresh(chapter);
     _ideasRetryTimer?.cancel();
     if (widget.novelOnly) unawaited(_loadIdeas(chapter, generation));
     _saveTimer?.cancel();
@@ -368,7 +369,9 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
       _loading = true;
       _ideasFailed = false;
       final rememberedIdeas = _ideasCache[_ideasKey(chapter)];
-      _ideas = rememberedIdeas?.version == chapter.version
+      _ideas =
+          !_unverifiedChapterVersions.containsKey(chapter.itemId) &&
+              rememberedIdeas?.version == chapter.version
           ? rememberedIdeas!.ideas
           : ChapterIdeas.empty;
       ++_ideasRevision;
@@ -418,7 +421,9 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
       final cacheKey = '${widget.bookId}\u0000${chapter.itemId}';
       final cachedIdeas = _ideasCache[cacheKey];
       final cachedUnderlines = _underlineCache[cacheKey];
-      final ideas = cachedIdeas?.version == chapter.version
+      final ideas =
+          cachedIdeas?.version == chapter.version &&
+              !_unverifiedChapterVersions.containsKey(chapter.itemId)
           ? cachedIdeas!.ideas
           : ChapterIdeas.empty;
       final underlines = cachedUnderlines?.version == chapter.version
@@ -463,6 +468,8 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
       _setState(() {
         _replacement = replacement;
         _content = text;
+        _contentSourceChapter =
+            _unverifiedChapterSources[chapter.itemId] ?? chapter;
         _chapterContent = content;
         _savedPosition = saved;
         _loading = false;
@@ -473,7 +480,11 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
         // An index can finish while the cooperative layout yields. Publish its
         // latest value, not the earlier snapshot used to prepare the text.
         final latest = _ideasCache[cacheKey];
-        _ideas = latest?.version == chapter.version ? latest!.ideas : ideas;
+        _ideas =
+            !_unverifiedChapterVersions.containsKey(chapter.itemId) &&
+                latest?.version == chapter.version
+            ? latest!.ideas
+            : ideas;
         _underlines = underlines?.ids ?? const {};
         _rangeUnderlines = underlines?.ranges ?? const [];
         if (cachedIdeas != null) ++_ideasRevision;
@@ -567,6 +578,58 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
       throw const ApiException('本章暂无可显示正文，可切换下一章或从目录选择其他章节');
     }
     return content.toCacheText();
+  }
+
+  void _startVersionRefresh(Chapter chapter) {
+    final id = chapter.itemId;
+    if (widget.localOnly ||
+        _unverifiedChapterVersions[id] != chapter.version ||
+        _attemptedVersionRefreshes[id] == chapter.version) {
+      return;
+    }
+    _attemptedVersionRefreshes[id] = chapter.version;
+    final revision = _chapterCacheRevisions[id] ?? 0;
+    unawaited(() async {
+      try {
+        final text = await _fetchChapter(
+          chapter,
+        ).timeout(const Duration(seconds: 8));
+        bool current() =>
+            mounted &&
+            _unverifiedChapterVersions[id] == chapter.version &&
+            widget.chapters.any(
+              (entry) => entry.itemId == id && entry.version == chapter.version,
+            );
+        if (!current() || revision != (_chapterCacheRevisions[id] ?? 0)) return;
+        // Prevent a previously started cache read from publishing older text.
+        _chapterCacheRevisions[id] = revision + 1;
+        await _onChapterContentAvailable(chapter, text);
+        if (!current() || _chapterCache[id] != text) return;
+        final active = _chapter.itemId == id;
+        if (active && !_loading && _content != text) return;
+        _unverifiedChapterSources.remove(id);
+        _unverifiedChapterVersions.remove(id);
+        if (active) {
+          _setState(() {
+            _contentSourceChapter = chapter;
+            _ideas = ChapterIdeas.empty;
+            ++_ideasRevision;
+          });
+          unawaited(_loadIdeas(chapter, _loadGeneration));
+        }
+        unawaited(
+          _saveFetchedNovelChapter(
+            chapter,
+            text,
+            _chapterCacheRevisions[id] ?? 0,
+          ),
+        );
+        final joined = _joinedKey.currentState;
+        if (joined != null) unawaited(joined.refreshChapters());
+      } catch (_) {
+        // Keep the previous readable body; don't attach the new comment index.
+      }
+    }());
   }
 
   Future<void> _refreshCachedChapter(Chapter chapter) async {

@@ -434,6 +434,13 @@ extension _ReaderPageBuild on _ReaderPageState {
                 label: '下载与追更',
                 onPressed: () => Navigator.pop(menu, 'download'),
               ),
+            if (widget.novelOnly && widget.onRefreshCatalogue != null)
+              GlassMenuItem(
+                key: const ValueKey('reader-refresh-directory'),
+                icon: CupertinoIcons.arrow_clockwise,
+                label: '刷新目录',
+                onPressed: () => Navigator.pop(menu, 'refresh-directory'),
+              ),
             if (!widget.novelOnly && !widget.localOnly)
               GlassMenuItem(
                 key: const ValueKey('reader-cache'),
@@ -487,6 +494,8 @@ extension _ReaderPageBuild on _ReaderPageState {
         await _showCache();
       case 'download':
         await widget.onDownload?.call(context, widget.chapters);
+      case 'refresh-directory':
+        await widget.onRefreshCatalogue?.call();
       case 'comments':
         await _showIdeas(focusParaIndex: _chapterEndParagraph());
       case 'shelf':

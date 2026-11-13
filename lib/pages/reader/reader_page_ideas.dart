@@ -115,7 +115,9 @@ extension _ReaderPageIdeas on _ReaderPageState {
     bool current() =>
         mounted &&
         generation == _loadGeneration &&
-        chapter.itemId == _chapter.itemId;
+        chapter.itemId == _chapter.itemId &&
+        chapter.version == _chapter.version &&
+        !_unverifiedChapterVersions.containsKey(chapter.itemId);
     if (!current() ||
         (widget.novelOnly &&
             !_preferences.showParagraphBubbles &&
@@ -273,11 +275,25 @@ extension _ReaderPageIdeas on _ReaderPageState {
     int? focusParaIndex,
     Chapter? sourceChapter,
     ChapterIdeas? sourceIdeas,
+    ChapterContent? sourceContent,
   }) async {
     final ideaSnapshot = sourceIdeas ?? _ideas;
     if (ideaSnapshot.isEmpty) return;
-    _setControlsVisible(false);
     final chapter = sourceChapter ?? widget.chapters[_index];
+    if (_unverifiedChapterVersions.containsKey(chapter.itemId)) return;
+    _setControlsVisible(false);
+    final sourceIndex = widget.chapters.indexWhere(
+      (entry) => entry.itemId == chapter.itemId,
+    );
+    // A bubble can remain visible after its chapter stops being active.
+    final contentSnapshot =
+        sourceContent ??
+        (chapter.itemId == _chapter.itemId
+            ? _chapterContent
+            : _joinedKey.currentState?.chapterAt(sourceIndex)?.content);
+    final chapterEnd = ideaSnapshot.paragraphs.isEmpty
+        ? null
+        : ideaSnapshot.paragraphs.last.paraIndex;
     // Keep immersive on while the sheet is open (#57): the sheet pushes a
     // route, which would otherwise release the system bars. The flag is
     // read by [_syncSystemBars] when the route change lands.
@@ -310,10 +326,10 @@ extension _ReaderPageIdeas on _ReaderPageState {
             preset: _effectivePreset,
             // Each bubble opens only that paragraph's comments.
             initialParaIndex: focusParaIndex,
-            scope: focusParaIndex == _chapterEndParagraph() ? '本章评论' : '本段评论',
-            excerpt: focusParaIndex == _chapterEndParagraph()
+            scope: focusParaIndex == chapterEnd ? '本章评论' : '本段评论',
+            excerpt: focusParaIndex == chapterEnd
                 ? chapter.title
-                : _chapterContent.blocks
+                : contentSnapshot?.blocks
                           .whereType<ChapterParagraph>()
                           .where((p) => p.paraIndex == focusParaIndex)
                           .firstOrNull

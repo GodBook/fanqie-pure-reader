@@ -61,6 +61,8 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
             text: raw['text'] as String,
             sourceOffset: range?.start ?? 0,
             createdAt: (raw['createdAt'] as num?)?.toInt() ?? 0,
+            targetParagraphId: paragraph?.paraIndex,
+            targetBlockIndex: paragraph?.blockIndex,
           ),
           underlineKey: range?.key ?? paragraph!.key,
         ));
@@ -123,6 +125,7 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
           sourceOffset: mark.sourceOffset,
           createdAt: mark.createdAt,
           note: note,
+          noteId: mark.noteId,
         ),
       );
       await _load();
@@ -178,7 +181,7 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
         .toList();
     return Theme(
       data: widget.preset.theme(Theme.of(context)),
-      child: ColoredBox(
+      child: Material(
         color: widget.preset.panelColor,
         child: SafeArea(
           child: SizedBox(

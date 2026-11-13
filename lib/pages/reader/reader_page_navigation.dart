@@ -185,6 +185,7 @@ extension _ReaderPageNavigation on _ReaderPageState {
       createdAt: DateTime.now().millisecondsSinceEpoch,
       note: note,
     );
+    if (note.isNotEmpty) return _bookmarkStore.addNote(bookmark);
     await _bookmarkStore.add(bookmark);
     return bookmark;
   }
@@ -279,11 +280,32 @@ extension _ReaderPageNavigation on _ReaderPageState {
       return;
     }
     var offset = layout.displayOffsetForSource(mark.sourceOffset);
-    if (mark.sourceOffset == 0 && mark.text.isNotEmpty) {
-      final block = layout.blocks
+    if (mark.targetParagraphId != null || mark.targetBlockIndex != null) {
+      final candidates = layout.blocks.where((b) => !b.isTitle && !b.isImage);
+      final identified = mark.targetParagraphId == null
+          ? null
+          : candidates
+                .where((b) => b.paraIndex == mark.targetParagraphId)
+                .firstOrNull;
+      final ordinal = mark.targetBlockIndex == null
+          ? null
+          : candidates
+                .where(
+                  (b) =>
+                      b.index - 1 == mark.targetBlockIndex &&
+                      (mark.text.isEmpty || b.text.contains(mark.text)),
+                )
+                .firstOrNull;
+      final textMatch = mark.text.isEmpty
+          ? null
+          : candidates.where((b) => b.text.contains(mark.text)).firstOrNull;
+      final target = identified ?? ordinal ?? textMatch;
+      if (target != null) offset = target.start;
+    } else if (mark.sourceOffset == 0 && mark.text.isNotEmpty) {
+      final target = layout.blocks
           .where((b) => !b.isTitle && b.text.contains(mark.text))
           .firstOrNull;
-      if (block != null) offset = block.start;
+      if (target != null) offset = target.start;
     }
     final block = layout.blockAtOffset(offset);
     await _landAtOffset(offset, end: block?.end);

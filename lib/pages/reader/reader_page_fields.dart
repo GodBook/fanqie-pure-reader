@@ -138,6 +138,13 @@ mixin _ReaderPageFields on State<ReaderPage> {
   final _cueTrackRequests = <String, Future<SubtitleTrack>>{};
 
   int _loadGeneration = 0;
+  // A directory version change does not prove that an existing downloaded
+  // body belongs to the new version. Keep its old source identity until a
+  // bounded online refresh has returned matching text.
+  final _unverifiedChapterSources = <String, Chapter>{};
+  final _unverifiedChapterVersions = <String, String>{};
+  final _attemptedVersionRefreshes = <String, String>{};
+  Chapter? _contentSourceChapter;
   // Legado-style reading time: deltas are settled at scroll stops, chapter
   // switches and dispose, so no background timer is needed.
   DateTime _readStart = DateTime.now();

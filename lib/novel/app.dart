@@ -45,6 +45,9 @@ import '../services/user_error.dart';
 import '../widgets/wenku/src/performance_preferences.dart';
 import 'recommendation_filters.dart';
 import 'starter_books.dart';
+import 'reader_session.dart';
+
+export 'reader_session.dart';
 
 part 'book_pages.dart';
 part 'downloads.dart';
@@ -392,6 +395,7 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
       _scheduleUpdateCheck();
     });
     _network = Connectivity().onConnectivityChanged.listen((_) {
+      updates.networkChanged();
       _scheduleUpdateCheck();
     });
   }
@@ -537,6 +541,7 @@ Future<void> _readBook(
 }) async {
   try {
     if (!await _requireLocal(context)) return;
+    var fetchedDirectory = false;
     chapters ??= (await ChapterCacheStore.instance.savedCatalogue(
       book.id,
     ))?.chapters;
@@ -545,35 +550,60 @@ Future<void> _readBook(
       chapters = (await ApiClient.instance.directoryChapters(
         book.id,
       )).expand((group) => group).toList(growable: false);
+      fetchedDirectory = true;
     }
     if (chapters.isEmpty) throw StateError('这本书暂无可阅读章节');
     final saved = await ReaderHistory(LibraryStore.instance).load(book.id);
     if (!context.mounted) return;
-    final chapterId =
-        saved?['itemId']?.toString() ?? saved?['chapterId']?.toString();
-    final savedIndex = chapters.indexWhere(
-      (chapter) => chapter.itemId == chapterId,
+    final resolved = await resolveNovelReadingStart(
+      chapters: chapters,
+      saved: saved,
+      selectedIndex: index,
+      localOnly: offline,
+      refresh: () async {
+        await NovelRuntime.ensureOnline();
+        return (await ApiClient.instance.directoryChapters(
+          book.id,
+        )).expand((group) => group).toList(growable: false);
+      },
     );
-    final start =
-        index ??
-        (savedIndex >= 0
-            ? savedIndex
-            : (saved?['episode'] as num?)?.toInt() ?? 0);
-    final directory = chapters;
+    if (!context.mounted) return;
+    fetchedDirectory = fetchedDirectory || resolved.refreshed;
+    final start = resolved.index;
+    final directory = resolved.chapters;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ReaderPage(
-          bookId: book.id,
-          title: book.title,
-          cover: book.cover,
+        builder: (_) => NovelReaderSession(
           chapters: directory,
-          startIndex: start.clamp(0, directory.length - 1),
           localOnly: offline,
-          novelOnly: true,
-          ensureOnline: NovelRuntime.ensureOnline,
-          shelfItem: book,
-          onDownload: (readerContext, directory) =>
-              _showBookDownloads(readerContext, book, directory),
+          refreshOnStart: !fetchedDirectory,
+          catalogueChanges: ChapterCacheStore.instance.changes,
+          cachedDirectoryLoader: () async =>
+              (await ChapterCacheStore.instance.savedCatalogue(
+                book.id,
+              ))?.chapters,
+          directoryLoader: (request) async {
+            await NovelRuntime.ensureOnline();
+            return ApiClient.instance.withCancellation(request, () async {
+              return (await ApiClient.instance.directoryChapters(
+                book.id,
+              )).expand((group) => group).toList(growable: false);
+            });
+          },
+          builder: (_, currentChapters, refresh) => ReaderPage(
+            bookId: book.id,
+            title: book.title,
+            cover: book.cover,
+            chapters: currentChapters,
+            startIndex: start.clamp(0, directory.length - 1),
+            localOnly: offline,
+            novelOnly: true,
+            ensureOnline: NovelRuntime.ensureOnline,
+            onRefreshCatalogue: offline ? null : refresh,
+            shelfItem: book,
+            onDownload: (readerContext, directory) =>
+                _showBookDownloads(readerContext, book, directory),
+          ),
         ),
       ),
     );

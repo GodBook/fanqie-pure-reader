@@ -415,6 +415,30 @@ extension _ReaderPageProgress on _ReaderPageState {
         widget.chapters.length;
   }
 
+  // Saving progress can overlap a catalogue refresh. Preserve the requested
+  // chapter identity, and cancel if the source or an unambiguous target is gone.
+  int? _resolveChapterTurnTarget(String currentId, String targetId) {
+    if (currentId.isEmpty ||
+        targetId.isEmpty ||
+        _index < 0 ||
+        _index >= widget.chapters.length ||
+        widget.chapters[_index].itemId != currentId) {
+      return null;
+    }
+    final target = widget.chapters.indexWhere(
+      (chapter) => chapter.itemId == targetId,
+    );
+    if (target < 0 ||
+        target == _index ||
+        widget.chapters.lastIndexWhere(
+              (chapter) => chapter.itemId == targetId,
+            ) !=
+            target) {
+      return null;
+    }
+    return target;
+  }
+
   /// Goes to the previous chapter.
   ///
   /// [startAtEnd] exists for the *continuous reading* paths only: paging past
@@ -429,7 +453,11 @@ extension _ReaderPageProgress on _ReaderPageState {
   /// (issue #110).
   Future<void> _prev({bool startAtEnd = false}) async {
     ++_readerNavigationGeneration;
-    if (_index <= 0 || _changingChapter) return;
+    if (_index <= 0 || _index >= widget.chapters.length || _changingChapter) {
+      return;
+    }
+    final currentId = widget.chapters[_index].itemId;
+    final targetId = widget.chapters[_index - 1].itemId;
     // 用户主动换章 = 不想被朗读拽回去，否则轮询 100ms 后又跳回正在播的那章。
     _pauseListenFollow();
     _finishChapterPreview();
@@ -438,8 +466,10 @@ extension _ReaderPageProgress on _ReaderPageState {
       _settleReadTime();
       await _persistProgress();
       if (!mounted) return;
+      final target = _resolveChapterTurnTarget(currentId, targetId);
+      if (target == null) return;
       final turn = _captureChapterTurn(-1);
-      _setState(() => _index--);
+      _setState(() => _index = target);
       await _load(startAtEnd: startAtEnd, chapterTurn: turn);
     } finally {
       _changingChapter = false;
@@ -448,11 +478,13 @@ extension _ReaderPageProgress on _ReaderPageState {
 
   Future<void> _next() async {
     ++_readerNavigationGeneration;
-    if (_changingChapter) return;
+    if (_changingChapter || _index < 0) return;
     if (_index >= widget.chapters.length - 1) {
       _showMessage('已是最后一章');
       return;
     }
+    final currentId = widget.chapters[_index].itemId;
+    final targetId = widget.chapters[_index + 1].itemId;
     // 同 [_prev]：主动翻到下一章也要退出跟随。
     _pauseListenFollow();
     _finishChapterPreview();
@@ -461,8 +493,10 @@ extension _ReaderPageProgress on _ReaderPageState {
       _settleReadTime();
       await _persistProgress();
       if (!mounted) return;
+      final target = _resolveChapterTurnTarget(currentId, targetId);
+      if (target == null) return;
       final turn = _captureChapterTurn(1);
-      _setState(() => _index++);
+      _setState(() => _index = target);
       await _load(chapterTurn: turn);
     } finally {
       _changingChapter = false;
@@ -478,12 +512,19 @@ extension _ReaderPageProgress on _ReaderPageState {
       _pauseListenFollow();
       if (navigationGeneration == null) ++_readerNavigationGeneration;
     }
+    final requestGeneration =
+        navigationGeneration ?? _readerNavigationGeneration;
     if (_changingChapter ||
         index == _index ||
         index < 0 ||
-        index >= widget.chapters.length) {
+        index >= widget.chapters.length ||
+        _index < 0 ||
+        _index >= widget.chapters.length ||
+        requestGeneration != _readerNavigationGeneration) {
       return;
     }
+    final currentId = widget.chapters[_index].itemId;
+    final targetId = widget.chapters[index].itemId;
     _changingChapter = true;
     try {
       // 闸门要排在结算/存盘**前面**：被闩锁挡住的这次跟随切章什么都没做，
@@ -503,12 +544,10 @@ extension _ReaderPageProgress on _ReaderPageState {
       }
       _settleReadTime();
       await _persistProgress();
-      if (!mounted ||
-          (navigationGeneration != null &&
-              navigationGeneration != _readerNavigationGeneration)) {
-        return;
-      }
-      _setState(() => _index = index);
+      if (!mounted || requestGeneration != _readerNavigationGeneration) return;
+      final target = _resolveChapterTurnTarget(currentId, targetId);
+      if (target == null) return;
+      _setState(() => _index = target);
       await _load();
     } finally {
       _changingChapter = false;

@@ -34,12 +34,7 @@ Future<void> _showBookDownloads(
           const SizedBox(height: 8),
           Text(book.title, maxLines: 2, overflow: TextOverflow.ellipsis),
           const SizedBox(height: 12),
-          ValueListenableBuilder<ChapterDownload?>(
-            valueListenable: NovelDownloadSession.active,
-            builder: (_, download, _) => download?.book.id == book.id
-                ? _DownloadProgress(download!)
-                : const SizedBox.shrink(),
-          ),
+          NovelDownloadProgressList(bookId: book.id),
           ListTile(
             key: const ValueKey('reader-download-choose'),
             contentPadding: EdgeInsets.zero,
@@ -202,62 +197,112 @@ Future<void> _chooseDownload(
   if (context.mounted) _notice(context, '已开始下载，关闭面板后会继续');
 }
 
-class _DownloadProgress extends StatelessWidget {
-  const _DownloadProgress(this.download);
-  final ChapterDownload download;
+class NovelDownloadProgressList extends StatelessWidget {
+  const NovelDownloadProgressList({super.key, this.bookId, this.manager});
+
+  final String? bookId;
+  final NovelDownloadManager? manager;
+
   @override
-  Widget build(BuildContext context) =>
-      ValueListenableBuilder<ChapterDownloadState>(
-        valueListenable: download,
-        builder: (context, state, _) => Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                download.book.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w600),
+  Widget build(BuildContext context) {
+    final downloadManager = manager ?? NovelDownloadManager.instance;
+    return ValueListenableBuilder<ChapterDownload?>(
+      valueListenable: downloadManager.active,
+      builder: (context, active, _) => ValueListenableBuilder<ChapterDownload?>(
+        valueListenable: downloadManager.manualTask,
+        builder: (context, manual, _) => Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (active != null && (bookId == null || active.book.id == bookId))
+              _DownloadProgress(
+                active,
+                manager: downloadManager,
+                automatic: !identical(active, manual),
               ),
-              const SizedBox(height: 12),
-              LinearProgressIndicator(value: state.fraction),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      state.running
-                          ? '正在下载 ${state.completed} / ${state.total} 章'
-                          : state.message ?? '已暂停',
-                      style: const TextStyle(fontSize: 12, height: 1.6),
-                    ),
-                  ),
-                  TextButton(
-                    key: const ValueKey('download-pause-resume'),
-                    onPressed: state.running
-                        ? NovelDownloadManager.instance.pause
-                        : state.completed == state.total
-                        ? null
-                        : () => NovelDownloadManager.instance.resume(download),
-                    child: Text(
-                      state.running
-                          ? '暂停'
-                          : state.completed == state.total
-                          ? '已完成'
-                          : '继续',
-                    ),
-                  ),
-                ],
+            if (manual != null &&
+                !identical(active, manual) &&
+                (bookId == null || manual.book.id == bookId))
+              _DownloadProgress(manual, manager: downloadManager),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DownloadProgress extends StatelessWidget {
+  _DownloadProgress(
+    this.download, {
+    NovelDownloadManager? manager,
+    this.automatic = false,
+  }) : manager = manager ?? NovelDownloadManager.instance;
+  final ChapterDownload download;
+  final NovelDownloadManager manager;
+  final bool automatic;
+  @override
+  Widget build(
+    BuildContext context,
+  ) => ValueListenableBuilder<ChapterDownloadState>(
+    valueListenable: download,
+    builder: (context, state, _) => Padding(
+      key: ValueKey(
+        'download-progress-${automatic ? 'auto' : 'manual'}-${download.book.id}',
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            download.book.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+          Text(
+            automatic ? '自动追更' : '手动下载',
+            style: const TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+          LinearProgressIndicator(value: state.fraction),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  state.running
+                      ? '正在下载 ${state.completed} / ${state.total} 章'
+                      : state.message ?? '已暂停',
+                  style: const TextStyle(fontSize: 12, height: 1.6),
+                ),
+              ),
+              TextButton(
+                key: const ValueKey('download-pause-resume'),
+                onPressed: state.running
+                    ? manager.pause
+                    : state.completed == state.total
+                    ? null
+                    : () => manager.resume(download),
+                child: Text(
+                  state.running
+                      ? '暂停'
+                      : state.completed == state.total
+                      ? '已完成'
+                      : '继续',
+                ),
               ),
             ],
           ),
-        ),
-      );
+        ],
+      ),
+    ),
+  );
 }
 
 class NovelDownloads extends StatefulWidget {
-  const NovelDownloads({super.key});
+  const NovelDownloads({super.key, this.directoryLoader});
+
+  /// Allows the online lookup to be provided by the surrounding application.
+  final Future<List<Chapter>> Function(String bookId)? directoryLoader;
   @override
   State<NovelDownloads> createState() => _NovelDownloadsState();
 }
@@ -336,14 +381,136 @@ class _NovelDownloadsState extends State<NovelDownloads> {
       }
       final saved = await ReaderHistory(LibraryStore.instance).load(book.id);
       if (!mounted) return;
-      final savedId =
-          saved?['itemId']?.toString() ?? saved?['chapterId']?.toString();
-      final savedIndex = book.chapters.indexWhere(
-        (chapter) => chapter.itemId == savedId && ids.contains(chapter.itemId),
-      );
+      final novelHistory = saved?['kind'] == null || saved?['kind'] == 'book'
+          ? saved
+          : null;
+      var savedId =
+          novelHistory?['chapterId']?.toString() ??
+          novelHistory?['itemId']?.toString();
+      final savedEpisode = novelHistory?['episode'];
+      final savedIndex = novelResumeChapterIndex(book.chapters, novelHistory);
+      if ((savedId == null || savedId.isEmpty) && savedIndex >= 0) {
+        savedId = book.chapters[savedIndex].itemId;
+      }
+      final unresolvedPosition =
+          (savedId == null || savedId.isEmpty) &&
+          ((savedEpisode is num &&
+                  (!savedEpisode.isFinite || savedEpisode >= 0)) ||
+              novelHistory?['position'] is num ||
+              novelHistory?['progress'] is num);
       final first = book.chapters.indexWhere(
         (chapter) => ids.contains(chapter.itemId),
       );
+      if (first < 0) {
+        _notice(context, '本地目录中没有已下载章节，请重新下载');
+        return;
+      }
+      if (unresolvedPosition ||
+          (savedId != null &&
+              savedId.isNotEmpty &&
+              (savedIndex < 0 || !ids.contains(savedId)))) {
+        final action = await showDialog<String>(
+          context: context,
+          builder: (dialog) => AlertDialog(
+            title: Text(unresolvedPosition ? '上次阅读的章节无法定位' : '上次阅读的章节未下载'),
+            content: Text(
+              unresolvedPosition
+                  ? '原章节信息不完整。取消会保留阅读进度；选择其他章节后会更新进度。'
+                  : '取消会保留原阅读进度；选择其他章节后会更新进度，也可以联网续读。',
+            ),
+            actions: [
+              TextButton(
+                key: const ValueKey('offline-resume-cancel'),
+                onPressed: () => Navigator.pop(dialog, 'cancel'),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                key: const ValueKey('offline-resume-choose'),
+                onPressed: () => Navigator.pop(dialog, 'choose'),
+                child: const Text('选择已下载章节'),
+              ),
+              if (!unresolvedPosition)
+                FilledButton(
+                  key: const ValueKey('offline-resume-online'),
+                  onPressed: () => Navigator.pop(dialog, 'online'),
+                  child: const Text('联网续读'),
+                ),
+            ],
+          ),
+        );
+        if (!mounted || action == null || action == 'cancel') return;
+        if (action == 'choose') {
+          final available = <int>[
+            for (var i = 0; i < book.chapters.length; i++)
+              if (ids.contains(book.chapters[i].itemId)) i,
+          ];
+          final selected = await showDialog<int>(
+            context: context,
+            builder: (dialog) => AlertDialog(
+              title: const Text('选择已下载章节'),
+              content: SizedBox(
+                width: double.maxFinite,
+                height: MediaQuery.sizeOf(dialog).height * 0.5,
+                child: ListView.builder(
+                  itemCount: available.length,
+                  itemBuilder: (context, index) {
+                    final chapterIndex = available[index];
+                    final chapter = book.chapters[chapterIndex];
+                    return ListTile(
+                      key: ValueKey('offline-chapter-${chapter.itemId}'),
+                      title: Text(chapter.title),
+                      onTap: () => Navigator.pop(dialog, chapterIndex),
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialog),
+                  child: const Text('取消'),
+                ),
+              ],
+            ),
+          );
+          if (!mounted || selected == null) return;
+          await _readBook(
+            context,
+            _item(book),
+            chapters: book.chapters,
+            index: selected,
+            offline: true,
+          );
+          return;
+        }
+        var chapters = book.chapters;
+        var onlineIndex = savedIndex;
+        if (onlineIndex < 0) {
+          try {
+            chapters =
+                await (widget.directoryLoader ??
+                    NovelDownloadManager.instance.directoryLoader)(book.id);
+          } catch (_) {
+            if (mounted) _notice(context, '无法联网查找上次阅读的章节，原阅读进度已保留');
+            return;
+          }
+          if (!mounted) return;
+          onlineIndex = chapters.indexWhere(
+            (chapter) => chapter.itemId == savedId,
+          );
+          if (onlineIndex < 0) {
+            _notice(context, '当前目录中未找到上次阅读的章节，原阅读进度已保留');
+            return;
+          }
+        }
+        await _readBook(
+          context,
+          _item(book),
+          chapters: chapters,
+          index: onlineIndex,
+          offline: false,
+        );
+        return;
+      }
       await _readBook(
         context,
         _item(book),
@@ -436,14 +603,7 @@ class _NovelDownloadsState extends State<NovelDownloads> {
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-          SliverToBoxAdapter(
-            child: ValueListenableBuilder<ChapterDownload?>(
-              valueListenable: NovelDownloadSession.active,
-              builder: (context, active, _) => active == null
-                  ? const SizedBox.shrink()
-                  : _DownloadProgress(active),
-            ),
-          ),
+          const SliverToBoxAdapter(child: NovelDownloadProgressList()),
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),

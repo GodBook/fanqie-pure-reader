@@ -1068,7 +1068,7 @@ List<SearchTab> parseSearchTabs(Map<String, dynamic> payload, {int? tabType}) {
     return SearchTab(
       title: title,
       items: items,
-      hasMore: rawTab['has_more'] is bool ? rawTab['has_more'] as bool : null,
+      hasMore: _optionalFlag({'has_more': rawTab['has_more']}, const ['has_more']),
       nextOffset: _asInt(rawTab['next_offset']),
     );
   }).toList();

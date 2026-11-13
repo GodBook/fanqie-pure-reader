@@ -75,7 +75,7 @@ class _NovelCommunityState extends State<NovelCommunity> {
   BackendRequest? _request;
   int _generation = 0, _offset = 0;
   String? _session, _error;
-  bool _loading = false, _more = true;
+  bool _loading = false, _more = true, _retryRefresh = false;
   List<NovelTopic> _topics = [];
   @override
   void initState() {
@@ -100,6 +100,7 @@ class _NovelCommunityState extends State<NovelCommunity> {
     setState(() {
       _loading = true;
       _error = null;
+      _retryRefresh = false;
     });
     try {
       final page = await (widget.loader ?? _topicsLoader)(
@@ -120,7 +121,10 @@ class _NovelCommunityState extends State<NovelCommunity> {
       });
     } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _error = _errorText(error));
+        setState(() {
+          _error = _errorText(error);
+          _retryRefresh = refresh;
+        });
       }
     } finally {
       if (mounted && generation == _generation) {
@@ -160,6 +164,14 @@ class _NovelCommunityState extends State<NovelCommunity> {
                 ),
               ),
             ),
+            if (_topics.isNotEmpty && _error != null && _retryRefresh)
+              SliverToBoxAdapter(
+                child: TextButton(
+                  key: const ValueKey('community-refresh-retry'),
+                  onPressed: () => _load(refresh: true),
+                  child: Text('刷新失败 · $_error · 重试'),
+                ),
+              ),
             if (_topics.isEmpty)
               SliverFillRemaining(
                 hasScrollBody: false,
@@ -167,7 +179,8 @@ class _NovelCommunityState extends State<NovelCommunity> {
                     ? const Center(child: CircularProgressIndicator())
                     : _Problem(
                         message: _error ?? '暂时没有话题，下拉刷新试试。',
-                        onRetry: () => _load(refresh: true),
+                        onRetry: () =>
+                            _load(refresh: _error == null || _retryRefresh),
                       ),
               ),
             SliverList.builder(
@@ -234,7 +247,7 @@ class _NovelCommunityState extends State<NovelCommunity> {
                 );
               },
             ),
-            if (_topics.isNotEmpty)
+            if (_topics.isNotEmpty && (_error == null || !_retryRefresh))
               SliverToBoxAdapter(
                 child: _BottomLoader(
                   loading: _loading,
@@ -267,10 +280,11 @@ class NovelTopicPage extends StatefulWidget {
 class _NovelTopicPageState extends State<NovelTopicPage> {
   final _scroll = ScrollController();
   BackendRequest? _request;
+  BackendRequest? _detailRequest;
   late NovelTopic _topic;
-  int _generation = 0, _offset = 0;
-  String? _session, _error;
-  bool _loading = false, _more = true, _newest = false, _detailReady = false;
+  int _generation = 0, _detailGeneration = 0, _offset = 0;
+  String? _session, _error, _detailError;
+  bool _loading = false, _more = true, _newest = false, _retryRefresh = false;
   List<NovelRecommendationPost> _posts = [];
   @override
   void initState() {
@@ -284,7 +298,28 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
         _load();
       }
     });
-    _load(refresh: true);
+    unawaited(_loadDetail());
+    unawaited(_load(refresh: true));
+  }
+
+  Future<void> _loadDetail() async {
+    final generation = ++_detailGeneration;
+    _detailRequest?.cancel();
+    final request = _detailRequest = BackendRequest();
+    setState(() => _detailError = null);
+    try {
+      final topic = await (widget.topicLoader ?? _topicLoader)(
+        widget.topic.id,
+        request,
+      );
+      if (mounted && generation == _detailGeneration) {
+        setState(() => _topic = topic);
+      }
+    } catch (error) {
+      if (mounted && generation == _detailGeneration) {
+        setState(() => _detailError = _errorText(error));
+      }
+    }
   }
 
   Future<void> _load({bool refresh = false}) async {
@@ -296,26 +331,18 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
     setState(() {
       _loading = true;
       _error = null;
+      _retryRefresh = false;
     });
     try {
-      final responses = await Future.wait<Object>([
-        if (!_detailReady)
-          (widget.topicLoader ?? _topicLoader)(_topic.id, request),
-        (widget.postsLoader ?? _postsLoader)(
-          _topic.id,
-          offset,
-          refresh ? null : _session,
-          _newest,
-          request,
-        ),
-      ]);
+      final page = await (widget.postsLoader ?? _postsLoader)(
+        widget.topic.id,
+        offset,
+        refresh ? null : _session,
+        _newest,
+        request,
+      );
       if (!mounted || generation != _generation) return;
-      final page = responses.last as NovelTopicPostsPage;
       setState(() {
-        if (!_detailReady) {
-          _topic = responses.first as NovelTopic;
-          _detailReady = true;
-        }
         _posts = <String, NovelRecommendationPost>{
           if (!refresh)
             for (final post in _posts) post.comment.id: post,
@@ -327,7 +354,10 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
       });
     } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _error = _errorText(error));
+        setState(() {
+          _error = _errorText(error);
+          _retryRefresh = refresh;
+        });
       }
     } finally {
       if (mounted && generation == _generation) {
@@ -350,7 +380,9 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
   @override
   void dispose() {
     _request?.cancel();
+    _detailRequest?.cancel();
     ++_generation;
+    ++_detailGeneration;
     _scroll.dispose();
     super.dispose();
   }
@@ -380,6 +412,12 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                         height: 1.4,
                       ),
                     ),
+                    if (_detailError != null)
+                      TextButton(
+                        key: const ValueKey('topic-detail-retry'),
+                        onPressed: _loadDetail,
+                        child: Text('话题详情加载失败 · $_detailError · 重试'),
+                      ),
                     const SizedBox(height: 8),
                     Text(
                       _topic.author.isEmpty ? '番茄读者话题' : _topic.author,
@@ -455,6 +493,14 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                 ),
               ),
             ),
+            if (_posts.isNotEmpty && _error != null && _retryRefresh)
+              SliverToBoxAdapter(
+                child: TextButton(
+                  key: const ValueKey('topic-refresh-retry'),
+                  onPressed: () => _load(refresh: true),
+                  child: Text('荐书刷新失败 · $_error · 重试'),
+                ),
+              ),
             if (_posts.isEmpty)
               SliverToBoxAdapter(
                 child: _loading
@@ -466,7 +512,7 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                         message: _error ?? '暂时还没有读者荐书。',
                         onRetry: _error == null
                             ? null
-                            : () => _load(refresh: true),
+                            : () => _load(refresh: _retryRefresh),
                       ),
               ),
             SliverList.builder(
@@ -559,7 +605,7 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                 );
               },
             ),
-            if (_posts.isNotEmpty)
+            if (_posts.isNotEmpty && (_error == null || !_retryRefresh))
               SliverToBoxAdapter(
                 child: _BottomLoader(
                   loading: _loading,

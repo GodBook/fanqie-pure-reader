@@ -178,7 +178,8 @@ class _NovelBookPageState extends State<NovelBookPage> {
     final saved = await ReaderHistory(LibraryStore.instance).load(_book.id);
     final ids = await ChapterCacheStore.instance.cachedChapterIds(_book.id);
     if (!mounted) return;
-    final current = _chapters.indexWhere((c) => c.itemId == saved?['itemId']);
+    final snapshot = List<Chapter>.unmodifiable(_chapters);
+    final current = novelResumeChapterIndex(snapshot, saved);
     final index = await showModalBottomSheet<int>(
       context: context,
       isScrollControlled: true,
@@ -188,8 +189,8 @@ class _NovelBookPageState extends State<NovelBookPage> {
       builder: (context) => SizedBox(
         height: MediaQuery.sizeOf(context).height * .75,
         child: ReaderDirectorySheet(
-          chapters: _chapters,
-          currentIndex: current < 0 ? 0 : current,
+          chapters: snapshot,
+          currentIndex: current,
           cachedIds: ids,
           bookId: _book.id,
           aiStatuses: const [],
@@ -200,7 +201,13 @@ class _NovelBookPageState extends State<NovelBookPage> {
         ),
       ),
     );
-    if (index != null && mounted) await _read(index: index);
+    if (index == null || !mounted) return;
+    final target = resolveReaderDirectorySelection(snapshot, index, _chapters);
+    if (target == null) {
+      _notice(context, '目录已更新，所选章节不可用，请重新选择');
+      return;
+    }
+    await _read(index: target);
   }
 
   @override
@@ -324,12 +331,7 @@ class _NovelBookPageState extends State<NovelBookPage> {
             trailing: const Icon(Icons.chevron_right),
             onTap: _directory,
           ),
-          ValueListenableBuilder<ChapterDownload?>(
-            valueListenable: NovelDownloadSession.active,
-            builder: (_, d, _) => d?.book.id == _book.id
-                ? _DownloadProgress(d!)
-                : const SizedBox.shrink(),
-          ),
+          NovelDownloadProgressList(bookId: _book.id),
           const Text(
             '简介',
             style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),

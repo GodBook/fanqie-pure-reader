@@ -64,6 +64,10 @@ class _NovelCategoriesState extends State<_NovelCategories> {
               ),
           ],
         ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Text('点击标签搜索分类关键词，结果不限定分类'),
+        ),
         if (_loading) const LinearProgressIndicator(),
         if (_error != null) TextButton(onPressed: _load, child: Text(_error!)),
         if (_front != null)
@@ -95,7 +99,10 @@ class _NovelCategoriesState extends State<_NovelCategories> {
                       onPressed: () => Navigator.push(
                         context,
                         MaterialPageRoute<void>(
-                          builder: (_) => NovelSearch(initialQuery: tile.name),
+                          builder: (_) => NovelSearch(
+                            initialQuery: tile.name,
+                            isCategoryKeyword: true,
+                          ),
                         ),
                       ),
                     ),

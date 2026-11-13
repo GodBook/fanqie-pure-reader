@@ -342,7 +342,10 @@ extension _NovelShelfLibrary on _NovelShelfState {
                             try {
                               await ShelfGroupStore.instance.removeGroup(e.key);
                               if (mounted && _group == e.key) {
-                                _update(() => _group = ShelfGroupStore.all);
+                                _update(() {
+                                  _group = ShelfGroupStore.all;
+                                  _selection.clear();
+                                });
                               }
                             } catch (_) {
                               if (mounted) _notice(context, '删除分组失败');
@@ -362,7 +365,24 @@ extension _NovelShelfLibrary on _NovelShelfState {
 
   Widget _buildLibrary() => Scaffold(
     appBar: AppBar(
-      title: Text(_managing ? '已选择 ${_selection.length} 本' : '我的书架'),
+      title: ListenableBuilder(
+        listenable: Listenable.merge([
+          ShelfStore.instance.listenable,
+          ShelfGroupStore.instance.listenable,
+        ]),
+        builder: (context, _) {
+          final count = ShelfStore.instance
+              .records()
+              .where(
+                (record) =>
+                    record.item.kind == 'book' &&
+                    _selection.contains(record.item.id) &&
+                    ShelfGroupStore.instance.matches(record.item, _group),
+              )
+              .length;
+          return Text(_managing ? '已选择 $count 本' : '我的书架');
+        },
+      ),
       actions: [
         IconButton(
           key: const ValueKey('open-downloads'),
@@ -431,6 +451,10 @@ extension _NovelShelfLibrary on _NovelShelfState {
             _ => b.addedAt.compareTo(a.addedAt),
           },
         );
+        final selectedBooks = records
+            .where((record) => _selection.contains(record.item.id))
+            .map((record) => record.item)
+            .toList();
         return Column(
           children: [
             Row(
@@ -451,7 +475,13 @@ extension _NovelShelfLibrary on _NovelShelfState {
                             child: ChoiceChip(
                               label: Text(e.value),
                               selected: _group == e.key,
-                              onSelected: (_) => _update(() => _group = e.key),
+                              onSelected: (_) {
+                                if (_group == e.key) return;
+                                _update(() {
+                                  _group = e.key;
+                                  _selection.clear();
+                                });
+                              },
                             ),
                           ),
                       ],
@@ -494,28 +524,19 @@ extension _NovelShelfLibrary on _NovelShelfState {
                     child: const Text('全选'),
                   ),
                   TextButton(
-                    onPressed: _selection.isEmpty
+                    onPressed: selectedBooks.isEmpty
                         ? null
-                        : () => _move(
-                            records
-                                .where((r) => _selection.contains(r.item.id))
-                                .map((r) => r.item)
-                                .toList(),
-                          ),
+                        : () => _move(selectedBooks),
                     child: const Text('移动到分组'),
                   ),
                   TextButton(
-                    onPressed: _selection.isEmpty
+                    onPressed: selectedBooks.isEmpty
                         ? null
                         : () async {
-                            final books = records
-                                .where((r) => _selection.contains(r.item.id))
-                                .map((r) => r.item)
-                                .toList();
-                            if (await _confirmRemove(context, books)) {
+                            if (await _confirmRemove(context, selectedBooks)) {
                               try {
                                 await ShelfStore.instance.removeKeys(
-                                  books.map(ShelfStore.keyOf),
+                                  selectedBooks.map(ShelfStore.keyOf),
                                 );
                                 if (mounted) _update(() => _selection.clear());
                               } catch (_) {

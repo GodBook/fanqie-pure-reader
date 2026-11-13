@@ -152,7 +152,7 @@ void main() {
   });
 
   testWidgets(
-    'adjacent bubbles are prepared before joining and retained across chapters',
+    'adjacent text joins before ideas and late bubbles remain across chapters',
     (tester) async {
       final nextIdeas = Completer<ChapterIdeas>();
       final requests = <String, int>{};
@@ -176,7 +176,9 @@ void main() {
       final state = tester.state<ReaderJoinedScrollState>(
         find.byType(ReaderJoinedScroll),
       );
-      expect(state.chapterAt(1), isNull);
+      expect(state.chapterAt(1), isNotNull);
+      expect(state.chapterAt(1)!.ideas, ChapterIdeas.empty);
+      expect(state.chapterAt(1)!.layout.blocks[1].bubbleCount, isNull);
       final outgoing = state.chapterAt(0)!.layout;
       expect(outgoing.blocks[1].bubbleCount, 12);
       nextIdeas.complete(ideas);

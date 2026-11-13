@@ -184,6 +184,16 @@ class ReaderRangeUnderline {
   }
 }
 
+/// A new underline cannot be saved until the user removes an existing one.
+class ReaderUnderlineLimitException implements Exception {
+  const ReaderUnderlineLimitException(this.maxEntries);
+
+  final int maxEntries;
+
+  @override
+  String toString() => '划线已达上限（$maxEntries 条），请先删除不需要的划线';
+}
+
 /// Local 划线 storage.
 /// The official client keeps these server-side per account; the backend has no such
 /// endpoint, so this stays on the device. Identity is (book, chapter,
@@ -228,11 +238,6 @@ class ReaderUnderlineStore {
     required int start,
     required int end,
   }) => jsonEncode(['r', bookId, chapterId, start, end]);
-
-  static int _createdAtOf(dynamic raw) =>
-      ReaderUnderline.fromMap(raw)?.createdAt ??
-      ReaderRangeUnderline.fromMap(raw)?.createdAt ??
-      0;
 
   /// Opens the box, or null when storage is unavailable.
   ///
@@ -292,8 +297,8 @@ class ReaderUnderlineStore {
 
   Future<void> add(ReaderUnderline underline) => _serialize(
     (box) async {
+      _ensureCapacity(box, underline.key);
       await box.put(underline.key, underline.toMap());
-      await _evictBeyondMax(box);
       changes.value++;
     },
     onUnavailable: null,
@@ -302,24 +307,18 @@ class ReaderUnderlineStore {
 
   Future<void> addRange(ReaderRangeUnderline underline) => _serialize(
     (box) async {
+      _ensureCapacity(box, underline.key);
       await box.put(underline.key, underline.toMap());
-      await _evictBeyondMax(box);
       changes.value++;
     },
     onUnavailable: null,
     failWhenUnavailable: true,
   );
 
-  /// A failed eviction must surface through the surrounding [_serialize]
-  /// chain — a fire-and-forget [Box.deleteAll] escaped it as an unhandled
-  /// async error, and the store would keep treating the cap as recovered.
-  Future<void> _evictBeyondMax(Box<dynamic> box) async {
-    if (box.length <= maxEntries) return;
-    final oldest = box.keys.toList()
-      ..sort(
-        (a, b) => _createdAtOf(box.get(a)).compareTo(_createdAtOf(box.get(b))),
-      );
-    await box.deleteAll(oldest.take(box.length - maxEntries));
+  void _ensureCapacity(Box<dynamic> box, String key) {
+    if (!box.containsKey(key) && box.length >= maxEntries) {
+      throw ReaderUnderlineLimitException(maxEntries);
+    }
   }
 
   /// Every saved range underline of one chapter, ordered by [start].

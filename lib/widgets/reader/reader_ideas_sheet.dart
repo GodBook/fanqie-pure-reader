@@ -59,6 +59,25 @@ class ReaderIdeasSheet extends StatefulWidget {
 class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
   ParagraphIdeas? _paragraph;
   BookCommentPage? _page;
+  // Cache only replies the reader actually opened, not every virtualized row.
+  // The bounded cache lasts for this sheet's lifetime and survives row disposal.
+  static const _maxReplyStates = 100;
+  final _replyStates = <String, _ReplyState>{};
+
+  _ReplyState? _cachedReplyState(String id) {
+    final state = _replyStates.remove(id);
+    if (state != null) _replyStates[id] = state;
+    return state;
+  }
+
+  _ReplyState _rememberReplyState(String id, _ReplyState? existing) {
+    final state = _replyStates.remove(id) ?? existing ?? _ReplyState();
+    _replyStates[id] = state;
+    while (_replyStates.length > _maxReplyStates) {
+      _replyStates.remove(_replyStates.keys.first);
+    }
+    return state;
+  }
 
   /// Lifecycle of the next page: nothing in flight ([_MoreStatus.idle]), the
   /// request is out ([_MoreStatus.fetching]), the result is waiting for the
@@ -334,6 +353,9 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
             mutedColor: _mutedColor,
             replyLoader: widget.replyLoader,
             replyPageLoader: widget.replyPageLoader,
+            cachedReply: _cachedReplyState(comments[index].id),
+            rememberReply: (state) =>
+                _rememberReplyState(comments[index].id, state),
           );
         },
       ),
@@ -373,6 +395,73 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
 /// Lifecycle of the next page request; see [_onScrollNotification].
 enum _MoreStatus { idle, fetching, held, failed }
 
+/// Owns the request as well as the loaded page: completion is retained even
+/// when the row that started it has left the list's render cache.
+class _ReplyState extends ChangeNotifier {
+  CommentReplyPage? replies;
+  bool loading = false;
+  bool failed = false;
+  bool expanded = false;
+
+  Future<void> toggle(
+    String commentId,
+    Future<CommentReplyPage> Function(String)? loader,
+    Future<CommentReplyPage> Function(String, String)? pageLoader,
+  ) async {
+    if (loading) return;
+    if (replies != null) {
+      expanded = !expanded;
+      notifyListeners();
+      return;
+    }
+    if (loader == null && pageLoader == null) return;
+    loading = true;
+    failed = false;
+    notifyListeners();
+    try {
+      replies = await (pageLoader?.call(commentId, '') ?? loader!(commentId));
+      expanded = true;
+    } catch (_) {
+      failed = true;
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> more(
+    String commentId,
+    Future<CommentReplyPage> Function(String, String)? loader,
+  ) async {
+    final old = replies;
+    if (loading || old == null || !old.hasMore || loader == null) return;
+    loading = true;
+    failed = false;
+    notifyListeners();
+    try {
+      final next = await loader(commentId, old.cursor);
+      final seen = <String>{};
+      final merged = [...old.replies, ...next.replies]
+          .where(
+            (r) => seen.add(r.id.isEmpty ? '${r.userName}:${r.text}' : r.id),
+          )
+          .toList();
+      replies = CommentReplyPage(
+        replies: merged,
+        totalCount: next.totalCount,
+        cursor: next.cursor,
+        hasMore:
+            next.hasMore && next.cursor.isNotEmpty && next.cursor != old.cursor,
+      );
+    } catch (_) {
+      failed = true;
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+}
+
 /// Avatar beside the name and body; date, reply and reactions below the body.
 ///
 /// Tapping the reply counter expands that comment's replies in place. They load
@@ -385,6 +474,8 @@ class _CommentRow extends StatefulWidget {
   final Future<CommentReplyPage> Function(String commentId)? replyLoader;
   final Future<CommentReplyPage> Function(String commentId, String cursor)?
   replyPageLoader;
+  final _ReplyState? cachedReply;
+  final _ReplyState Function(_ReplyState?) rememberReply;
 
   const _CommentRow({
     super.key,
@@ -393,6 +484,8 @@ class _CommentRow extends StatefulWidget {
     required this.mutedColor,
     this.replyLoader,
     this.replyPageLoader,
+    this.cachedReply,
+    required this.rememberReply,
   });
 
   @override
@@ -400,10 +493,44 @@ class _CommentRow extends StatefulWidget {
 }
 
 class _CommentRowState extends State<_CommentRow> {
-  CommentReplyPage? _replies;
-  bool _loading = false;
-  bool _failed = false;
-  bool _expanded = false;
+  _ReplyState? _state;
+  CommentReplyPage? get _replies => _state?.replies;
+  bool get _loading => _state?.loading ?? false;
+  bool get _failed => _state?.failed ?? false;
+  bool get _expanded => _state?.expanded ?? false;
+
+  void _setReplyState(_ReplyState? state) {
+    if (identical(_state, state)) return;
+    _state?.removeListener(_replyChanged);
+    _state = state;
+    _state?.addListener(_replyChanged);
+  }
+
+  void _replyChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _setReplyState(widget.cachedReply);
+  }
+
+  @override
+  void didUpdateWidget(covariant _CommentRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.comment.id != widget.comment.id) {
+      _setReplyState(widget.cachedReply);
+    } else if (widget.cachedReply != null) {
+      _setReplyState(widget.cachedReply);
+    }
+  }
+
+  @override
+  void dispose() {
+    _setReplyState(null);
+    super.dispose();
+  }
 
   BookComment get comment => widget.comment;
   Color get textColor => widget.textColor;
@@ -413,71 +540,16 @@ class _CommentRowState extends State<_CommentRow> {
   /// list only appends one when replies remain.
   bool get _hasReplies => (_replies?.totalCount ?? comment.replyCount) > 0;
 
-  Future<void> _toggleReplies() async {
-    if (_loading) return;
-    // A second tap collapses; the page is kept so reopening is instant.
-    if (_replies != null) {
-      setState(() => _expanded = !_expanded);
-      return;
-    }
-    final loader = widget.replyLoader;
-    if (loader == null && widget.replyPageLoader == null) return;
-    setState(() {
-      _loading = true;
-      _failed = false;
-    });
-    try {
-      final page =
-          await (widget.replyPageLoader?.call(comment.id, '') ??
-              loader!(comment.id));
-      if (!mounted) return;
-      setState(() {
-        _replies = page;
-        _expanded = true;
-        _loading = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _failed = true;
-        _loading = false;
-      });
-    }
+  Future<void> _toggleReplies() {
+    final state = widget.rememberReply(_state);
+    _setReplyState(state);
+    return state.toggle(comment.id, widget.replyLoader, widget.replyPageLoader);
   }
 
-  Future<void> _moreReplies() async {
-    final old = _replies;
-    final loader = widget.replyPageLoader;
-    if (_loading || old == null || !old.hasMore || loader == null) return;
-    setState(() {
-      _loading = true;
-      _failed = false;
-    });
-    try {
-      final next = await loader(comment.id, old.cursor);
-      if (!mounted) return;
-      final seen = <String>{};
-      final replies = [...old.replies, ...next.replies]
-          .where(
-            (r) => seen.add(r.id.isEmpty ? '${r.userName}:${r.text}' : r.id),
-          )
-          .toList();
-      setState(
-        () => _replies = CommentReplyPage(
-          replies: replies,
-          totalCount: next.totalCount,
-          cursor: next.cursor,
-          hasMore:
-              next.hasMore &&
-              next.cursor.isNotEmpty &&
-              next.cursor != old.cursor,
-        ),
-      );
-    } catch (_) {
-      if (mounted) setState(() => _failed = true);
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+  Future<void> _moreReplies() {
+    final state = widget.rememberReply(_state);
+    _setReplyState(state);
+    return state.more(comment.id, widget.replyPageLoader);
   }
 
   /// Reply counter: tap to expand, chevron rotates with the state.

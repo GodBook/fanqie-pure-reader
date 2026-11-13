@@ -1,5 +1,19 @@
 part of '../reader_page.dart';
 
+/// Resolve a choice made against a directory snapshot in the current list.
+/// Missing or invalid chapter IDs are not safe to reinterpret as positions.
+int? resolveReaderDirectorySelection(
+  List<Chapter> snapshot,
+  int selected,
+  List<Chapter> current,
+) {
+  if (selected < 0 || selected >= snapshot.length) return null;
+  final chapterId = snapshot[selected].itemId;
+  if (chapterId.isEmpty) return null;
+  final index = current.indexWhere((chapter) => chapter.itemId == chapterId);
+  return index < 0 ? null : index;
+}
+
 /// Reader preferences, device/brightness control and the settings sheets.
 extension _ReaderPagePreferences on _ReaderPageState {
   bool get _paged => _preferences.pageMode == ReaderPageMode.paged;
@@ -440,6 +454,8 @@ extension _ReaderPagePreferences on _ReaderPageState {
     }
     if (!mounted) return;
     final preset = _effectivePreset;
+    final snapshot = List<Chapter>.unmodifiable(widget.chapters);
+    final currentIndex = _index;
     final selected = await showModalBottomSheet<int>(
       context: context,
       isScrollControlled: true,
@@ -451,8 +467,8 @@ extension _ReaderPagePreferences on _ReaderPageState {
         borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
       ),
       builder: (context) => ReaderDirectorySheet(
-        chapters: widget.chapters,
-        currentIndex: _index,
+        chapters: snapshot,
+        currentIndex: currentIndex,
         cachedIds: cachedIds,
         bookId: widget.bookId,
         aiStatuses: aiStatuses,
@@ -462,7 +478,28 @@ extension _ReaderPagePreferences on _ReaderPageState {
     );
     // 墨水屏：目录关闭后刷一次（选了章节时切章本身也会刷一次，不叠加也无妨）。
     _maybeEinkRefresh();
-    if (selected != null && mounted) await _jumpToChapter(selected);
+    if (selected == null || !mounted) return;
+    final target = resolveReaderDirectorySelection(
+      snapshot,
+      selected,
+      widget.chapters,
+    );
+    if (target == null) {
+      _showMessage('目录已更新，所选章节不可用，请重新选择');
+      return;
+    }
+    final jumpDirectory = widget.chapters;
+    final generation = ++_readerNavigationGeneration;
+    await _jumpToChapter(target, navigationGeneration: generation);
+    if (mounted &&
+        generation == _readerNavigationGeneration &&
+        !identical(jumpDirectory, widget.chapters) &&
+        (widget.chapters.isEmpty ||
+            _index < 0 ||
+            _index >= widget.chapters.length ||
+            widget.chapters[_index].itemId != snapshot[selected].itemId)) {
+      _showMessage('目录已更新，请重新选择章节');
+    }
   }
 
   Future<void> _showCache() {

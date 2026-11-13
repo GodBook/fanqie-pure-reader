@@ -47,6 +47,11 @@ class NovelDownloadManager extends ChangeNotifier {
   final Future<ConnectivityView?> Function() connectivity;
   final Future<List<CachedBook>> Function() downloadedBooks;
   final active = ValueNotifier<ChapterDownload?>(null);
+
+  /// The most recent user-requested task, including while an automatic batch
+  /// temporarily occupies [active].
+  final manualTask = ValueNotifier<ChapterDownload?>(null);
+  final Expando<int> _batchStarts = Expando<int>();
   SharedPreferences? _preferences;
   Future<void>? _opening;
   Map<String, String> _tails = {};
@@ -54,10 +59,10 @@ class NovelDownloadManager extends ChangeNotifier {
   bool wifiOnly = true;
   bool checking = false;
   bool _foreground = true;
-  bool _automatic = false;
   bool _disposed = false;
   int _manualGeneration = 0;
-  int _activeStart = 0;
+  int _checkGeneration = 0;
+  ChapterDownload? _automaticDownload;
   DateTime? _lastCheck;
   String? lastMessage;
 
@@ -99,7 +104,6 @@ class NovelDownloadManager extends ChangeNotifier {
               .take(count)
               .where((c) => ids.contains(c.itemId))
               .length;
-          _activeStart = start;
           final batch = ChapterDownload(
             cache: cache,
             book: book,
@@ -112,6 +116,8 @@ class NovelDownloadManager extends ChangeNotifier {
                 ? '下载完成 · $completed/$count 章'
                 : '已保存 $completed/$count 章 · 上次任务已恢复，点“继续”',
           );
+          _batchStarts[batch] = start;
+          manualTask.value = batch;
           active.value = batch;
         }
       }
@@ -125,6 +131,13 @@ class NovelDownloadManager extends ChangeNotifier {
 
   Future<void> configure({bool? autoUpdate, bool? onlyWifi}) async {
     await initialize();
+    final changed =
+        (autoUpdate != null && autoUpdate != enabled) ||
+        (onlyWifi != null && onlyWifi != wifiOnly);
+    if (changed) {
+      _checkGeneration++;
+      _automaticDownload?.cancel();
+    }
     if (autoUpdate != null) {
       await _preferences!.setBool('novel_auto_update', autoUpdate);
       enabled = autoUpdate;
@@ -133,13 +146,21 @@ class NovelDownloadManager extends ChangeNotifier {
       await _preferences!.setBool('novel_update_wifi_only', onlyWifi);
       wifiOnly = onlyWifi;
     }
-    if (_automatic && (!enabled || onlyWifi == true)) active.value?.cancel();
     notifyListeners();
   }
 
   void setForeground(bool value) {
+    if (_foreground && !value) _checkGeneration++;
     _foreground = value;
-    if (!value && _automatic) active.value?.cancel();
+    if (!value) _automaticDownload?.cancel();
+  }
+
+  /// A connection may disappear and return while a directory request waits.
+  /// Invalidate that check even if the next connectivity probe sees it online.
+  void networkChanged() {
+    if (!checking) return;
+    _checkGeneration++;
+    _automaticDownload?.cancel();
   }
 
   Future<void> forget(String bookId) async {
@@ -147,7 +168,18 @@ class NovelDownloadManager extends ChangeNotifier {
     // Invalidate an update that already captured this book's catalogue, so a
     // delayed response cannot recreate content the user just deleted.
     _manualGeneration++;
-    if (_automatic) active.value?.cancel();
+    _checkGeneration++;
+    _automaticDownload?.cancel();
+    final forgotten = manualTask.value;
+    if (forgotten?.book.id == bookId) {
+      forgotten?.cancel();
+      manualTask.value = null;
+      if (identical(active.value, forgotten)) active.value = null;
+    }
+    if (active.value?.book.id == bookId) {
+      active.value?.cancel();
+      active.value = null;
+    }
     _tails.remove(bookId);
     await _saveTails();
     final raw = _preferences!.getString('novel_manual_task');
@@ -163,6 +195,7 @@ class NovelDownloadManager extends ChangeNotifier {
   Future<void> start(CachedBook book, {int? count, int startIndex = 0}) async {
     await initialize();
     final generation = ++_manualGeneration;
+    _checkGeneration++;
     active.value?.cancel();
     await cache.saveBook(book);
     await _preferences!.setString(
@@ -186,7 +219,8 @@ class NovelDownloadManager extends ChangeNotifier {
       book: book,
       loader: contentLoader,
     );
-    _activeStart = startIndex;
+    _batchStarts[batch] = startIndex;
+    manualTask.value = batch;
     active.value = batch;
     unawaited(
       batch.start(
@@ -199,13 +233,14 @@ class NovelDownloadManager extends ChangeNotifier {
 
   void pause() {
     _manualGeneration++;
+    _checkGeneration++;
     active.value?.cancel();
   }
 
   Future<void> resume(ChapterDownload download) => start(
     download.book,
     count: download.value.total,
-    startIndex: _activeStart,
+    startIndex: _batchStarts[download] ?? 0,
   );
 
   Future<bool> _allowed({bool manual = false}) async {
@@ -236,18 +271,39 @@ class NovelDownloadManager extends ChangeNotifier {
     checking = true;
     notifyListeners();
     final generation = _manualGeneration;
+    final checkGeneration = _checkGeneration;
+    bool wasInterrupted() =>
+        generation != _manualGeneration ||
+        checkGeneration != _checkGeneration ||
+        _disposed;
+    Future<bool> canContinue() async {
+      if (wasInterrupted()) return false;
+      final allowed = await _allowed(manual: manual);
+      return allowed && !wasInterrupted();
+    }
+
+    void markInterrupted() {
+      _lastCheck = null;
+      lastMessage = '更新检查已中断，可稍后重试';
+    }
+
     var downloaded = 0;
     var failures = 0;
     try {
-      if (!await _allowed(manual: manual)) {
-        lastMessage = wifiOnly ? '等待 Wi-Fi 后检查更新' : '联网后检查更新';
+      if (!await canContinue()) {
+        _lastCheck = null;
+        lastMessage = wasInterrupted()
+            ? '更新检查已中断，可稍后重试'
+            : !manual && wifiOnly
+            ? '等待 Wi-Fi 后检查更新'
+            : '联网后检查更新';
         return;
       }
       final books = await downloadedBooks();
       for (final book in books) {
-        if (generation != _manualGeneration ||
-            !await _allowed(manual: manual)) {
-          break;
+        if (!await canContinue()) {
+          markInterrupted();
+          return;
         }
         if (book.chapters.isEmpty) continue;
         final tail = _tails.putIfAbsent(
@@ -255,11 +311,15 @@ class NovelDownloadManager extends ChangeNotifier {
           () => book.chapters.last.itemId,
         );
         await _saveTails();
+        if (!await canContinue()) {
+          markInterrupted();
+          return;
+        }
         try {
           final chapters = await directoryLoader(book.id);
-          if (generation != _manualGeneration ||
-              !await _allowed(manual: manual)) {
-            break;
+          if (!await canContinue()) {
+            markInterrupted();
+            return;
           }
           if (chapters.isEmpty) continue;
           final last = chapters.indexWhere((chapter) => chapter.itemId == tail);
@@ -285,16 +345,15 @@ class NovelDownloadManager extends ChangeNotifier {
             cache: cache,
             book: updated,
             loader: (chapter) async {
-              if (generation != _manualGeneration ||
-                  !await _allowed(manual: manual)) {
+              if (!await canContinue()) {
                 throw StateError('Update check paused');
               }
               return contentLoader(chapter);
             },
           );
-          _activeStart = last + 1;
+          _batchStarts[batch] = last + 1;
           active.value = batch;
-          _automatic = true;
+          _automaticDownload = batch;
           try {
             await batch.start(
               startIndex: last + 1,
@@ -302,11 +361,18 @@ class NovelDownloadManager extends ChangeNotifier {
               pin: true,
             );
           } finally {
-            _automatic = false;
+            if (identical(_automaticDownload, batch)) {
+              _automaticDownload = null;
+            }
+            if (!_disposed &&
+                identical(active.value, batch) &&
+                manualTask.value != null) {
+              active.value = manualTask.value;
+            }
           }
-          if (generation != _manualGeneration ||
-              !await _allowed(manual: manual)) {
-            break;
+          if (!await canContinue()) {
+            markInterrupted();
+            return;
           }
           if (batch.value.completed == fresh.length) {
             _tails[book.id] = chapters.last.itemId;
@@ -316,18 +382,27 @@ class NovelDownloadManager extends ChangeNotifier {
             failures++;
           }
         } catch (error) {
+          if (wasInterrupted()) {
+            markInterrupted();
+            return;
+          }
           failures++;
           AppLog.w('novel-updates', '更新检查失败 (${error.runtimeType})');
         }
       }
-      _lastCheck = DateTime.now();
+      if (!await canContinue()) {
+        markInterrupted();
+        return;
+      }
+      _lastCheck = failures == 0 ? DateTime.now() : null;
       lastMessage = failures > 0
           ? '已补下载 $downloaded 章，部分书籍暂未更新，可稍后重试'
           : downloaded > 0
           ? '已补下载 $downloaded 个新章节'
           : '已检查，暂时没有新章节';
     } catch (error) {
-      lastMessage = '暂时无法检查更新，请稍后重试';
+      _lastCheck = null;
+      lastMessage = wasInterrupted() ? '更新检查已中断，可稍后重试' : '暂时无法检查更新，请稍后重试';
       AppLog.w('novel-updates', '更新检查失败 (${error.runtimeType})');
     } finally {
       checking = false;
@@ -340,7 +415,9 @@ class NovelDownloadManager extends ChangeNotifier {
     _disposed = true;
     _foreground = false;
     active.value?.cancel();
+    if (!identical(active.value, manualTask.value)) manualTask.value?.cancel();
     active.dispose();
+    manualTask.dispose();
     super.dispose();
   }
 }

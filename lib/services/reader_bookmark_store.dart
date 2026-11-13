@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:hive_ce/hive.dart';
@@ -16,6 +17,9 @@ class ReaderBookmark {
     required this.sourceOffset,
     required this.createdAt,
     this.note = '',
+    this.noteId,
+    this.targetParagraphId,
+    this.targetBlockIndex,
   });
 
   final String bookId;
@@ -28,7 +32,17 @@ class ReaderBookmark {
   final int createdAt;
   final String note;
 
-  String get key => jsonEncode([bookId, chapterId, sourceOffset]);
+  /// Stable identity for separately created notes at the same source offset.
+  /// Legacy notes and ordinary bookmarks retain their original location key.
+  final String? noteId;
+
+  /// Navigation hints for a synthetic bookmark representing a whole-paragraph
+  /// underline. These are deliberately not part of bookmark persistence.
+  final int? targetParagraphId;
+  final int? targetBlockIndex;
+
+  String get key =>
+      jsonEncode([bookId, chapterId, sourceOffset, if (noteId != null) noteId]);
 
   Map<String, dynamic> toMap() => {
     'bookId': bookId,
@@ -38,6 +52,7 @@ class ReaderBookmark {
     'sourceOffset': sourceOffset,
     'createdAt': createdAt,
     'note': note,
+    if (noteId != null) 'noteId': noteId,
   };
 
   static int? _nonnegativeInteger(dynamic value) {
@@ -54,12 +69,14 @@ class ReaderBookmark {
     final text = raw['text'];
     final sourceOffset = _nonnegativeInteger(raw['sourceOffset']);
     final createdAt = _nonnegativeInteger(raw['createdAt']);
+    final noteId = raw['noteId'];
     if (bookId is! String ||
         bookId.trim().isEmpty ||
         chapterId is! String ||
         chapterId.trim().isEmpty ||
         title is! String ||
         text is! String ||
+        (noteId != null && (noteId is! String || noteId.isEmpty)) ||
         sourceOffset == null ||
         createdAt == null) {
       return null;
@@ -72,6 +89,7 @@ class ReaderBookmark {
       sourceOffset: sourceOffset,
       createdAt: createdAt,
       note: raw['note'] is String ? raw['note'] as String : '',
+      noteId: noteId as String?,
     );
   }
 }
@@ -92,6 +110,7 @@ class ReaderBookmarkStore {
 
   final HiveInterface _hive;
   final int maxEntries;
+  final Random _random = Random.secure();
   final ValueNotifier<int> changes = ValueNotifier(0);
   Future<Box<dynamic>>? _opening;
   Future<void> _writes = Future<void>.value();
@@ -164,7 +183,7 @@ class ReaderBookmarkStore {
     });
   }
 
-  Future<void> add(ReaderBookmark record) => _serialize((box) async {
+  Future<void> _put(Box<dynamic> box, ReaderBookmark record) async {
     if (ReaderBookmark.fromMap(record.toMap()) == null) {
       throw const FormatException('书签位置无效');
     }
@@ -178,7 +197,37 @@ class ReaderBookmarkStore {
     }
     await box.put(record.key, map);
     changes.value++;
-  });
+  }
+
+  Future<void> add(ReaderBookmark record) =>
+      _serialize((box) => _put(box, record));
+
+  /// A reader choosing to write a new note creates a new record, even when
+  /// another note already begins at the same source offset. Allocation and
+  /// insertion share the write queue so concurrent requests cannot collide.
+  Future<ReaderBookmark> addNote(ReaderBookmark record) =>
+      _serialize((box) async {
+        if (record.note.trim().isEmpty) throw const FormatException('笔记不能为空');
+        late ReaderBookmark note;
+        do {
+          final id = List.generate(
+            16,
+            (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+          ).join();
+          note = ReaderBookmark(
+            bookId: record.bookId,
+            chapterId: record.chapterId,
+            title: record.title,
+            text: record.text,
+            sourceOffset: record.sourceOffset,
+            createdAt: record.createdAt,
+            note: record.note,
+            noteId: id,
+          );
+        } while (box.containsKey(note.key));
+        await _put(box, note);
+        return note;
+      });
 
   Future<void> remove(String key) => _serialize((box) async {
     if (!box.containsKey(key)) return;

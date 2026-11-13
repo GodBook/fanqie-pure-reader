@@ -38,10 +38,16 @@ extension _ReaderJoinedContent on _ReaderPageState {
     ReaderLayoutSpec spec,
   ) async {
     final chapter = widget.chapters[index];
-    final ideasFuture = _joinedIdeas(chapter);
+    _startVersionRefresh(chapter);
+    final joinedGeneration = _joinedKey.currentState?.generation;
+    if (joinedGeneration == null) throw StateError('Reader disposed');
     final marksFuture = _joinedMarks(chapter);
     final loaded = await _chapterText(chapter);
-    final content = ChapterContent.fromCacheText(loaded.text);
+    final revision = _chapterCacheRevisions[chapter.itemId] ?? 0;
+    final unverified = _unverifiedChapterVersions.containsKey(chapter.itemId);
+    final sourceChapter = _unverifiedChapterSources[chapter.itemId] ?? chapter;
+    final text = _chapterCache[chapter.itemId] ?? loaded.text;
+    final content = ChapterContent.fromCacheText(text);
     if (content.withoutLeadingTitle(chapter.title).isEmpty) {
       throw ApiException('正文为空');
     }
@@ -58,39 +64,37 @@ extension _ReaderJoinedContent on _ReaderPageState {
       replacementEngine: widget.replacementEngine,
     );
     final replacement = view.composition.replacement;
-    final ideas = await ideasFuture;
+    final cached = _ideasCache[_ideasKey(chapter)];
+    final ideas =
+        _preferences.showParagraphBubbles &&
+            !_unverifiedChapterVersions.containsKey(chapter.itemId) &&
+            cached?.version == chapter.version
+        ? cached!.ideas
+        : ChapterIdeas.empty;
     final marks = await marksFuture;
-    if (!mounted) throw StateError('Reader disposed');
-    final layout = ReaderChapterLayout(
-      title: chapter.title,
+    final layout = await _prepareJoinedLayout(
+      chapter: sourceChapter,
       content: content,
       replacement: replacement,
       spec: spec,
-      paragraphBubbles: _preferences.showParagraphBubbles
-          ? ideas.bubbleCounts
-          : const {},
-      paragraphBubbleVariants: _preferences.showParagraphBubbles
-          ? ideas.bubbleVariants
-          : const {},
-      underlinedParagraphs: marks.ids,
-      bubbleBuilder: (paraIndex, count, variant) => ReaderParagraphBubble(
-        count: count,
-        metrics: ReaderBubbleMetrics.forFontSize(
-          spec.textScaler.scale(spec.bodyStyle.fontSize!),
-          variant: variant,
-        ),
-        preset: _effectivePreset,
-        onTap: () => unawaited(
-          _showIdeas(
-            focusParaIndex: paraIndex,
-            sourceChapter: chapter,
-            sourceIdeas: ideas,
-          ),
-        ),
-      ),
+      ideas: ideas,
+      underlines: marks.ids,
+      cancelled: () =>
+          !_joinedRequestCurrent(index, chapter, joinedGeneration) ||
+          revision != (_chapterCacheRevisions[chapter.itemId] ?? 0) ||
+          unverified != _unverifiedChapterVersions.containsKey(chapter.itemId),
     );
+    if (!_joinedRequestCurrent(index, chapter, joinedGeneration)) {
+      throw StateError('Reader changed');
+    }
+    if (revision != (_chapterCacheRevisions[chapter.itemId] ?? 0) ||
+        unverified != _unverifiedChapterVersions.containsKey(chapter.itemId)) {
+      return _loadJoinedChapter(index, spec);
+    }
+    if (layout == null) throw StateError('Reader layout changed');
+    unawaited(_refreshJoinedIdeas(index, chapter, joinedGeneration));
     return JoinedReaderChapter(
-      loaded.text,
+      text,
       content,
       replacement,
       layout,
@@ -99,25 +103,144 @@ extension _ReaderJoinedContent on _ReaderPageState {
       rangeUnderlines: marks.ranges,
       displayRevision: view.composition.displayRevision,
       aiView: view,
+      sourceChapter: sourceChapter,
     );
   }
 
-  Future<ChapterIdeas> _joinedIdeas(Chapter chapter) async {
+  Future<ReaderChapterLayout?> _prepareJoinedLayout({
+    required Chapter chapter,
+    required ChapterContent content,
+    required TextReplacementResult? replacement,
+    required ReaderLayoutSpec spec,
+    required ChapterIdeas ideas,
+    required Set<int> underlines,
+    required bool Function() cancelled,
+  }) => ReaderChapterLayout.prepare(
+    title: chapter.title,
+    content: content,
+    replacement: replacement,
+    spec: spec,
+    paragraphBubbles: _preferences.showParagraphBubbles
+        ? ideas.bubbleCounts
+        : const {},
+    paragraphBubbleVariants: _preferences.showParagraphBubbles
+        ? ideas.bubbleVariants
+        : const {},
+    underlinedParagraphs: underlines,
+    cancelled: cancelled,
+    bubbleBuilder: (paraIndex, count, variant) => ReaderParagraphBubble(
+      count: count,
+      metrics: ReaderBubbleMetrics.forFontSize(
+        spec.textScaler.scale(spec.bodyStyle.fontSize!),
+        variant: variant,
+      ),
+      preset: _effectivePreset,
+      onTap: () => unawaited(
+        _showIdeas(
+          focusParaIndex: paraIndex,
+          sourceChapter: chapter,
+          sourceIdeas: ideas,
+          sourceContent: content,
+        ),
+      ),
+    ),
+  );
+
+  bool _joinedRequestCurrent(int index, Chapter chapter, int generation) =>
+      mounted &&
+      _joined &&
+      _joinedKey.currentState?.generation == generation &&
+      index >= 0 &&
+      index < widget.chapters.length &&
+      widget.chapters[index].itemId == chapter.itemId &&
+      widget.chapters[index].version == chapter.version;
+
+  Future<void> _refreshJoinedIdeas(
+    int index,
+    Chapter chapter,
+    int generation,
+  ) async {
+    if (_unverifiedChapterVersions.containsKey(chapter.itemId)) return;
     if (widget.novelOnly && !_preferences.showParagraphBubbles) {
-      return ChapterIdeas.empty;
+      return;
     }
     if (widget.ideasLoader == null &&
         widget.chapterCache != null &&
         widget.ideasStore == null) {
-      return ChapterIdeas.empty;
+      return;
     }
-    final cached = await _cachedIdeasFor(chapter);
-    if (widget.localOnly) return cached ?? ChapterIdeas.empty;
+    // The loader commits the initial text before a fast cache/network result
+    // can try to replace that chapter in the joined window.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!_joinedRequestCurrent(index, chapter, generation)) return;
     try {
-      return await _requestIdeas(chapter);
+      final cached = await _cachedIdeasFor(chapter);
+      if (!_joinedRequestCurrent(index, chapter, generation)) return;
+      if (cached != null) {
+        await _publishJoinedIdeas(index, chapter, generation, cached);
+      }
+      if (widget.localOnly ||
+          !_joinedRequestCurrent(index, chapter, generation)) {
+        return;
+      }
+      final ideas = await _requestIdeas(chapter);
+      if (!_joinedRequestCurrent(index, chapter, generation)) return;
+      await _publishJoinedIdeas(index, chapter, generation, ideas);
     } catch (_) {
-      return cached ?? ChapterIdeas.empty;
+      // Retain the text and last known cached index on network/cache failure.
     }
+  }
+
+  Future<void> _publishJoinedIdeas(
+    int index,
+    Chapter chapter,
+    int generation,
+    ChapterIdeas ideas,
+  ) async {
+    if (!_joinedRequestCurrent(index, chapter, generation) ||
+        _unverifiedChapterVersions.containsKey(chapter.itemId)) {
+      return;
+    }
+    if (index == _index) {
+      _applyIdeas(ideas);
+      return;
+    }
+    final state = _joinedKey.currentState;
+    final old = state?.chapterAt(index);
+    if (state == null || old == null || _sameChapterIdeas(old.ideas, ideas)) {
+      return;
+    }
+    bool cancelled() =>
+        !_joinedRequestCurrent(index, chapter, generation) ||
+        index == _index ||
+        !identical(state.chapterAt(index), old);
+    final layout = await _prepareJoinedLayout(
+      chapter: chapter,
+      content: old.content,
+      replacement: old.replacement,
+      spec: old.layout.spec,
+      ideas: ideas,
+      underlines: old.underlines,
+      cancelled: cancelled,
+    );
+    if (layout == null || cancelled()) return;
+    state.updateNeighbor(
+      index: index,
+      generation: generation,
+      previous: old,
+      updated: JoinedReaderChapter(
+        old.text,
+        old.content,
+        old.replacement,
+        layout,
+        ideas: ideas,
+        underlines: old.underlines,
+        rangeUnderlines: old.rangeUnderlines,
+        displayRevision: old.displayRevision,
+        aiView: old.aiView,
+        sourceChapter: old.sourceChapter,
+      ),
+    );
   }
 
   Future<({Set<int> ids, List<ReaderRangeUnderline> ranges})> _joinedMarks(
@@ -151,6 +274,7 @@ extension _ReaderJoinedContent on _ReaderPageState {
         _index = position.index;
         ++_loadGeneration;
         _content = chapter.text;
+        _contentSourceChapter = chapter.sourceChapter;
         _chapterContent = chapter.content;
         _replacement = chapter.replacement;
         _aiView = chapter.aiView;
@@ -199,15 +323,21 @@ extension _ReaderJoinedContent on _ReaderPageState {
         rangeUnderlines: _rangeUnderlines,
         displayRevision: _aiRevision,
         aiView: _currentAiView,
+        sourceChapter: _contentSourceChapter ?? _chapter,
       ),
       chapterCount: widget.chapters.length,
+      catalogueIds: [for (final chapter in widget.chapters) chapter.itemId],
+      catalogueVersions: [
+        for (final chapter in widget.chapters) chapter.version,
+      ],
       showParagraphBubbles: _preferences.showParagraphBubbles,
       loader: _loadJoinedChapter,
       onChapterComments: (index, chapter) => unawaited(
         _showIdeas(
           focusParaIndex: chapter.ideas.paragraphs.last.paraIndex,
-          sourceChapter: widget.chapters[index],
+          sourceChapter: chapter.sourceChapter ?? widget.chapters[index],
           sourceIdeas: chapter.ideas,
+          sourceContent: chapter.content,
         ),
       ),
       onPosition: _onJoinedPosition,

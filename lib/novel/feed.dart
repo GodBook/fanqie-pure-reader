@@ -62,6 +62,7 @@ class _NovelFeedState extends State<NovelFeed> {
   bool _loading = false;
   bool _hasMore = true;
   String? _error;
+  bool _retryRefresh = false;
   int _generation = 0;
   SharedPreferences? _preferences;
   Set<String> _hiddenBooks = {};
@@ -358,6 +359,7 @@ class _NovelFeedState extends State<NovelFeed> {
     setState(() {
       _loading = true;
       _error = null;
+      _retryRefresh = false;
       if (refresh) {
         _order = [];
       } else {
@@ -456,7 +458,10 @@ class _NovelFeedState extends State<NovelFeed> {
       }
     } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _error = _errorText(error));
+        setState(() {
+          _error = _errorText(error);
+          _retryRefresh = refresh;
+        });
       }
     } finally {
       if (mounted && generation == _generation) {
@@ -759,12 +764,20 @@ class _NovelFeedState extends State<NovelFeed> {
                           Text(
                             _filters.genre == 0
                                 ? '为你精选'
-                                : '${_filters.category.name} · 分类推荐',
+                                : '${_filters.category.name} · 关键词搜索',
                             style: const TextStyle(
                               fontSize: 20,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                          if (_filters.genre != 0)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 4),
+                              child: Text(
+                                '搜索分类关键词，结果不限定分类',
+                                style: TextStyle(fontSize: 11),
+                              ),
+                            ),
                           if (_filters.restricted ||
                               _filters.sort != NovelSort.recommended)
                             Padding(
@@ -788,7 +801,7 @@ class _NovelFeedState extends State<NovelFeed> {
                 ),
               ),
             ),
-            if (_localShown)
+            if (_localShown && (_error == null || !_retryRefresh))
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
@@ -797,6 +810,21 @@ class _NovelFeedState extends State<NovelFeed> {
                     style: TextStyle(
                       fontSize: 12,
                       color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+            if (_error != null && _retryRefresh && visible.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: TextButton(
+                    key: const ValueKey('feed-refresh-retry'),
+                    onPressed: () => _load(refresh: true),
+                    child: Text(
+                      _localShown
+                          ? '${_seedShown ? '内置公开书目' : '上次书目'} · 联网更新失败 · $_error · 重试'
+                          : '刷新失败 · $_error · 重试',
                     ),
                   ),
                 ),
@@ -812,8 +840,9 @@ class _NovelFeedState extends State<NovelFeed> {
                             (_filters.restricted
                                 ? '这批书里暂时没有符合条件的作品。\n可以放宽筛选，或继续寻找。'
                                 : '暂时没有推荐，试试搜索想看的书。'),
-                        onRetry: () =>
-                            _load(refresh: _error != null || !_hasMore),
+                        onRetry: () => _load(
+                          refresh: _error != null ? _retryRefresh : !_hasMore,
+                        ),
                         actionLabel: _error != null
                             ? '重试'
                             : _hasMore
@@ -833,14 +862,15 @@ class _NovelFeedState extends State<NovelFeed> {
                   ),
                 ),
               ),
-              SliverToBoxAdapter(
-                child: _BottomLoader(
-                  loading: _loading,
-                  hasMore: _hasMore,
-                  error: _error,
-                  onMore: _load,
+              if (_error == null || !_retryRefresh)
+                SliverToBoxAdapter(
+                  child: _BottomLoader(
+                    loading: _loading,
+                    hasMore: _hasMore,
+                    error: _error,
+                    onMore: _load,
+                  ),
                 ),
-              ),
             ],
           ],
         ),
@@ -869,6 +899,41 @@ class NovelSearchPage {
   final List<MediaItem> items;
   final bool hasMore;
   final int nextOffset;
+
+  factory NovelSearchPage.fromTabs(List<SearchTab> tabs, int offset) {
+    final novels = tabs
+        .where((tab) => tab.title == '小说' || tab.title == '全部')
+        .toList();
+    final selected = novels.isNotEmpty ? novels : tabs;
+    bool isNovel(MediaItem item) =>
+        item.kind == 'book' && item.source == 'fanqie';
+    final items = selected.expand((tab) => tab.items).where(isNovel).toList();
+    final continuing = selected.where(
+      (tab) =>
+          tab.hasMore != false &&
+          (tab.nextOffset == null || tab.nextOffset! > offset),
+    );
+    final offsets = continuing
+        .map((tab) => tab.nextOffset)
+        .whereType<int>()
+        .toList();
+    final withoutCursor = continuing.where((tab) => tab.nextOffset == null);
+    final fallback =
+        withoutCursor.any((tab) => tab.hasMore == true) ||
+        withoutCursor
+                .where((tab) => tab.hasMore == null)
+                .expand((tab) => tab.items)
+                .where(isNovel)
+                .length >=
+            10;
+    return NovelSearchPage(
+      items: items,
+      hasMore: offsets.isNotEmpty || fallback,
+      nextOffset: offsets.isEmpty
+          ? offset + 10
+          : offsets.reduce((a, b) => a > b ? a : b),
+    );
+  }
 }
 
 typedef NovelSearchPageLoader =
@@ -899,27 +964,7 @@ Future<NovelSearchPage> _loadNovelSearchPage(
     request,
     () => ApiClient.instance.searchTabs(query, tabType: 1, offset: offset),
   );
-  final novels = tabs
-      .where((tab) => tab.title == '小说' || tab.title == '全部')
-      .toList();
-  final selected = novels.isNotEmpty ? novels : tabs;
-  final items = selected
-      .expand((tab) => tab.items)
-      .where((book) => book.kind == 'book' && book.source == 'fanqie')
-      .toList();
-  final hasMore =
-      selected.any((tab) => tab.hasMore == true) ||
-      (selected.every((tab) => tab.hasMore == null) && items.length >= 10);
-  final offsets = selected
-      .map((tab) => tab.nextOffset ?? 0)
-      .where((next) => next > offset);
-  return NovelSearchPage(
-    items: items,
-    hasMore: hasMore,
-    nextOffset: offsets.isEmpty
-        ? offset + 10
-        : offsets.reduce((a, b) => a > b ? a : b),
-  );
+  return NovelSearchPage.fromTabs(tabs, offset);
 }
 
 class NovelSearch extends StatefulWidget {
@@ -928,8 +973,10 @@ class NovelSearch extends StatefulWidget {
     this.pageLoader,
     this.suggestionLoader,
     this.initialQuery = '',
+    this.isCategoryKeyword = false,
   });
   final String initialQuery;
+  final bool isCategoryKeyword;
   final NovelSearchPageLoader? pageLoader;
   final Future<List<String>> Function(String)? suggestionLoader;
   @override
@@ -948,6 +995,7 @@ class _NovelSearchState extends State<NovelSearch> {
   int _offset = 0;
   bool _loading = false;
   bool _hasMore = false;
+  bool _retryMore = false;
   Timer? _suggestTimer;
   BackendRequest? _suggestRequest;
   int _suggestGeneration = 0;
@@ -1075,6 +1123,7 @@ class _NovelSearchState extends State<NovelSearch> {
       _suggestions = [];
       _loading = true;
       _error = null;
+      _retryMore = false;
       if (!more) {
         _books = [];
         _hasMore = false;
@@ -1108,7 +1157,10 @@ class _NovelSearchState extends State<NovelSearch> {
       await preferences.setStringList('novel_search_history', _history);
     } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _error = _errorText(error));
+        setState(() {
+          _error = _errorText(error);
+          _retryMore = more;
+        });
       }
     } finally {
       if (mounted && generation == _generation) {
@@ -1164,124 +1216,159 @@ class _NovelSearchState extends State<NovelSearch> {
         ),
       ],
     ),
-    body: _suggestions.isNotEmpty
-        ? ListView(
-            children: [
-              for (final word in _suggestions)
-                ListTile(
-                  leading: const Icon(Icons.search),
-                  title: Text(word),
-                  onTap: () => _search(query: word),
-                ),
-            ],
-          )
-        : _query.isEmpty
-        ? ListView(
-            padding: const EdgeInsets.all(24),
-            children: [
-              const Text(
-                '最近搜索',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 16),
-              if (_history.isEmpty) const Text('输入书名，开始下一段故事。'),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final query in _history)
-                    InputChip(
-                      label: Text(query),
-                      onPressed: () => _search(query: query),
-                      onDeleted: () => _deleteHistory(query),
-                      deleteButtonTooltipMessage: '删除这条搜索记录',
-                    ),
-                ],
-              ),
-              if (_history.isNotEmpty)
-                TextButton(
-                  onPressed: () async {
-                    final preferences = await SharedPreferences.getInstance();
-                    await preferences.remove('novel_search_history');
-                    if (mounted) setState(() => _history = []);
-                  },
-                  child: const Text('清空搜索记录'),
-                ),
-            ],
-          )
-        : _books.isEmpty
-        ? _loading
-              ? const Center(child: CircularProgressIndicator())
-              : _Problem(
-                  message: _error ?? '没有找到“$_query”，换个关键词试试。',
-                  onRetry: _error == null ? null : () => _search(),
-                )
-        : Column(
-            children: [
-              Wrap(
-                spacing: 8,
-                children: [
-                  PopupMenuButton<double>(
-                    tooltip: '搜索评分筛选',
-                    initialValue: _resultFilters.minScore,
-                    onSelected: (v) => setState(
-                      () =>
-                          _resultFilters = _resultFilters.copyWith(minScore: v),
-                    ),
-                    itemBuilder: (_) => [
-                      for (final v in novelScoreOptions)
-                        PopupMenuItem(
-                          value: v,
-                          child: Text(novelScoreLabel(v)),
-                        ),
-                    ],
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Text(
-                        _resultFilters.minScore == 0
-                            ? '评分不限 ▾'
-                            : '${_resultFilters.minScore} 分以上 ▾',
-                      ),
-                    ),
-                  ),
-                  PopupMenuButton<NovelStatus>(
-                    tooltip: '搜索连载状态',
-                    onSelected: (v) => setState(
-                      () => _resultFilters = _resultFilters.copyWith(status: v),
-                    ),
-                    itemBuilder: (_) => [
-                      for (final e in _NovelFeedState._statusLabels.entries)
-                        PopupMenuItem(value: e.key, child: Text(e.value)),
-                    ],
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Text(
-                        '${_NovelFeedState._statusLabels[_resultFilters.status]} ▾',
-                      ),
-                    ),
-                  ),
-                  PopupMenuButton<NovelSort>(
-                    tooltip: '搜索排序',
-                    onSelected: (v) => setState(
-                      () => _resultFilters = _resultFilters.copyWith(sort: v),
-                    ),
-                    itemBuilder: (_) => [
-                      for (final e in _NovelFeedState._sortLabels.entries)
-                        PopupMenuItem(value: e.key, child: Text(e.value)),
-                    ],
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Text(
-                        '${_NovelFeedState._sortLabels[_resultFilters.sort]} ▾',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const Text('筛选 / 排序仅作用于已加载结果', style: TextStyle(fontSize: 12)),
-              Expanded(child: _resultList()),
-            ],
+    body: Column(
+      children: [
+        if (widget.isCategoryKeyword &&
+            _query.isNotEmpty &&
+            _query == widget.initialQuery.trim())
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Text('分类关键词搜索，结果不限定分类'),
           ),
+        Expanded(
+          child: _suggestions.isNotEmpty
+              ? ListView(
+                  children: [
+                    for (final word in _suggestions)
+                      ListTile(
+                        leading: const Icon(Icons.search),
+                        title: Text(word),
+                        onTap: () => _search(query: word),
+                      ),
+                  ],
+                )
+              : _query.isEmpty
+              ? ListView(
+                  padding: const EdgeInsets.all(24),
+                  children: [
+                    const Text(
+                      '最近搜索',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    if (_history.isEmpty) const Text('输入书名，开始下一段故事。'),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final query in _history)
+                          InputChip(
+                            label: Text(query),
+                            onPressed: () => _search(query: query),
+                            onDeleted: () => _deleteHistory(query),
+                            deleteButtonTooltipMessage: '删除这条搜索记录',
+                          ),
+                      ],
+                    ),
+                    if (_history.isNotEmpty)
+                      TextButton(
+                        onPressed: () async {
+                          final preferences =
+                              await SharedPreferences.getInstance();
+                          await preferences.remove('novel_search_history');
+                          if (mounted) setState(() => _history = []);
+                        },
+                        child: const Text('清空搜索记录'),
+                      ),
+                  ],
+                )
+              : _books.isEmpty
+              ? _loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : _Problem(
+                        message:
+                            _error ??
+                            (_hasMore
+                                ? '本页没有找到小说，还可以继续寻找。'
+                                : '没有找到“$_query”，换个关键词试试。'),
+                        onRetry: _error != null
+                            ? () => _search(more: _retryMore, query: _query)
+                            : _hasMore
+                            ? () => _search(more: true)
+                            : null,
+                        actionLabel: _error != null ? '重试' : '继续寻找',
+                      )
+              : Column(
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        PopupMenuButton<double>(
+                          tooltip: '搜索评分筛选',
+                          initialValue: _resultFilters.minScore,
+                          onSelected: (v) => setState(
+                            () => _resultFilters = _resultFilters.copyWith(
+                              minScore: v,
+                            ),
+                          ),
+                          itemBuilder: (_) => [
+                            for (final v in novelScoreOptions)
+                              PopupMenuItem(
+                                value: v,
+                                child: Text(novelScoreLabel(v)),
+                              ),
+                          ],
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Text(
+                              _resultFilters.minScore == 0
+                                  ? '评分不限 ▾'
+                                  : '${_resultFilters.minScore} 分以上 ▾',
+                            ),
+                          ),
+                        ),
+                        PopupMenuButton<NovelStatus>(
+                          tooltip: '搜索连载状态',
+                          onSelected: (v) => setState(
+                            () => _resultFilters = _resultFilters.copyWith(
+                              status: v,
+                            ),
+                          ),
+                          itemBuilder: (_) => [
+                            for (final e
+                                in _NovelFeedState._statusLabels.entries)
+                              PopupMenuItem(value: e.key, child: Text(e.value)),
+                          ],
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Text(
+                              '${_NovelFeedState._statusLabels[_resultFilters.status]} ▾',
+                            ),
+                          ),
+                        ),
+                        PopupMenuButton<NovelSort>(
+                          tooltip: '搜索排序',
+                          onSelected: (v) => setState(
+                            () => _resultFilters = _resultFilters.copyWith(
+                              sort: v,
+                            ),
+                          ),
+                          itemBuilder: (_) => [
+                            for (final e in _NovelFeedState._sortLabels.entries)
+                              PopupMenuItem(value: e.key, child: Text(e.value)),
+                          ],
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Text(
+                              '${_NovelFeedState._sortLabels[_resultFilters.sort]} ▾',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Text(
+                      '筛选 / 排序仅作用于已加载结果',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    Expanded(child: _resultList()),
+                  ],
+                ),
+        ),
+      ],
+    ),
   );
 
   Widget _resultList() {

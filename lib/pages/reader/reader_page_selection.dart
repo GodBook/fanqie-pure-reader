@@ -372,8 +372,10 @@ extension _ReaderPageSelection on _ReaderPageState {
         Future<void>.delayed(const Duration(seconds: 1), controller.dispose);
         if (note != null) {
           try {
-            await _addBookmark(selection: selection, note: note);
-            if (mounted) _showMessage('笔记已保存，可在书签与标注中回看');
+            final saved = await _addBookmark(selection: selection, note: note);
+            if (mounted) {
+              _showMessage(saved == null ? '阅读位置尚未就绪' : '笔记已保存，可在书签与标注中回看');
+            }
           } catch (_) {
             if (mounted) _showMessage('笔记保存失败，请重试');
           }
@@ -484,6 +486,9 @@ extension _ReaderPageSelection on _ReaderPageState {
           await store.remove(mark.key);
         }
       }
+    } on ReaderUnderlineLimitException catch (error) {
+      if (mounted) _showMessage(error.toString());
+      return;
     } catch (_) {
       if (mounted) _showMessage(add ? '划线保存失败，请重试' : '删除划线失败，请重试');
       return;
@@ -549,6 +554,9 @@ extension _ReaderPageSelection on _ReaderPageState {
           ),
         );
       }
+    } on ReaderUnderlineLimitException catch (error) {
+      if (mounted) _showMessage(error.toString());
+      return;
     } catch (_) {
       if (mounted) _showMessage(add ? '划线保存失败，请重试' : '取消划线失败，请重试');
       return;
