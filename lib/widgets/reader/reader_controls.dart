@@ -62,6 +62,29 @@ class ReaderControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final preset = preferences.themePreset;
+    final labels = [
+      '目录',
+      '书签',
+      novelOnly ? '阅读设置' : '外观',
+      onDownload == null ? '操作' : '下载',
+      '查找',
+      if (onAi != null) aiLabel,
+      preset.isDark ? '日间' : '夜读',
+    ];
+    var minActionWidth = 48.0;
+    for (final label in labels) {
+      final painter = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: DefaultTextStyle.of(context).style.copyWith(fontSize: 12),
+        ),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: 1,
+      )..layout();
+      if (painter.width > minActionWidth) minActionWidth = painter.width;
+      painter.dispose();
+    }
     final dockAnimation = animation.drive(
       CurveTween(curve: const Interval(0, .90)),
     );
@@ -78,7 +101,7 @@ class ReaderControls extends StatelessWidget {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 620),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -136,60 +159,98 @@ class ReaderControls extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(
                             horizontal: DockLayout.horizontalInset,
                           ),
-                          child: Row(
-                            children: [
-                              _DockAction(
-                                key: const ValueKey('reader-catalogue-entry'),
-                                icon: CupertinoIcons.list_bullet,
-                                label: '目录',
-                                onPressed: onDirectory,
-                              ),
-                              _DockAction(
-                                key: const ValueKey('reader-bookmarks-entry'),
-                                icon: CupertinoIcons.bookmark,
-                                label: '书签',
-                                onPressed: onBookmarks,
-                              ),
-                              _DockAction(
-                                key: const ValueKey('reader-settings'),
-                                icon: CupertinoIcons.textformat,
-                                label: novelOnly ? '阅读设置' : '外观',
-                                onPressed: onAppearance,
-                              ),
-                              _DockAction(
-                                key: ValueKey(
-                                  onDownload == null
-                                      ? 'reader-operations-entry'
-                                      : 'reader-download-entry',
-                                ),
-                                icon: onDownload == null
-                                    ? CupertinoIcons.slider_horizontal_3
-                                    : CupertinoIcons.tray_arrow_down,
-                                label: onDownload == null ? '操作' : '下载',
-                                onPressed: onDownload ?? onOperations,
-                              ),
-                              _DockAction(
-                                key: const ValueKey('reader-find-entry'),
-                                icon: CupertinoIcons.search,
-                                label: '查找',
-                                onPressed: onFind,
-                              ),
-                              if (onAi != null)
-                                _DockAction(
-                                  key: const ValueKey('reader-ai'),
-                                  icon: CupertinoIcons.sparkles,
-                                  label: aiLabel,
-                                  onPressed: onAi,
-                                ),
-                              _DockAction(
-                                key: const ValueKey('reader-night-entry'),
-                                icon: preset.isDark
-                                    ? CupertinoIcons.sun_max
-                                    : CupertinoIcons.moon,
-                                label: preset.isDark ? '日间' : '夜读',
-                                onPressed: onNight,
-                              ),
-                            ],
+                          child: SizedBox(
+                            height: DockLayout.heightOf(context),
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                final requiredWidth =
+                                    minActionWidth * labels.length;
+                                final scrolls =
+                                    constraints.maxWidth < requiredWidth;
+                                return Semantics(
+                                  label: scrolls ? '阅读操作，可横向滚动' : '阅读操作',
+                                  container: true,
+                                  child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    child: SizedBox(
+                                      width: scrolls
+                                          ? requiredWidth
+                                          : constraints.maxWidth,
+                                      child: Row(
+                                        children: [
+                                          _DockAction(
+                                            key: const ValueKey(
+                                              'reader-catalogue-entry',
+                                            ),
+                                            icon: CupertinoIcons.list_bullet,
+                                            label: '目录',
+                                            onPressed: onDirectory,
+                                          ),
+                                          _DockAction(
+                                            key: const ValueKey(
+                                              'reader-bookmarks-entry',
+                                            ),
+                                            icon: CupertinoIcons.bookmark,
+                                            label: '书签',
+                                            onPressed: onBookmarks,
+                                          ),
+                                          _DockAction(
+                                            key: const ValueKey(
+                                              'reader-settings',
+                                            ),
+                                            icon: CupertinoIcons.textformat,
+                                            label: novelOnly ? '阅读设置' : '外观',
+                                            onPressed: onAppearance,
+                                          ),
+                                          _DockAction(
+                                            key: ValueKey(
+                                              onDownload == null
+                                                  ? 'reader-operations-entry'
+                                                  : 'reader-download-entry',
+                                            ),
+                                            icon: onDownload == null
+                                                ? CupertinoIcons
+                                                      .slider_horizontal_3
+                                                : CupertinoIcons
+                                                      .tray_arrow_down,
+                                            label: onDownload == null
+                                                ? '操作'
+                                                : '下载',
+                                            onPressed:
+                                                onDownload ?? onOperations,
+                                          ),
+                                          _DockAction(
+                                            key: const ValueKey(
+                                              'reader-find-entry',
+                                            ),
+                                            icon: CupertinoIcons.search,
+                                            label: '查找',
+                                            onPressed: onFind,
+                                          ),
+                                          if (onAi != null)
+                                            _DockAction(
+                                              key: const ValueKey('reader-ai'),
+                                              icon: CupertinoIcons.sparkles,
+                                              label: aiLabel,
+                                              onPressed: onAi,
+                                            ),
+                                          _DockAction(
+                                            key: const ValueKey(
+                                              'reader-night-entry',
+                                            ),
+                                            icon: preset.isDark
+                                                ? CupertinoIcons.sun_max
+                                                : CupertinoIcons.moon,
+                                            label: preset.isDark ? '日间' : '夜读',
+                                            onPressed: onNight,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
                           ),
                         ),
                       ),
@@ -223,6 +284,8 @@ class _DockAction extends StatelessWidget {
       button: true,
       enabled: onPressed != null,
       label: label,
+      onTap: onPressed,
+      excludeSemantics: true,
       child: JellyTapSurface(
         onTap: onPressed,
         child: SizedBox(
@@ -246,7 +309,7 @@ class _DockAction extends StatelessWidget {
                       label,
                       maxLines: 1,
                       style: TextStyle(
-                        fontSize: DockLayout.labelFontSize,
+                        fontSize: 12,
                         color: onPressed == null
                             ? Theme.of(context).disabledColor
                             : null,

@@ -152,24 +152,27 @@ class _NovelFeedState extends State<NovelFeed> {
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (c) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              title: const Text('减少这类推荐'),
-              subtitle: const Text('仅影响本机书城，不会改动书架'),
-            ),
-            ListTile(
-              title: const Text('不感兴趣 · 隐藏本书'),
-              onTap: () => Navigator.pop(c, 'book'),
-            ),
-            if (book.author.isNotEmpty)
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               ListTile(
-                title: Text('屏蔽作者：${book.author}'),
-                onTap: () => Navigator.pop(c, 'author'),
+                title: const Text('减少这类推荐'),
+                subtitle: const Text('仅影响本机书城，不会改动书架'),
               ),
-          ],
+              ListTile(
+                title: const Text('不感兴趣 · 隐藏本书'),
+                onTap: () => Navigator.pop(c, 'book'),
+              ),
+              if (book.author.isNotEmpty)
+                ListTile(
+                  title: Text('屏蔽作者：${book.author}'),
+                  onTap: () => Navigator.pop(c, 'author'),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -504,22 +507,25 @@ class _NovelFeedState extends State<NovelFeed> {
             child: Text(entry.value),
           ),
       ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 5),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              label,
-              style: TextStyle(
-                color: active ? colors.primary : colors.onSurfaceVariant,
-                fontSize: 13,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: active ? colors.primary : colors.onSurfaceVariant,
+                  fontSize: 13,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                ),
               ),
-            ),
-            const SizedBox(width: 3),
-            Icon(Icons.expand_more, size: 16, color: colors.onSurfaceVariant),
-          ],
+              const SizedBox(width: 3),
+              Icon(Icons.expand_more, size: 16, color: colors.onSurfaceVariant),
+            ],
+          ),
         ),
       ),
     );
@@ -546,11 +552,13 @@ class _NovelFeedState extends State<NovelFeed> {
     final colors = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight: 68,
+        toolbarHeight:
+            60 +
+            (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0.0, 32.0),
         title: Text(
           '书城',
           style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-            fontSize: 28,
+            fontSize: 24,
             fontWeight: FontWeight.w700,
           ),
         ),
@@ -560,10 +568,17 @@ class _NovelFeedState extends State<NovelFeed> {
             onPressed: () => _openSearch(context),
             icon: const Icon(Icons.search),
           ),
-          IconButton(
-            tooltip: '全部分类',
-            onPressed: _categories,
-            icon: const Icon(Icons.grid_view_outlined),
+          Tooltip(
+            message: '全部分类',
+            excludeFromSemantics: true,
+            child: TextButton(
+              onPressed: _categories,
+              style: TextButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+              ),
+              child: const Text('全部分类'),
+            ),
           ),
         ],
       ),
@@ -575,38 +590,43 @@ class _NovelFeedState extends State<NovelFeed> {
           slivers: [
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 14),
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 4),
                 child: InkWell(
                   key: const ValueKey('open-search'),
                   borderRadius: BorderRadius.circular(16),
                   onTap: () => _openSearch(context),
                   child: Ink(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 14,
-                    ),
                     decoration: BoxDecoration(
                       color: colors.surfaceContainer,
                       borderRadius: BorderRadius.circular(16),
                     ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.search,
-                          size: 20,
-                          color: colors.onSurfaceVariant,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 48),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            '搜索书名、作者或作品编号',
-                            style: TextStyle(
-                              fontSize: 14,
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.search,
+                              size: 20,
                               color: colors.onSurfaceVariant,
                             ),
-                          ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                '搜索书名、作者或作品编号',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: colors.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -614,10 +634,9 @@ class _NovelFeedState extends State<NovelFeed> {
             ),
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: Material(
-                  color: colors.surfaceContainerLow,
-                  borderRadius: BorderRadius.circular(14),
+                  color: Colors.transparent,
                   child: InkWell(
                     key: const ValueKey('open-community'),
                     borderRadius: BorderRadius.circular(14),
@@ -627,46 +646,50 @@ class _NovelFeedState extends State<NovelFeed> {
                         builder: (_) => const NovelCommunity(),
                       ),
                     ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.forum_outlined,
-                            size: 21,
-                            color: colors.primary,
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  '书荒广场',
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                Text(
-                                  '看看读者都在推荐什么',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: colors.onSurfaceVariant,
-                                  ),
-                                ),
-                              ],
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 48),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 8,
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.forum_outlined,
+                              size: 20,
+                              color: colors.primary,
                             ),
-                          ),
-                          Icon(
-                            Icons.chevron_right,
-                            size: 20,
-                            color: colors.onSurfaceVariant,
-                          ),
-                        ],
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Wrap(
+                                spacing: 8,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  const Text(
+                                    '书荒广场',
+                                    style: TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  Text(
+                                    '读者荐书',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: colors.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(
+                              Icons.chevron_right,
+                              size: 20,
+                              color: colors.onSurfaceVariant,
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -687,6 +710,7 @@ class _NovelFeedState extends State<NovelFeed> {
                           label: Text(NovelGenre.choices[i].name),
                           selected: _filters.genre == i,
                           showCheckmark: false,
+                          materialTapTargetSize: MaterialTapTargetSize.padded,
                           selectedColor: colors.primaryContainer,
                           labelStyle: Theme.of(context).textTheme.labelLarge
                               ?.copyWith(
@@ -714,7 +738,7 @@ class _NovelFeedState extends State<NovelFeed> {
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Wrap(
-                  spacing: 14,
+                  spacing: 8,
                   children: [
                     _filter<double>(
                       id: 'score',
@@ -754,7 +778,7 @@ class _NovelFeedState extends State<NovelFeed> {
             ),
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 10, 16, 6),
+                padding: const EdgeInsets.fromLTRB(20, 6, 16, 4),
                 child: Row(
                   children: [
                     Expanded(
@@ -775,7 +799,7 @@ class _NovelFeedState extends State<NovelFeed> {
                               padding: EdgeInsets.only(top: 4),
                               child: Text(
                                 '搜索分类关键词，结果不限定分类',
-                                style: TextStyle(fontSize: 11),
+                                style: TextStyle(fontSize: 12),
                               ),
                             ),
                           if (_filters.restricted ||
@@ -785,7 +809,7 @@ class _NovelFeedState extends State<NovelFeed> {
                               child: Text(
                                 '仅对已加载内容筛选 / 排序 · 加载更多保留当前顺序',
                                 style: TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 12,
                                   color: colors.onSurfaceVariant,
                                 ),
                               ),
@@ -795,6 +819,9 @@ class _NovelFeedState extends State<NovelFeed> {
                     ),
                     TextButton(
                       onPressed: _loading ? null : () => _load(refresh: true),
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(48, 48),
+                      ),
                       child: const Text('换一批'),
                     ),
                   ],
@@ -1181,9 +1208,59 @@ class _NovelSearchState extends State<NovelSearch> {
     super.dispose();
   }
 
+  Widget _resultFilter<T>({
+    required String id,
+    required String tooltip,
+    required String label,
+    required T value,
+    required Map<T, String> options,
+    required ValueChanged<T> onSelected,
+    bool active = false,
+  }) {
+    final colors = Theme.of(context).colorScheme;
+    return PopupMenuButton<T>(
+      key: ValueKey('search-filter-$id'),
+      tooltip: tooltip,
+      initialValue: value,
+      onSelected: onSelected,
+      itemBuilder: (_) => [
+        for (final entry in options.entries)
+          CheckedPopupMenuItem<T>(
+            value: entry.key,
+            checked: entry.key == value,
+            child: Text(entry.value),
+          ),
+      ],
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                  color: active ? colors.primary : colors.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(width: 3),
+              Icon(Icons.expand_more, size: 16, color: colors.onSurfaceVariant),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
+      toolbarHeight:
+          60 +
+          (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0.0, 32.0),
       title: TextField(
         key: const ValueKey('search-input'),
         controller: _input,
@@ -1212,6 +1289,7 @@ class _NovelSearchState extends State<NovelSearch> {
         TextButton(
           key: const ValueKey('search-submit'),
           onPressed: () => _search(),
+          style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
           child: const Text('搜索'),
         ),
       ],
@@ -1293,75 +1371,75 @@ class _NovelSearchState extends State<NovelSearch> {
                       )
               : Column(
                   children: [
-                    Wrap(
-                      spacing: 8,
-                      children: [
-                        PopupMenuButton<double>(
-                          tooltip: '搜索评分筛选',
-                          initialValue: _resultFilters.minScore,
-                          onSelected: (v) => setState(
-                            () => _resultFilters = _resultFilters.copyWith(
-                              minScore: v,
-                            ),
-                          ),
-                          itemBuilder: (_) => [
-                            for (final v in novelScoreOptions)
-                              PopupMenuItem(
-                                value: v,
-                                child: Text(novelScoreLabel(v)),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Wrap(
+                        spacing: 8,
+                        children: [
+                          _resultFilter<double>(
+                            id: 'score',
+                            tooltip: '搜索评分筛选',
+                            label: _resultFilters.minScore == 0
+                                ? '评分不限'
+                                : '${_resultFilters.minScore} 分以上',
+                            value: _resultFilters.minScore,
+                            active: _resultFilters.minScore > 0,
+                            options: {
+                              for (final score in novelScoreOptions)
+                                score: novelScoreLabel(score),
+                            },
+                            onSelected: (v) => setState(
+                              () => _resultFilters = _resultFilters.copyWith(
+                                minScore: v,
                               ),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Text(
-                              _resultFilters.minScore == 0
-                                  ? '评分不限 ▾'
-                                  : '${_resultFilters.minScore} 分以上 ▾',
                             ),
                           ),
-                        ),
-                        PopupMenuButton<NovelStatus>(
-                          tooltip: '搜索连载状态',
-                          onSelected: (v) => setState(
-                            () => _resultFilters = _resultFilters.copyWith(
-                              status: v,
+                          _resultFilter<NovelStatus>(
+                            id: 'status',
+                            tooltip: '搜索连载状态',
+                            label: _NovelFeedState
+                                ._statusLabels[_resultFilters.status]!,
+                            value: _resultFilters.status,
+                            active: _resultFilters.status != NovelStatus.any,
+                            options: _NovelFeedState._statusLabels,
+                            onSelected: (v) => setState(
+                              () => _resultFilters = _resultFilters.copyWith(
+                                status: v,
+                              ),
                             ),
                           ),
-                          itemBuilder: (_) => [
-                            for (final e
-                                in _NovelFeedState._statusLabels.entries)
-                              PopupMenuItem(value: e.key, child: Text(e.value)),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Text(
-                              '${_NovelFeedState._statusLabels[_resultFilters.status]} ▾',
+                          _resultFilter<NovelSort>(
+                            id: 'sort',
+                            tooltip: '搜索排序',
+                            label: _NovelFeedState
+                                ._sortLabels[_resultFilters.sort]!,
+                            value: _resultFilters.sort,
+                            active:
+                                _resultFilters.sort != NovelSort.recommended,
+                            options: _NovelFeedState._sortLabels,
+                            onSelected: (v) => setState(
+                              () => _resultFilters = _resultFilters.copyWith(
+                                sort: v,
+                              ),
                             ),
                           ),
-                        ),
-                        PopupMenuButton<NovelSort>(
-                          tooltip: '搜索排序',
-                          onSelected: (v) => setState(
-                            () => _resultFilters = _resultFilters.copyWith(
-                              sort: v,
-                            ),
-                          ),
-                          itemBuilder: (_) => [
-                            for (final e in _NovelFeedState._sortLabels.entries)
-                              PopupMenuItem(value: e.key, child: Text(e.value)),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Text(
-                              '${_NovelFeedState._sortLabels[_resultFilters.sort]} ▾',
-                            ),
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                    const Text(
-                      '筛选 / 排序仅作用于已加载结果',
-                      style: TextStyle(fontSize: 12),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '筛选 / 排序仅作用于已加载结果',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
                     ),
                     Expanded(child: _resultList()),
                   ],

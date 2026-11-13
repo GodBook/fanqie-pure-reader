@@ -22,6 +22,7 @@ import '../services/novel_backup_service.dart';
 import '../services/home_feed_cache.dart';
 import '../services/novel_app_update.dart';
 import '../services/novel_release.dart';
+import '../services/novel_color_theme.dart';
 import '../widgets/reader/reader_appearance_sheet.dart';
 import '../widgets/reader/reader_directory_sheet.dart';
 import '../services/ai_reading/ai_controller.dart';
@@ -98,6 +99,9 @@ class NovelRuntime {
       themeModeNotifier.value = themeModeFromName(
         preferences.getString(themeModeKey),
       );
+      NovelColorThemeStore.instance.restore(
+        preferences.getString(novelColorThemeKey),
+      );
       await AppThemeStyleStore.instance.load();
     } catch (_) {
       _preferences = null;
@@ -148,73 +152,96 @@ class NovelApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
     valueListenable: themeModeNotifier,
-    builder: (context, mode, _) => MaterialApp(
-      title: novelAppName,
-      debugShowCheckedModeBanner: false,
-      theme: _theme(Brightness.light),
-      darkTheme: _theme(Brightness.dark),
-      themeMode: mode,
-      locale: const Locale('zh', 'CN'),
-      supportedLocales: const [Locale('zh', 'CN')],
-      localizationsDelegates: GlobalMaterialLocalizations.delegates,
-      builder: (context, child) => PerformanceScope(
-        preferences: const PerformancePreferences(
-          enabled: true,
-          effects: {PerformanceEffect.motion},
+    builder: (context, mode, _) => ValueListenableBuilder<NovelColorTheme>(
+      valueListenable: NovelColorThemeStore.instance,
+      builder: (context, palette, _) => MaterialApp(
+        title: novelAppName,
+        debugShowCheckedModeBanner: false,
+        theme: _theme(Brightness.light, palette),
+        darkTheme: _theme(Brightness.dark, palette),
+        themeMode: mode,
+        themeAnimationDuration:
+            WidgetsBinding
+                    .instance
+                    .platformDispatcher
+                    .accessibilityFeatures
+                    .disableAnimations ||
+                WidgetsBinding
+                    .instance
+                    .platformDispatcher
+                    .accessibilityFeatures
+                    .accessibleNavigation
+            ? Duration.zero
+            : kThemeAnimationDuration,
+        locale: const Locale('zh', 'CN'),
+        supportedLocales: const [Locale('zh', 'CN')],
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        builder: (context, child) => PerformanceScope(
+          preferences: const PerformancePreferences(
+            enabled: true,
+            effects: {PerformanceEffect.motion},
+          ),
+          child: child ?? const SizedBox.shrink(),
         ),
-        child: child ?? const SizedBox.shrink(),
+        home: home,
       ),
-      home: home,
     ),
   );
 
-  ThemeData _theme(Brightness brightness) {
-    final dark = brightness == Brightness.dark;
-    final colors =
-        ColorScheme.fromSeed(
-          seedColor: novelAccent,
-          brightness: brightness,
-        ).copyWith(
-          primary: dark ? const Color(0xFFF0A18E) : novelAccent,
-          onPrimary: dark ? const Color(0xFF482117) : Colors.white,
-          primaryContainer: dark
-              ? const Color(0xFF4C3029)
-              : const Color(0xFFF7E6DF),
-          onPrimaryContainer: dark
-              ? const Color(0xFFFFD9CE)
-              : const Color(0xFF833525),
-          surface: dark ? const Color(0xFF1C1B19) : const Color(0xFFFAF8F4),
-          surfaceContainerLow: dark
-              ? const Color(0xFF23221F)
-              : const Color(0xFFFFFDFA),
-          surfaceContainer: dark
-              ? const Color(0xFF292723)
-              : const Color(0xFFF3EFE8),
-          surfaceContainerHigh: dark
-              ? const Color(0xFF302D28)
-              : const Color(0xFFEDE7DE),
-          surfaceContainerHighest: dark
-              ? const Color(0xFF39352F)
-              : const Color(0xFFE6DFD4),
-          onSurface: dark ? const Color(0xFFEDE7DD) : const Color(0xFF2D2923),
-          onSurfaceVariant: dark
-              ? const Color(0xFFBEB6AA)
-              : const Color(0xFF746C60),
-          outline: dark ? const Color(0xFF91877A) : const Color(0xFF8D8274),
-          outlineVariant: dark
-              ? const Color(0xFF484239)
-              : const Color(0xFFE3DBCF),
-        );
+  ThemeData _theme(Brightness brightness, NovelColorTheme palette) {
+    final colors = palette.scheme(brightness);
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
       colorScheme: colors,
       scaffoldBackgroundColor: colors.surface,
+      materialTapTargetSize: MaterialTapTargetSize.padded,
+      visualDensity: VisualDensity.standard,
+      textTheme: const TextTheme(
+        headlineSmall: TextStyle(
+          fontSize: 24,
+          fontWeight: FontWeight.w700,
+          height: 1.35,
+        ),
+        titleLarge: TextStyle(
+          fontSize: 22,
+          fontWeight: FontWeight.w700,
+          height: 1.4,
+        ),
+        titleMedium: TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.w600,
+          height: 1.4,
+        ),
+        titleSmall: TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.w600,
+          height: 1.45,
+        ),
+        bodyLarge: TextStyle(fontSize: 16, height: 1.6),
+        bodyMedium: TextStyle(fontSize: 15, height: 1.55),
+        bodySmall: TextStyle(fontSize: 13, height: 1.5),
+        labelLarge: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+          height: 1.4,
+        ),
+        labelMedium: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w500,
+          height: 1.4,
+        ),
+        labelSmall: TextStyle(fontSize: 12, height: 1.4),
+      ),
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {TargetPlatform.android: _NovelPageTransitions()},
+      ),
       appBarTheme: AppBarTheme(
         backgroundColor: colors.surface,
         surfaceTintColor: Colors.transparent,
         scrolledUnderElevation: 0,
         centerTitle: false,
+        titleSpacing: 20,
         titleTextStyle: TextStyle(
           fontSize: 22,
           fontWeight: FontWeight.w700,
@@ -225,13 +252,13 @@ class NovelApp extends StatelessWidget {
         color: colors.outlineVariant.withValues(alpha: .5),
       ),
       navigationBarTheme: NavigationBarThemeData(
-        height: 68,
+        height: 72,
         backgroundColor: colors.surfaceContainerLow,
         surfaceTintColor: Colors.transparent,
         indicatorColor: colors.primaryContainer,
         labelTextStyle: WidgetStateProperty.resolveWith(
           (states) => TextStyle(
-            fontSize: 12,
+            fontSize: 13,
             fontWeight: states.contains(WidgetState.selected)
                 ? FontWeight.w600
                 : FontWeight.w400,
@@ -242,7 +269,7 @@ class NovelApp extends StatelessWidget {
         ),
         iconTheme: WidgetStateProperty.resolveWith(
           (states) => IconThemeData(
-            size: 23,
+            size: 24,
             color: states.contains(WidgetState.selected)
                 ? colors.primary
                 : colors.onSurfaceVariant,
@@ -268,9 +295,61 @@ class NovelApp extends StatelessWidget {
         labelStyle: TextStyle(color: colors.onSurface),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
+      iconButtonTheme: IconButtonThemeData(
+        style: IconButton.styleFrom(
+          minimumSize: const Size(48, 48),
+          iconSize: 24,
+          padding: const EdgeInsets.all(12),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          minimumSize: const Size(48, 48),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size(48, 48),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          side: BorderSide(color: colors.outline),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+      listTileTheme: ListTileThemeData(
+        minLeadingWidth: 24,
+        horizontalTitleGap: 16,
+        minVerticalPadding: 12,
+        iconColor: colors.onSurfaceVariant,
+        titleTextStyle: TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.w500,
+          height: 1.45,
+          color: colors.onSurface,
+        ),
+        subtitleTextStyle: TextStyle(
+          fontSize: 13,
+          height: 1.5,
+          color: colors.onSurfaceVariant,
+        ),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: colors.inverseSurface,
+        contentTextStyle: TextStyle(
+          color: colors.onInverseSurface,
+          fontSize: 14,
+          height: 1.5,
+        ),
+        actionTextColor: colors.inversePrimary,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           minimumSize: const Size(48, 48),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
           ),
@@ -279,11 +358,68 @@ class NovelApp extends StatelessWidget {
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: colors.surfaceContainer,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 16,
+        ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: BorderSide.none,
         ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: colors.primary, width: 2),
+        ),
+        errorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: colors.error),
+        ),
+        focusedErrorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: colors.error, width: 2),
+        ),
       ),
+    );
+  }
+}
+
+class _NovelPageTransitions extends PageTransitionsBuilder {
+  const _NovelPageTransitions();
+
+  bool get _systemReducedMotion {
+    final features =
+        WidgetsBinding.instance.platformDispatcher.accessibilityFeatures;
+    return features.disableAnimations || features.accessibleNavigation;
+  }
+
+  @override
+  Duration get transitionDuration => _systemReducedMotion
+      ? Duration.zero
+      : const PredictiveBackPageTransitionsBuilder().transitionDuration;
+
+  @override
+  Duration get reverseTransitionDuration => _systemReducedMotion
+      ? Duration.zero
+      : const PredictiveBackPageTransitionsBuilder().reverseTransitionDuration;
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (MediaQuery.disableAnimationsOf(context) ||
+        MediaQuery.accessibleNavigationOf(context)) {
+      return child;
+    }
+    return const PredictiveBackPageTransitionsBuilder().buildTransitions(
+      route,
+      context,
+      animation,
+      secondaryAnimation,
+      child,
     );
   }
 }

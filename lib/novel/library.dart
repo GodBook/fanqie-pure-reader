@@ -228,15 +228,68 @@ Future<bool> _confirmRemove(
 
 String _readingInfo(Map<String, dynamic>? entry) {
   if (entry == null) return '尚未阅读 · 点按开始';
-  final chapter = ((entry['episode'] as num?)?.toInt() ?? 0) + 1;
-  final total = (entry['chapterCount'] as num?)?.toInt() ?? 0;
-  final progress = ((entry['progress'] as num?)?.toDouble() ?? 0).clamp(0, 1);
-  final time = DateTime.fromMillisecondsSinceEpoch(
-    (entry['time'] as num?)?.toInt() ?? 0,
-  ).toLocal();
-  final stamp =
-      '${time.month}/${time.day} ${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-  return '第 $chapter${total > 0 ? '/$total' : ''} 章 · ${(progress * 100).toStringAsFixed(1)}%\n上次阅读 $stamp';
+  final parts = _savedReadingPosition(entry);
+  final time = entry['time'];
+  if (time is num && time.isFinite && time > 0 && time <= 8640000000000000) {
+    final local = DateTime.fromMillisecondsSinceEpoch(time.toInt()).toLocal();
+    final stamp =
+        '${local.month}/${local.day} ${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+    parts.add('上次阅读 $stamp');
+  }
+  return parts.isEmpty ? '已有阅读记录' : parts.join('\n');
+}
+
+bool _canOfferShelfResume(
+  MediaItem book,
+  Map<String, dynamic>? entry,
+  Set<String> sourcesForId,
+) {
+  if (entry == null || entry['kind'] != 'book') return false;
+  // _readBook loads history by the unscoped book id. Do not advertise a
+  // different history record, or an ambiguous cross-source id, as its resume.
+  if (entry['id']?.toString() != book.id ||
+      (entry['bookId'] != null && entry['bookId'].toString() != book.id)) {
+    return false;
+  }
+  final source = entry['source']?.toString();
+  if (source == null || source.isEmpty) {
+    if (book.source != 'fanqie' || sourcesForId.length > 1) return false;
+  } else if (source != book.source) {
+    return false;
+  }
+  final chapterId = (entry['chapterId'] ?? entry['itemId'])?.toString();
+  if (chapterId != null && chapterId.isNotEmpty) return true;
+  final episode = entry['episode'];
+  return episode is num &&
+      episode.isFinite &&
+      episode >= 0 &&
+      episode == episode.toInt();
+}
+
+List<String> _savedReadingPosition(Map<String, dynamic> entry) {
+  final parts = <String>[];
+  final episode = entry['episode'];
+  if (episode is num &&
+      episode.isFinite &&
+      episode >= 0 &&
+      episode == episode.toInt()) {
+    final total = entry['chapterCount'];
+    final totalText =
+        total is num && total.isFinite && total > 0 && total == total.toInt()
+        ? '/${total.toInt()}'
+        : '';
+    parts.add('第 ${episode.toInt() + 1}$totalText 章');
+  }
+  final progress = entry['progress'];
+  if (progress is num && progress.isFinite && progress >= 0 && progress <= 1) {
+    parts.add('进度 ${(progress * 100).toStringAsFixed(1)}%');
+  }
+  return parts.isEmpty ? parts : [parts.join(' · ')];
+}
+
+String _shelfResumeInfo(Map<String, dynamic> entry) {
+  final parts = _savedReadingPosition(entry);
+  return parts.isEmpty ? '已保存上次阅读位置' : '上次记录：${parts.first}';
 }
 
 extension _NovelShelfLibrary on _NovelShelfState {
@@ -456,13 +509,16 @@ extension _NovelShelfLibrary on _NovelShelfState {
           for (final r in LibraryStore.instance.historySnapshot())
             if (r['kind'] == 'book') (r['contentId'] ?? r['id']).toString(): r,
         };
-        final records = ShelfStore.instance
+        final books = ShelfStore.instance
             .records()
-            .where(
-              (r) =>
-                  r.item.kind == 'book' &&
-                  ShelfGroupStore.instance.matches(r.item, _group),
-            )
+            .where((r) => r.item.kind == 'book')
+            .toList();
+        final sourcesById = <String, Set<String>>{};
+        for (final record in books) {
+          (sourcesById[record.item.id] ??= <String>{}).add(record.item.source);
+        }
+        final records = books
+            .where((r) => ShelfGroupStore.instance.matches(r.item, _group))
             .toList();
         records.sort(
           (a, b) => switch (_sort) {
@@ -477,12 +533,22 @@ extension _NovelShelfLibrary on _NovelShelfState {
             .where((record) => _selection.contains(record.item.id))
             .map((record) => record.item)
             .toList();
-        return Column(
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: SingleChildScrollView(
+        final resume = _managing
+            ? null
+            : records.where((record) {
+                final book = record.item;
+                return _canOfferShelfResume(
+                  book,
+                  history[book.id],
+                  sourcesById[book.id] ?? const <String>{},
+                );
+              }).firstOrNull;
+        return CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final groups = SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: Row(
@@ -508,110 +574,262 @@ extension _NovelShelfLibrary on _NovelShelfState {
                           ),
                       ],
                     ),
-                  ),
-                ),
-                PopupMenuButton<String>(
-                  tooltip: '书架排序',
-                  onSelected: (v) async {
-                    _update(() => _sort = v);
-                    await (await SharedPreferences.getInstance()).setString(
-                      'novel_shelf_sort',
-                      v,
-                    );
-                  },
-                  itemBuilder: (_) => [
-                    for (final v in ['最近阅读', '最近加入', '书名'])
-                      CheckedPopupMenuItem(
-                        value: v,
-                        checked: v == _sort,
-                        child: Text(v),
+                  );
+                  final sort = PopupMenuButton<String>(
+                    tooltip: '书架排序',
+                    onSelected: (v) async {
+                      _update(() => _sort = v);
+                      await (await SharedPreferences.getInstance()).setString(
+                        'novel_shelf_sort',
+                        v,
+                      );
+                    },
+                    itemBuilder: (_) => [
+                      for (final v in ['最近阅读', '最近加入', '书名'])
+                        CheckedPopupMenuItem(
+                          value: v,
+                          checked: v == _sort,
+                          child: Text(v),
+                        ),
+                    ],
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 48),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const ExcludeSemantics(
+                              child: Icon(Icons.sort, size: 20),
+                            ),
+                            const SizedBox(width: 8),
+                            Text('排序：$_sort'),
+                            const ExcludeSemantics(
+                              child: Icon(Icons.arrow_drop_down),
+                            ),
+                          ],
+                        ),
                       ),
-                  ],
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Text('$_sort ▾'),
-                  ),
-                ),
-              ],
+                    ),
+                  );
+                  if (constraints.maxWidth < 320 ||
+                      MediaQuery.textScalerOf(context).scale(14) > 20) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        groups,
+                        Align(alignment: Alignment.centerRight, child: sort),
+                      ],
+                    );
+                  }
+                  return Row(
+                    children: [
+                      Expanded(child: groups),
+                      sort,
+                    ],
+                  );
+                },
+              ),
             ),
             if (_managing)
-              Wrap(
-                spacing: 8,
-                children: [
-                  TextButton(
-                    onPressed: () => _update(() {
-                      _selection.clear();
-                      _selection.addAll(records.map((r) => r.item.id));
-                    }),
-                    child: const Text('全选'),
-                  ),
-                  TextButton(
-                    onPressed: selectedBooks.isEmpty
-                        ? null
-                        : () => _move(selectedBooks),
-                    child: const Text('移动到分组'),
-                  ),
-                  TextButton(
-                    onPressed: selectedBooks.isEmpty
-                        ? null
-                        : () async {
-                            if (await _confirmRemove(context, selectedBooks)) {
-                              try {
-                                await ShelfStore.instance.removeKeys(
-                                  selectedBooks.map(ShelfStore.keyOf),
-                                );
-                                if (mounted) _update(() => _selection.clear());
-                              } catch (_) {
-                                if (context.mounted) _notice(context, '移出失败');
-                              }
-                            }
-                          },
-                    child: const Text('移出书架'),
-                  ),
-                ],
-              ),
-            Expanded(
-              child: records.isEmpty
-                  ? const _Problem(message: '这个分组还没有书\n搜索小说或在书籍详情加入书架。')
-                  : ListView.builder(
-                      itemCount: records.length,
-                      itemBuilder: (_, i) {
-                        final r = records[i];
-                        return _BookRow(
-                          r.item,
-                          subtitle: _openingId == r.item.id
-                              ? '正在打开…'
-                              : _readingInfo(history[r.item.id]),
-                          onTap: _managing
-                              ? () => _update(() {
-                                  if (!_selection.add(r.item.id)) {
-                                    _selection.remove(r.item.id);
-                                  }
-                                })
-                              : () => _open(r.item),
-                          trailing: _managing
-                              ? Checkbox(
-                                  value: _selection.contains(r.item.id),
-                                  onChanged: (_) => _update(() {
-                                    if (!_selection.add(r.item.id)) {
-                                      _selection.remove(r.item.id);
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Wrap(
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                        onPressed: () => _update(() {
+                          _selection.clear();
+                          _selection.addAll(records.map((r) => r.item.id));
+                        }),
+                        child: const Text('全选'),
+                      ),
+                      TextButton(
+                        onPressed: selectedBooks.isEmpty
+                            ? null
+                            : () => _move(selectedBooks),
+                        child: const Text('移动到分组'),
+                      ),
+                      TextButton(
+                        onPressed: selectedBooks.isEmpty
+                            ? null
+                            : () async {
+                                if (await _confirmRemove(
+                                  context,
+                                  selectedBooks,
+                                )) {
+                                  try {
+                                    await ShelfStore.instance.removeKeys(
+                                      selectedBooks.map(ShelfStore.keyOf),
+                                    );
+                                    if (mounted) {
+                                      _update(() => _selection.clear());
                                     }
-                                  }),
-                                )
-                              : IconButton(
-                                  tooltip: '书籍操作',
-                                  icon: const Icon(Icons.more_vert),
-                                  onPressed: () => _menu(r),
-                                ),
-                        );
-                      },
-                    ),
-            ),
+                                  } catch (_) {
+                                    if (context.mounted) {
+                                      _notice(context, '移出失败');
+                                    }
+                                  }
+                                }
+                              },
+                        child: const Text('移出书架'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            if (resume != null)
+              SliverToBoxAdapter(
+                child: _ShelfContinueReading(
+                  book: resume.item,
+                  detail: _shelfResumeInfo(history[resume.item.id]!),
+                  opening: _openingId == resume.item.id,
+                  onPressed: _openingId == null
+                      ? () => _open(resume.item)
+                      : null,
+                ),
+              ),
+            if (records.isEmpty)
+              SliverToBoxAdapter(
+                child: _ShelfEmptySearch(onSearch: () => _openSearch(context)),
+              )
+            else
+              SliverList.builder(
+                itemCount: records.length,
+                itemBuilder: (_, i) {
+                  final r = records[i];
+                  return _BookRow(
+                    r.item,
+                    subtitle: _openingId == r.item.id
+                        ? '正在打开…'
+                        : _readingInfo(history[r.item.id]),
+                    onTap: _managing
+                        ? () => _update(() {
+                            if (!_selection.add(r.item.id)) {
+                              _selection.remove(r.item.id);
+                            }
+                          })
+                        : () => _open(r.item),
+                    trailing: _managing
+                        ? Checkbox(
+                            value: _selection.contains(r.item.id),
+                            onChanged: (_) => _update(() {
+                              if (!_selection.add(r.item.id)) {
+                                _selection.remove(r.item.id);
+                              }
+                            }),
+                          )
+                        : IconButton(
+                            tooltip: '书籍操作',
+                            icon: const Icon(Icons.more_vert),
+                            onPressed: () => _menu(r),
+                          ),
+                  );
+                },
+              ),
+            const SliverToBoxAdapter(child: SizedBox(height: 24)),
           ],
         );
       },
     ),
   );
+}
+
+class _ShelfContinueReading extends StatelessWidget {
+  const _ShelfContinueReading({
+    required this.book,
+    required this.detail,
+    required this.opening,
+    required this.onPressed,
+  });
+
+  final MediaItem book;
+  final String detail;
+  final bool opening;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Container(
+      key: const ValueKey('novel-shelf-continue'),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        border: Border.all(color: colors.outlineVariant),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '继续阅读',
+            style: theme.textTheme.labelLarge?.copyWith(color: colors.primary),
+          ),
+          const SizedBox(height: 8),
+          Text(book.title, style: theme.textTheme.titleMedium),
+          const SizedBox(height: 4),
+          Text(
+            detail,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: colors.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 16),
+          ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: FilledButton.tonalIcon(
+              key: const ValueKey('novel-shelf-continue-button'),
+              onPressed: onPressed,
+              icon: const ExcludeSemantics(
+                child: Icon(Icons.auto_stories_outlined),
+              ),
+              label: Text(opening ? '正在打开…' : '接着读'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShelfEmptySearch extends StatelessWidget {
+  const _ShelfEmptySearch({required this.onSearch});
+  final VoidCallback onSearch;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 40, 24, 24),
+      child: Column(
+        children: [
+          Text('这个分组还没有书', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Text(
+            '搜索小说或在书籍详情加入书架。',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 16),
+          ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: OutlinedButton.icon(
+              key: const ValueKey('novel-shelf-empty-search'),
+              onPressed: onSearch,
+              icon: const ExcludeSemantics(child: Icon(Icons.search)),
+              label: const Text('搜索小说'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _NovelHistory extends StatelessWidget {

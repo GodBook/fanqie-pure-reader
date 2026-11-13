@@ -9,6 +9,9 @@ class NovelSettings extends StatefulWidget {
 
 class _NovelSettingsState extends State<NovelSettings> {
   String _version = '读取版本中…';
+  Future<void> _themeWrites = Future<void>.value();
+  ThemeMode? _persistedThemeMode;
+  int _themeRevision = 0;
 
   @override
   void initState() {
@@ -26,17 +29,31 @@ class _NovelSettingsState extends State<NovelSettings> {
   }
 
   Future<void> _setTheme(ThemeMode mode) async {
-    final previous = themeModeNotifier.value;
+    final messenger = ScaffoldMessenger.of(context);
+    _persistedThemeMode ??= themeModeNotifier.value;
+    final revision = ++_themeRevision;
+    final save = _themeWrites.then((_) async {
+      bool saved;
+      try {
+        saved = await (await SharedPreferences.getInstance()).setString(
+          themeModeKey,
+          mode.name,
+        );
+      } catch (_) {
+        saved = false;
+      }
+      if (saved) {
+        _persistedThemeMode = mode;
+      } else if (revision == _themeRevision) {
+        themeModeNotifier.value = _persistedThemeMode!;
+        if (messenger.mounted) {
+          messenger.showSnackBar(const SnackBar(content: Text('外观保存失败，请重试')));
+        }
+      }
+    });
+    _themeWrites = save;
     themeModeNotifier.value = mode;
-    try {
-      await (await SharedPreferences.getInstance()).setString(
-        themeModeKey,
-        mode.name,
-      );
-    } catch (_) {
-      themeModeNotifier.value = previous;
-      if (mounted) _notice(context, '外观保存失败，请重试');
-    }
+    await save;
   }
 
   @override
@@ -52,14 +69,16 @@ class _NovelSettingsState extends State<NovelSettings> {
             padding: const EdgeInsets.fromLTRB(4, 8, 4, 12),
             child: Text(
               '$novelAppName · $_version',
-              style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
             ),
           ),
           _SettingsSection(
             title: '外观与阅读',
             children: [
               const ListTile(
-                leading: Icon(Icons.palette_outlined),
+                leading: ExcludeSemantics(child: Icon(Icons.palette_outlined)),
                 title: Text('应用外观'),
                 subtitle: Text('书城、书架与设置的显示主题'),
               ),
@@ -85,6 +104,32 @@ class _NovelSettingsState extends State<NovelSettings> {
                   ),
                 ),
               ),
+              const _SettingsDivider(),
+              ValueListenableBuilder<NovelColorTheme>(
+                valueListenable: NovelColorThemeStore.instance,
+                builder: (context, palette, _) => ListTile(
+                  key: const ValueKey('open-color-theme'),
+                  leading: ExcludeSemantics(
+                    child: _ThemeColorSwatch(
+                      color: palette
+                          .scheme(Theme.of(context).brightness)
+                          .primary,
+                    ),
+                  ),
+                  title: const Text('主题颜色'),
+                  subtitle: Text('当前：${palette.label}'),
+                  trailing: const ExcludeSemantics(
+                    child: Icon(Icons.chevron_right),
+                  ),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => const _NovelColorThemePicker(),
+                    ),
+                  ),
+                ),
+              ),
+              const _SettingsDivider(),
               _SettingsLink(
                 icon: Icons.text_fields,
                 title: '阅读设置',
@@ -107,6 +152,7 @@ class _NovelSettingsState extends State<NovelSettings> {
                   ),
                 ),
               ),
+              const _SettingsDivider(),
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 16),
                 child: _AutoUpdateSettings(),
@@ -122,6 +168,7 @@ class _NovelSettingsState extends State<NovelSettings> {
                 subtitle: '书架、分组、进度、书签、划线与笔记',
                 onTap: () => _backupSettings(context),
               ),
+              const _SettingsDivider(),
               _SettingsLink(
                 icon: Icons.visibility_off_outlined,
                 title: '管理推荐屏蔽',
@@ -147,6 +194,7 @@ class _NovelSettingsState extends State<NovelSettings> {
                   ),
                 ),
               ),
+              const _SettingsDivider(),
               _SettingsLink(
                 icon: Icons.info_outline,
                 title: '开源许可',
@@ -157,6 +205,7 @@ class _NovelSettingsState extends State<NovelSettings> {
                   applicationVersion: _version,
                 ),
               ),
+              const _SettingsDivider(),
               _SettingsLink(
                 icon: Icons.feedback_outlined,
                 title: '关于与问题反馈',
@@ -169,7 +218,7 @@ class _NovelSettingsState extends State<NovelSettings> {
             child: Text(
               '下载的章节保存在本机，不会被自动清理。\n阅读中点屏幕中央，也可调整阅读设置。',
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 13,
                 height: 1.7,
                 color: colors.onSurfaceVariant,
               ),
@@ -207,6 +256,163 @@ class _NovelSettingsState extends State<NovelSettings> {
   );
 }
 
+class _ThemeColorSwatch extends StatelessWidget {
+  const _ThemeColorSwatch({required this.color});
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 24,
+    height: 24,
+    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+  );
+}
+
+class _NovelColorThemePicker extends StatefulWidget {
+  const _NovelColorThemePicker();
+
+  @override
+  State<_NovelColorThemePicker> createState() => _NovelColorThemePickerState();
+}
+
+class _NovelColorThemePickerState extends State<_NovelColorThemePicker> {
+  Future<void> _select(NovelColorTheme palette) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final store = NovelColorThemeStore.instance;
+    final revision = store.selectionRevision + 1;
+    final saved = await store.select(palette);
+    if (!saved && messenger.mounted && revision == store.selectionRevision) {
+      messenger.showSnackBar(const SnackBar(content: Text('主题颜色保存失败，请重新选择')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('主题颜色')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+        children: [
+          Text('选一种喜欢的颜色', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 8),
+          Text(
+            '用于书城、书架、设置和按钮，不改变阅读背景',
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(height: 24),
+          ValueListenableBuilder<NovelColorTheme>(
+            valueListenable: NovelColorThemeStore.instance,
+            builder: (context, selected, _) => Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final palette in NovelColorTheme.values)
+                  ChoiceChip(
+                    key: ValueKey('color-theme-${palette.name}'),
+                    avatar: ExcludeSemantics(
+                      child: palette == selected
+                          ? Icon(
+                              Icons.check_circle,
+                              color: colors.primary,
+                              size: 24,
+                            )
+                          : _ThemeColorSwatch(
+                              color: palette
+                                  .scheme(Theme.of(context).brightness)
+                                  .primary,
+                            ),
+                    ),
+                    label: Text(palette.label),
+                    selected: palette == selected,
+                    showCheckmark: false,
+                    materialTapTargetSize: MaterialTapTargetSize.padded,
+                    onSelected: (_) => _select(palette),
+                    labelPadding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 32),
+          Semantics(
+            header: true,
+            child: Text('配色预览', style: Theme.of(context).textTheme.titleMedium),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: colors.surfaceContainerLow,
+              border: Border.all(color: colors.outlineVariant),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  '每一页，都值得期待',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '文字、按钮与选中状态会随主题同步更新。',
+                  style: TextStyle(color: colors.onSurfaceVariant, height: 1.6),
+                ),
+                const SizedBox(height: 20),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    Chip(
+                      avatar: ExcludeSemantics(
+                        child: Icon(
+                          Icons.check,
+                          size: 18,
+                          color: colors.onPrimaryContainer,
+                        ),
+                      ),
+                      backgroundColor: colors.primaryContainer,
+                      label: Text(
+                        '已选择',
+                        style: TextStyle(color: colors.onPrimaryContainer),
+                      ),
+                    ),
+                    Chip(label: const Text('普通标签')),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '选择后自动保存，日间与夜间均可使用。',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+          ),
+        ],
+      ),
+      bottomNavigationBar: Material(
+        color: colors.surfaceContainerLow,
+        child: SafeArea(
+          top: false,
+          minimum: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+          child: FilledButton(
+            key: const ValueKey('color-theme-done'),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('完成'),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SettingsSection extends StatelessWidget {
   const _SettingsSection({required this.title, required this.children});
   final String title;
@@ -218,19 +424,27 @@ class _SettingsSection extends StatelessWidget {
     children: [
       Padding(
         padding: const EdgeInsets.fromLTRB(4, 20, 4, 12),
-        child: Text(
-          title,
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-        ),
+        child: Text(title, style: Theme.of(context).textTheme.titleSmall),
       ),
       Material(
         color: Theme.of(context).colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(16),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+        ),
         clipBehavior: Clip.antiAlias,
         child: Column(children: children),
       ),
     ],
   );
+}
+
+class _SettingsDivider extends StatelessWidget {
+  const _SettingsDivider();
+
+  @override
+  Widget build(BuildContext context) =>
+      const Divider(height: 1, thickness: 1, indent: 16, endIndent: 16);
 }
 
 class _SettingsLink extends StatelessWidget {
@@ -246,12 +460,27 @@ class _SettingsLink extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => ListTile(
-    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-    leading: Icon(icon, color: Theme.of(context).colorScheme.onSurfaceVariant),
-    title: Text(title),
-    subtitle: subtitle == null ? null : Text(subtitle!),
-    trailing: const Icon(Icons.chevron_right, size: 20),
-    onTap: onTap,
-  );
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      leading: ExcludeSemantics(
+        child: Icon(icon, size: 24, color: colors.onSurfaceVariant),
+      ),
+      title: Text(title),
+      titleTextStyle: theme.textTheme.bodyLarge?.copyWith(
+        color: colors.onSurface,
+        fontWeight: FontWeight.w600,
+      ),
+      subtitle: subtitle == null ? null : Text(subtitle!),
+      subtitleTextStyle: theme.textTheme.bodyMedium?.copyWith(
+        color: colors.onSurfaceVariant,
+      ),
+      trailing: const ExcludeSemantics(
+        child: Icon(Icons.chevron_right, size: 20),
+      ),
+      onTap: onTap,
+    );
+  }
 }

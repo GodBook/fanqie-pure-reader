@@ -152,6 +152,12 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
           },
         )
         .toList();
+    final emptyMessage = switch (_filter) {
+      '书签' => '暂无书签 · 可添加当前位置',
+      '笔记' => '暂无笔记 · 长按正文可写笔记',
+      '划线' => '暂无划线 · 长按正文可划线',
+      _ => '暂无标注 · 长按正文可划线或写笔记',
+    };
     return Theme(
       data: widget.preset.theme(Theme.of(context)),
       child: Material(
@@ -164,17 +170,24 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
                 Row(
                   children: [
                     const SizedBox(width: 16),
-                    const Expanded(
-                      child: Text(
-                        '书签与标注',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: const Text(
+                          '书签与标注',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                     ),
                     IconButton(
                       tooltip: '添加当前位置书签',
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 48,
+                      ),
                       onPressed: () async {
                         try {
                           await widget.onAdd();
@@ -187,29 +200,87 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
                     ),
                     IconButton(
                       tooltip: '关闭标注',
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 48,
+                      ),
                       onPressed: () => Navigator.pop(context),
                       icon: const Icon(Icons.close),
                     ),
                   ],
                 ),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    for (final name in ['全部', '书签', '笔记', '划线'])
-                      ChoiceChip(
-                        label: Text(name),
-                        selected: _filter == name,
-                        onSelected: (_) => setState(() => _filter = name),
-                      ),
-                  ],
-                ),
-                if (_loading) const LinearProgressIndicator(),
-                if (_error != null)
-                  TextButton(onPressed: _load, child: Text(_error!)),
                 Expanded(
-                  child: items.isEmpty
-                      ? const Center(child: Text('暂无标注 · 长按正文可划线或写笔记'))
-                      : ListView.builder(
+                  child: CustomScrollView(
+                    slivers: [
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Semantics(
+                                header: true,
+                                child: Text(
+                                  '筛选标注',
+                                  style: TextStyle(
+                                    color: widget.preset.mutedTextColor,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final name in ['全部', '书签', '笔记', '划线'])
+                                    ChoiceChip(
+                                      key: ValueKey(
+                                        'reader-marks-filter-$name',
+                                      ),
+                                      label: Text(name),
+                                      labelStyle: const TextStyle(fontSize: 14),
+                                      showCheckmark: true,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.padded,
+                                      visualDensity: VisualDensity.standard,
+                                      selected: _filter == name,
+                                      onSelected: (_) =>
+                                          setState(() => _filter = name),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (_loading)
+                        const SliverToBoxAdapter(
+                          child: LinearProgressIndicator(),
+                        ),
+                      if (_error != null)
+                        SliverToBoxAdapter(
+                          child: TextButton(
+                            onPressed: _load,
+                            child: Text(_error!),
+                          ),
+                        ),
+                      if (items.isEmpty && !_loading && _error == null)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Text(
+                                emptyMessage,
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (items.isNotEmpty)
+                        SliverList.builder(
                           itemCount: items.length,
                           itemBuilder: (c, i) {
                             final item = items[i];
@@ -244,11 +315,19 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
                                   if (item.underlineKey == null)
                                     IconButton(
                                       tooltip: '编辑笔记',
+                                      constraints: const BoxConstraints(
+                                        minWidth: 48,
+                                        minHeight: 48,
+                                      ),
                                       onPressed: () => _edit(mark),
                                       icon: const Icon(Icons.edit_outlined),
                                     ),
                                   IconButton(
                                     tooltip: '删除标注',
+                                    constraints: const BoxConstraints(
+                                      minWidth: 48,
+                                      minHeight: 48,
+                                    ),
                                     onPressed: () => _delete(item),
                                     icon: const Icon(Icons.delete_outline),
                                   ),
@@ -257,6 +336,8 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
                             );
                           },
                         ),
+                    ],
+                  ),
                 ),
               ],
             ),

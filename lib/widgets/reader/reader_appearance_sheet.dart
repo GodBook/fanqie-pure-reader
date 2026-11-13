@@ -307,22 +307,102 @@ class _ReaderAppearanceSheetState
       if (finish) flushPreferences();
     }
 
+    final step = (max - min) / divisions;
+    var steppedValue = current;
+    void stepValue(double direction) {
+      steppedValue = (steppedValue + step * direction).clamp(min, max);
+      update(steppedValue, finish: true);
+    }
+
     return _adjustment(
-      ReaderValueSlider(
-        sliderKey: key,
-        label: label,
-        value: current,
-        min: min,
-        max: max,
-        divisions: divisions,
-        format: format,
-        preset: _displayPreset,
-        onPreview: update,
-        onCommitted: (next) => update(next, finish: true),
-        onInteractionChanged: (active) => _preview(key, active),
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ReaderValueSlider(
+            sliderKey: key,
+            label: label,
+            value: current,
+            min: min,
+            max: max,
+            divisions: divisions,
+            format: format,
+            preset: _displayPreset,
+            onPreview: update,
+            onCommitted: (next) => update(next, finish: true),
+            onInteractionChanged: (active) => _preview(key, active),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  key: ValueKey('$id-decrease'),
+                  tooltip: '减小$label',
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 48,
+                  ),
+                  onPressed: current <= min ? null : () => stepValue(-1),
+                  icon: const Icon(CupertinoIcons.minus, size: 20),
+                ),
+                IconButton(
+                  key: ValueKey('$id-increase'),
+                  tooltip: '增大$label',
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 48,
+                  ),
+                  onPressed: current >= max ? null : () => stepValue(1),
+                  icon: const Icon(CupertinoIcons.plus, size: 20),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
       key,
     );
+  }
+
+  Widget _accessibleChoiceRow(Widget child) {
+    if (child is! ReaderSettingsRow || child.child is! ReaderSettingsChipRow) {
+      return child;
+    }
+    final choices = child.child as ReaderSettingsChipRow;
+    final row = _AccessibleReaderSettingsChipRow(
+      key: choices.key,
+      children: [
+        for (final choice in choices.children)
+          if (choice is ReaderSettingsChip)
+            _AccessibleReaderSettingsChip(
+              key: choice.key,
+              label: choice.label,
+              selected: choice.selected,
+              onTap: choice.onTap,
+            )
+          else
+            choice,
+      ],
+    );
+    if (choices.children.length >= 4) {
+      return Padding(
+        key: child.key,
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              child.label,
+              style: TextStyle(color: _displayPreset.textColor, fontSize: 13),
+            ),
+            const SizedBox(height: 8),
+            row,
+          ],
+        ),
+      );
+    }
+    return ReaderSettingsRow(key: child.key, label: child.label, child: row);
   }
 
   List<ReaderSettingsCategory> get _categories => [
@@ -396,7 +476,7 @@ class _ReaderAppearanceSheetState
         backgroundLocked: _backgroundLocked,
         category: category,
         sliderBuilder: _slider,
-        decorate: _adjustment,
+        decorate: (child) => _adjustment(_accessibleChoiceRow(child)),
       );
 
   Widget _behavior(ReaderBehaviorCategory category) => _adjustment(
@@ -445,7 +525,7 @@ class _ReaderAppearanceSheetState
                 '跟随正文时，评论字号限制为 16–28 pt',
                 style: TextStyle(
                   color: _displayPreset.mutedTextColor,
-                  fontSize: 12,
+                  fontSize: 14,
                 ),
               ),
             ),
@@ -544,32 +624,41 @@ class _ReaderAppearanceSheetState
                       child: Row(
                         children: [
                           if (_nested)
-                            GlassIconButton(
-                              key: const ValueKey('reader-settings-back'),
-                              icon: CupertinoIcons.chevron_back,
-                              label:
-                                  widget.initialSection ==
-                                      ReaderSettingsSection.appearance
-                                  ? (widget.novelOnly ? '返回阅读设置分类' : '返回外观分类')
-                                  : '返回阅读设置分类',
-                              onPressed: _returnCategories,
+                            SizedBox.square(
+                              dimension: 48,
+                              child: GlassIconButton(
+                                key: const ValueKey('reader-settings-back'),
+                                icon: CupertinoIcons.chevron_back,
+                                label:
+                                    widget.initialSection ==
+                                        ReaderSettingsSection.appearance
+                                    ? (widget.novelOnly ? '返回阅读设置分类' : '返回外观分类')
+                                    : '返回阅读设置分类',
+                                onPressed: _returnCategories,
+                              ),
                             )
                           else
                             const SizedBox(width: 10),
                           Expanded(
-                            child: Text(
-                              _title,
-                              style: const TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
+                            child: Semantics(
+                              header: true,
+                              child: Text(
+                                _title,
+                                style: const TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
                           ),
-                          GlassIconButton(
-                            key: const ValueKey('reader-settings-close'),
-                            icon: CupertinoIcons.xmark,
-                            label: '关闭$_title',
-                            onPressed: _close,
+                          SizedBox.square(
+                            dimension: 48,
+                            child: GlassIconButton(
+                              key: const ValueKey('reader-settings-close'),
+                              icon: CupertinoIcons.xmark,
+                              label: '关闭$_title',
+                              onPressed: _close,
+                            ),
                           ),
                         ],
                       ),
@@ -732,21 +821,32 @@ class _ReaderAppearanceSheetState
         });
         widget.onFollowSystem();
       },
-      child: const Text('跟随系统', style: TextStyle(fontSize: 12)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (value.followSystemBrightness) ...[
+            const ExcludeSemantics(
+              child: Icon(CupertinoIcons.check_mark, size: 16),
+            ),
+            const SizedBox(width: 4),
+          ],
+          const Text('跟随系统', style: TextStyle(fontSize: 14)),
+        ],
+      ),
     ),
   );
 
   Widget _commentFontMode() => ReaderSettingsRow(
     label: '评论字号',
-    child: ReaderSettingsChipRow(
+    child: _AccessibleReaderSettingsChipRow(
       children: [
-        ReaderSettingsChip(
+        _AccessibleReaderSettingsChip(
           key: const ValueKey('reader-comment-font-follow'),
           label: '跟随正文',
           selected: value.commentFontFollowsReading,
           onTap: () => _apply(value.copyWith(commentFontFollowsReading: true)),
         ),
-        ReaderSettingsChip(
+        _AccessibleReaderSettingsChip(
           key: const ValueKey('reader-comment-font-independent'),
           label: '单独设置',
           selected: !value.commentFontFollowsReading,
@@ -769,14 +869,14 @@ class _ReaderAppearanceSheetState
 
   Widget _spacingRow() => ReaderSettingsRow(
     label: '间距',
-    child: ReaderSettingsChipRow(
+    child: _AccessibleReaderSettingsChipRow(
       children: [
         for (final option in const [
           ('compact', '紧凑', 1.5, 6.0, 12.0, 8.0),
           ('standard', '标准', 1.8, 12.0, 20.0, 16.0),
           ('loose', '宽松', 2.1, 20.0, 32.0, 28.0),
         ])
-          ReaderSettingsChip(
+          _AccessibleReaderSettingsChip(
             key: ValueKey('reader-spacing-${option.$1}'),
             label: option.$2,
             selected:
@@ -817,6 +917,12 @@ class _ReaderAppearanceSheetState
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (choice == _displayPreset) ...[
+                    const ExcludeSemantics(
+                      child: Icon(CupertinoIcons.check_mark, size: 16),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
                   Container(
                     width: 18,
                     height: 18,
@@ -834,5 +940,95 @@ class _ReaderAppearanceSheetState
           ),
       ],
     ),
+  );
+}
+
+/// Keeps the existing chip contract while giving sheet choices a full target.
+class _AccessibleReaderSettingsChip extends ReaderSettingsChip {
+  const _AccessibleReaderSettingsChip({
+    super.key,
+    required super.label,
+    required super.selected,
+    required super.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final preset = ReaderSettingsTheme.of(context);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+      child: DecoratedBox(
+        position: DecorationPosition.foreground,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(100),
+          border: Border.all(
+            color: selected ? preset.accentColor : Colors.transparent,
+            width: 1.5,
+          ),
+        ),
+        child: GlassControls.chip(
+          context,
+          selected: selected,
+          onPressed: onTap,
+          tint: preset.panelColor,
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: selected ? preset.accentColor : preset.mutedTextColor,
+              fontSize: 14,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Keep choices readable as system text grows, wrapping instead of clipping.
+class _AccessibleReaderSettingsChipRow extends ReaderSettingsChipRow {
+  const _AccessibleReaderSettingsChipRow({super.key, required super.children});
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      const gap = 8.0;
+      var minimumWidth = 48.0;
+      for (final child in children) {
+        if (child is! ReaderSettingsChip) continue;
+        final painter = TextPainter(
+          text: TextSpan(
+            text: child.label,
+            style: DefaultTextStyle.of(context).style.copyWith(fontSize: 14),
+          ),
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+          maxLines: 1,
+        )..layout();
+        if (painter.width + 24 > minimumWidth) {
+          minimumWidth = painter.width + 24;
+        }
+        painter.dispose();
+      }
+      final needed =
+          minimumWidth * children.length + gap * (children.length - 1);
+      if (needed <= constraints.maxWidth) {
+        return Row(
+          children: [
+            for (var index = 0; index < children.length; index++) ...[
+              if (index > 0) const SizedBox(width: gap),
+              Expanded(child: children[index]),
+            ],
+          ],
+        );
+      }
+      return Wrap(
+        spacing: gap,
+        runSpacing: gap,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: children,
+      );
+    },
   );
 }

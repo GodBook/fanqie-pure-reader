@@ -212,6 +212,54 @@ extension ReaderThemeColors on ReaderThemePreset {
             surfaceContainerHighest: isOled ? const Color(0xFF1F1F23) : null,
             outlineVariant: isOled ? const Color(0xFF2E2E34) : null,
           );
+    // Keep app-specific component colors out of the reading palette.
+    final baseChip = base.chipTheme;
+    final chipLabelColor = WidgetStateColor.resolveWith((states) {
+      if (states.contains(WidgetState.disabled)) {
+        return scheme.onSurface.withValues(alpha: 0.38);
+      }
+      return states.contains(WidgetState.selected)
+          ? scheme.onPrimaryContainer
+          : scheme.onSurface;
+    });
+    final chipLabel = (baseChip.labelStyle ?? const TextStyle()).copyWith(
+      color: chipLabelColor,
+    );
+    final selectedChipLabel =
+        (baseChip.secondaryLabelStyle ??
+                baseChip.labelStyle ??
+                const TextStyle())
+            .copyWith(color: chipLabelColor);
+
+    double contrast(Color a, Color b) {
+      final first = a.computeLuminance();
+      final second = b.computeLuminance();
+      final lighter = first > second ? first : second;
+      final darker = first < second ? first : second;
+      return (lighter + 0.05) / (darker + 0.05);
+    }
+
+    Color visibleBorder(Color preferred) =>
+        contrast(preferred, fieldColor) >= 3 &&
+            contrast(preferred, panelColor) >= 3
+        ? preferred
+        : scheme.onSurface;
+
+    InputBorder readerBorder(InputBorder? original, Color color, double width) {
+      final border = original == null || original == InputBorder.none
+          ? const OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(14)),
+            )
+          : original;
+      return border.copyWith(
+        borderSide: BorderSide(color: color, width: width),
+      );
+    }
+
+    final baseInput = base.inputDecorationTheme;
+    final focusColor = visibleBorder(scheme.primary);
+    final errorColor = visibleBorder(scheme.error);
+    final basePopup = base.popupMenuTheme;
     return base.copyWith(
       colorScheme: scheme,
       scaffoldBackgroundColor: backgroundColor,
@@ -233,11 +281,74 @@ extension ReaderThemeColors on ReaderThemePreset {
                 .copyWith(color: mutedTextColor),
       ),
       iconTheme: base.iconTheme.copyWith(color: mutedTextColor),
-      inputDecorationTheme: base.inputDecorationTheme.copyWith(
+      chipTheme: ChipThemeData(
+        backgroundColor: scheme.surfaceContainer,
+        selectedColor: scheme.primaryContainer,
+        secondarySelectedColor: scheme.primaryContainer,
+        disabledColor: scheme.surfaceContainer,
+        deleteIconColor: scheme.onSurfaceVariant,
+        shadowColor: baseChip.shadowColor,
+        surfaceTintColor: Colors.transparent,
+        selectedShadowColor: baseChip.selectedShadowColor,
+        showCheckmark: baseChip.showCheckmark,
+        checkmarkColor: scheme.onPrimaryContainer,
+        labelPadding: baseChip.labelPadding,
+        padding: baseChip.padding,
+        side: BorderSide(color: scheme.outline),
+        shape: baseChip.shape,
+        labelStyle: chipLabel,
+        secondaryLabelStyle: selectedChipLabel,
+        brightness: scheme.brightness,
+        elevation: baseChip.elevation,
+        pressElevation: baseChip.pressElevation,
+        iconTheme: baseChip.iconTheme,
+        avatarBoxConstraints: baseChip.avatarBoxConstraints,
+        deleteIconBoxConstraints: baseChip.deleteIconBoxConstraints,
+      ),
+      popupMenuTheme: basePopup.copyWith(
+        color: panelColor,
+        surfaceTintColor: Colors.transparent,
+        iconColor: scheme.onSurfaceVariant,
+        textStyle:
+            (basePopup.textStyle ??
+                    base.textTheme.titleMedium ??
+                    const TextStyle())
+                .copyWith(color: scheme.onSurface),
+        labelTextStyle: WidgetStateProperty.resolveWith((states) {
+          final style =
+              basePopup.labelTextStyle?.resolve(states) ??
+              base.textTheme.labelLarge ??
+              const TextStyle();
+          return style.copyWith(
+            color: states.contains(WidgetState.disabled)
+                ? scheme.onSurface.withValues(alpha: 0.38)
+                : scheme.onSurface,
+          );
+        }),
+      ),
+      inputDecorationTheme: baseInput.copyWith(
         fillColor: fieldColor,
         hintStyle: TextStyle(color: mutedTextColor),
         prefixIconColor: mutedTextColor,
         suffixIconColor: mutedTextColor,
+        focusedBorder: readerBorder(
+          baseInput.focusedBorder ?? baseInput.border,
+          focusColor,
+          2,
+        ),
+        errorBorder: readerBorder(
+          baseInput.errorBorder ?? baseInput.border,
+          errorColor,
+          1,
+        ),
+        focusedErrorBorder: readerBorder(
+          baseInput.focusedErrorBorder ??
+              baseInput.errorBorder ??
+              baseInput.focusedBorder ??
+              baseInput.border,
+          errorColor,
+          2,
+        ),
       ),
       dividerColor: borderColor,
       sliderTheme: base.sliderTheme.copyWith(

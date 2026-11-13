@@ -222,8 +222,13 @@ class _NovelBookPageState extends State<NovelBookPage> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _Cover(_book, width: 94),
-              const SizedBox(width: 22),
+              _Cover(
+                _book,
+                width: MediaQuery.textScalerOf(context).scale(14) > 21
+                    ? 76
+                    : 94,
+              ),
+              const SizedBox(width: 20),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -254,7 +259,11 @@ class _NovelBookPageState extends State<NovelBookPage> {
                         if (_detail?.creationStatus == 0) '已完结',
                         if (_detail?.creationStatus == 1) '连载中',
                       ].join(' · '),
-                      style: const TextStyle(fontSize: 12, height: 1.7),
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.7,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
                     ),
                   ],
                 ),
@@ -309,29 +318,45 @@ class _NovelBookPageState extends State<NovelBookPage> {
             ],
           ),
           const SizedBox(height: 24),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.star_outline),
-            title: Text(
-              _detail?.score.isNotEmpty == true
-                  ? '${_detail!.score} 分'
-                  : _book.score != null
-                  ? '${_book.score} 分'
-                  : '暂无评分',
+          Material(
+            color: Theme.of(context).colorScheme.surfaceContainerLow,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
             ),
-            subtitle: const Text('查看真实读者书评'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: _reviews,
-          ),
-          ListTile(
-            key: const ValueKey('detail-directory'),
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.list),
-            title: Text('目录 · ${_chapters.length} 章'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: _directory,
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  leading: const Icon(Icons.star_outline),
+                  title: Text(
+                    _detail?.score.isNotEmpty == true
+                        ? '${_detail!.score} 分'
+                        : _book.score != null
+                        ? '${_book.score} 分'
+                        : '暂无评分',
+                  ),
+                  subtitle: const Text('查看真实读者书评'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _reviews,
+                ),
+                const Divider(height: 1, indent: 56, endIndent: 16),
+                ListTile(
+                  key: const ValueKey('detail-directory'),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  leading: const Icon(Icons.list),
+                  title: Text('目录 · ${_chapters.length} 章'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _directory,
+                ),
+              ],
+            ),
           ),
           NovelDownloadProgressList(bookId: _book.id),
+          const SizedBox(height: 24),
           const Text(
             '简介',
             style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
@@ -343,7 +368,7 @@ class _NovelBookPageState extends State<NovelBookPage> {
                 : (_book.intro.isNotEmpty
                       ? _book.intro
                       : (_loading ? '正在加载书籍信息…' : '暂无简介')),
-            style: const TextStyle(fontSize: 15, height: 1.9),
+            style: const TextStyle(fontSize: 16, height: 1.85),
             maxLines: _expandedIntro ? null : 5,
             overflow: _expandedIntro
                 ? TextOverflow.visible
@@ -382,14 +407,23 @@ class _NovelBookPageState extends State<NovelBookPage> {
         ],
       ),
     ),
-    bottomNavigationBar: SafeArea(
-      top: false,
-      minimum: const EdgeInsets.fromLTRB(24, 12, 24, 14),
-      child: FilledButton.icon(
-        key: const ValueKey('start-reading'),
-        onPressed: _opening || (_loading && _chapters.isEmpty) ? null : _read,
-        icon: const Icon(Icons.auto_stories_outlined),
-        label: Text(_opening ? '正在打开…' : '开始 / 继续阅读'),
+    bottomNavigationBar: Material(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      child: SafeArea(
+        top: false,
+        minimum: const EdgeInsets.fromLTRB(24, 12, 24, 14),
+        child: FilledButton.icon(
+          key: const ValueKey('start-reading'),
+          onPressed: _opening || (_loading && _chapters.isEmpty) ? null : _read,
+          icon: _opening
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.auto_stories_outlined),
+          label: Text(_opening ? '正在打开…' : '阅读本书'),
+        ),
       ),
     ),
   );
