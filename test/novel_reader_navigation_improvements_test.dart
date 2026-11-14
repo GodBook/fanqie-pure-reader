@@ -542,7 +542,17 @@ Future<void> _openNewNote(WidgetTester tester) async {
   await pumpUntilReader(tester, paragraph);
   await tester.longPress(paragraph.first);
   await tester.pumpAndSettle();
-  await tester.tap(find.byKey(const ValueKey('reader-action-note')));
+  final wholeParagraph = find.byKey(
+    const ValueKey('reader-action-select-paragraph'),
+  );
+  if (wholeParagraph.evaluate().isNotEmpty) {
+    await tester.ensureVisible(wholeParagraph);
+    await tester.tap(wholeParagraph);
+    await tester.pumpAndSettle();
+  }
+  final note = find.byKey(const ValueKey('reader-action-note'));
+  await tester.ensureVisible(note);
+  await tester.tap(note);
   await tester.pumpAndSettle();
 }
 

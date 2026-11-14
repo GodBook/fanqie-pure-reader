@@ -15,6 +15,7 @@
 import 'package:flutter/cupertino.dart';
 
 import '../../services/reader_device.dart';
+import '../../services/novel_book_progress.dart';
 import '../../services/reader_preferences.dart';
 import 'reader_theme.dart';
 
@@ -110,7 +111,7 @@ class ReaderStatusBar extends StatelessWidget {
                 ),
               Expanded(
                 child: Text(
-                  '全书 ${(progress.clamp(0, 1) * 100).toStringAsFixed(1)}%',
+                  '全书 ${novelBookProgressPercent(progress, compact: false)}%',
                   key: const ValueKey('reader-progress'),
                   textAlign: TextAlign.end,
                   style: textStyle,

@@ -8,6 +8,7 @@
 // GlassOverlaySurface is the shared port and uses the reader's Theme.
 // Arrow tips are omitted, as in the upstream selection toolbar.
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart' show Scrollbar;
 
 import '../wenku/wenku_ui.dart';
 
@@ -20,6 +21,9 @@ enum ReaderParagraphAction {
   bookmark,
   note,
   missedChange,
+  translate,
+  dictionary,
+  selectParagraph,
 }
 
 /// Floating action bar for a long-pressed paragraph or a dragged selection.
@@ -31,8 +35,8 @@ enum ReaderParagraphAction {
 class ReaderParagraphMenu extends StatelessWidget {
   /// Width reserved for one action in the anchor maths. The item itself is
   /// centred inside this slot so the bar width matches [resolvePosition].
-  static const _itemWidth = 100.0;
-  static const _itemHeight = 44.0;
+  static const _itemWidth = 80.0;
+  static const _itemHeight = 48.0;
   static const _iconSize = 20.0;
   static const _labelSize = 14.0;
 
@@ -55,6 +59,8 @@ class ReaderParagraphMenu extends StatelessWidget {
   final bool showBookmark;
   final bool showNote;
   final bool showAi;
+  final bool showTextTools;
+  final bool showSelectParagraph;
   final double? maxWidth;
 
   /// True when the bar sits below the touched line. Kept because the reader
@@ -77,6 +83,8 @@ class ReaderParagraphMenu extends StatelessWidget {
     this.showBookmark = false,
     this.showNote = false,
     this.showAi = false,
+    this.showTextTools = false,
+    this.showSelectParagraph = false,
     this.maxWidth,
     this.belowAnchor = true,
   });
@@ -89,12 +97,16 @@ class ReaderParagraphMenu extends StatelessWidget {
     bool showBookmark = false,
     bool showNote = false,
     bool showAi = false,
+    bool showTextTools = false,
+    bool showSelectParagraph = false,
   }) {
     final base = paragraphScoped ? (showListening ? 3 : 2) : 2;
     return base +
         (showBookmark ? 1 : 0) +
         (showNote ? 1 : 0) +
-        (showAi ? 1 : 0);
+        (showAi ? 1 : 0) +
+        (showTextTools ? 2 : 0) +
+        (showSelectParagraph ? 1 : 0);
   }
 
   /// Clamped top-left for the bar anchored at [anchor] (window coordinates),
@@ -119,6 +131,8 @@ class ReaderParagraphMenu extends StatelessWidget {
     bool showBookmark = false,
     bool showNote = false,
     bool showAi = false,
+    bool showTextTools = false,
+    bool showSelectParagraph = false,
     double avoidBottom = 0,
   }) {
     const flipClearance = 10.0;
@@ -129,6 +143,8 @@ class ReaderParagraphMenu extends StatelessWidget {
       showBookmark: showBookmark,
       showNote: showNote,
       showAi: showAi,
+      showTextTools: showTextTools,
+      showSelectParagraph: showSelectParagraph,
     );
     final barWidth = (count * _itemWidth + _multiPadding * 2).clamp(
       0.0,
@@ -169,64 +185,113 @@ class ReaderParagraphMenu extends StatelessWidget {
         color: isDark ? const Color(0xFF252525) : const Color(0xFFFAF9F6),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: _multiPadding),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (paragraphScoped && showListening)
-                  _Item(
-                    key: const ValueKey('reader-action-listen'),
-                    icon: CupertinoIcons.headphones,
-                    label: '从本段听',
-                    onTap: () => onAction(ReaderParagraphAction.listen),
-                  ),
+          child: _SelectionActions(
+            children: [
+              if (paragraphScoped && showListening)
                 _Item(
-                  key: const ValueKey('reader-action-copy'),
-                  icon: CupertinoIcons.doc_on_doc,
-                  label: '复制',
-                  onTap: () => onAction(ReaderParagraphAction.copy),
+                  key: const ValueKey('reader-action-listen'),
+                  icon: CupertinoIcons.headphones,
+                  label: '从本段听',
+                  onTap: () => onAction(ReaderParagraphAction.listen),
                 ),
-                if (showBookmark)
-                  _Item(
-                    key: const ValueKey('reader-action-bookmark'),
-                    icon: CupertinoIcons.bookmark,
-                    label: '书签',
-                    onTap: () => onAction(ReaderParagraphAction.bookmark),
-                  ),
-                if (showAi)
-                  _Item(
-                    key: const ValueKey('reader-action-missed'),
-                    icon: CupertinoIcons.sparkles,
-                    label: '漏改了',
-                    onTap: () => onAction(ReaderParagraphAction.missedChange),
-                  ),
+              _Item(
+                key: const ValueKey('reader-action-copy'),
+                icon: CupertinoIcons.doc_on_doc,
+                label: '复制',
+                onTap: () => onAction(ReaderParagraphAction.copy),
+              ),
+              if (showTextTools) _underlineItem(),
+              if (showTextTools && showNote) _noteItem(),
+              if (showTextTools)
                 _Item(
-                  key: const ValueKey('reader-action-underline'),
-                  icon: underlined
-                      ? CupertinoIcons.delete
-                      : CupertinoIcons.pencil,
-                  label: underlined
-                      ? (paragraphScoped ? '取消划线' : '删除划线')
-                      : '划线',
-                  onTap: () => onAction(
-                    underlined
-                        ? ReaderParagraphAction.removeUnderline
-                        : ReaderParagraphAction.underline,
-                  ),
+                  key: const ValueKey('reader-action-dictionary'),
+                  icon: CupertinoIcons.book,
+                  label: '查词',
+                  onTap: () => onAction(ReaderParagraphAction.dictionary),
                 ),
-                if (showNote)
-                  _Item(
-                    key: const ValueKey('reader-action-note'),
-                    icon: CupertinoIcons.square_pencil,
-                    label: '笔记',
-                    onTap: () => onAction(ReaderParagraphAction.note),
-                  ),
-              ],
-            ),
+              if (showTextTools)
+                _Item(
+                  key: const ValueKey('reader-action-translate'),
+                  icon: CupertinoIcons.globe,
+                  label: '翻译',
+                  onTap: () => onAction(ReaderParagraphAction.translate),
+                ),
+              if (showSelectParagraph)
+                _Item(
+                  key: const ValueKey('reader-action-select-paragraph'),
+                  icon: CupertinoIcons.text_alignleft,
+                  label: '整段',
+                  onTap: () => onAction(ReaderParagraphAction.selectParagraph),
+                ),
+              if (showBookmark)
+                _Item(
+                  key: const ValueKey('reader-action-bookmark'),
+                  icon: CupertinoIcons.bookmark,
+                  label: '书签',
+                  onTap: () => onAction(ReaderParagraphAction.bookmark),
+                ),
+              if (showAi)
+                _Item(
+                  key: const ValueKey('reader-action-missed'),
+                  icon: CupertinoIcons.sparkles,
+                  label: '漏改了',
+                  onTap: () => onAction(ReaderParagraphAction.missedChange),
+                ),
+              if (!showTextTools) _underlineItem(),
+              if (!showTextTools && showNote) _noteItem(),
+            ],
           ),
         ),
       ),
+    ),
+  );
+
+  Widget _underlineItem() => _Item(
+    key: const ValueKey('reader-action-underline'),
+    icon: underlined ? CupertinoIcons.delete : CupertinoIcons.pencil,
+    label: underlined ? (paragraphScoped ? '取消划线' : '删除划线') : '划线',
+    onTap: () => onAction(
+      underlined
+          ? ReaderParagraphAction.removeUnderline
+          : ReaderParagraphAction.underline,
+    ),
+  );
+
+  Widget _noteItem() => _Item(
+    key: const ValueKey('reader-action-note'),
+    icon: CupertinoIcons.square_pencil,
+    label: '笔记',
+    onTap: () => onAction(ReaderParagraphAction.note),
+  );
+}
+
+class _SelectionActions extends StatefulWidget {
+  const _SelectionActions({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  State<_SelectionActions> createState() => _SelectionActionsState();
+}
+
+class _SelectionActionsState extends State<_SelectionActions> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scrollbar(
+    controller: _controller,
+    thumbVisibility: true,
+    thickness: 3,
+    child: SingleChildScrollView(
+      controller: _controller,
+      scrollDirection: Axis.horizontal,
+      child: Row(mainAxisSize: MainAxisSize.min, children: widget.children),
     ),
   );
 }

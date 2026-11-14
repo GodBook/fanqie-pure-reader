@@ -648,6 +648,9 @@ extension _ReaderPageBuild on _ReaderPageState {
           chapterIndex: _index,
           chapterTitle: _chapter.title,
           fraction: _chapterLocalFraction,
+          bookProgress: widget.novelOnly && _progressReady && !_loading
+              ? _chapterProgress()
+              : null,
           animation: _settingsPreviewActive
               ? const AlwaysStoppedAnimation(0)
               : _chrome,

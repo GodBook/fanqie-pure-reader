@@ -11,6 +11,47 @@ typedef NovelRankBoardLoader =
       int startAt,
       BackendRequest request,
     );
+typedef NovelRankScoreLoader =
+    Future<double?> Function(String bookId, BackendRequest request);
+
+const _rankScoreFreshFor = Duration(hours: 1);
+const _rankScoreCacheLimit = 512;
+final _rankScoreCache = <String, ({double score, int fetchedAt})>{};
+
+bool _rankScoreIsFresh(int fetchedAt) {
+  final age = DateTime.now().millisecondsSinceEpoch - fetchedAt;
+  return age >= 0 && age <= _rankScoreFreshFor.inMilliseconds;
+}
+
+void _rememberRankScore(RankEntry entry, {required int fallbackTime}) {
+  final score = entry.validScore;
+  final fetchedAt = entry.scoreFetchedAt ?? fallbackTime;
+  if (score == null || !_rankScoreIsFresh(fetchedAt)) return;
+  final previous = _rankScoreCache[entry.id];
+  if (previous != null && previous.fetchedAt > fetchedAt) return;
+  _rankScoreCache.remove(entry.id);
+  _rankScoreCache[entry.id] = (score: score, fetchedAt: fetchedAt);
+  while (_rankScoreCache.length > _rankScoreCacheLimit) {
+    _rankScoreCache.remove(_rankScoreCache.keys.first);
+  }
+}
+
+RankEntry _rankEntryWithCachedScore(RankEntry entry) {
+  if (entry.validScore != null) {
+    _rememberRankScore(
+      entry,
+      fallbackTime: DateTime.now().millisecondsSinceEpoch,
+    );
+    return entry;
+  }
+  final cached = _rankScoreCache[entry.id];
+  if (cached == null) return entry;
+  if (!_rankScoreIsFresh(cached.fetchedAt)) {
+    _rankScoreCache.remove(entry.id);
+    return entry;
+  }
+  return entry.withScore(cached.score, fetchedAt: cached.fetchedAt);
+}
 
 Future<void>? _rankCacheWarmup;
 Future<void> _warmNovelRankCache() => _rankCacheWarmup ??= () async {
@@ -48,16 +89,31 @@ Future<RankBoard> _novelRankBoard(
   );
 }
 
+Future<double?> _novelRankScore(String bookId, BackendRequest request) async {
+  await NovelRuntime.ensureOnline();
+  final detail = await ApiClient.instance.withCancellation(
+    request,
+    () => ApiClient.instance.bookDetail(bookId),
+  );
+  if (detail.bookId != bookId) return null;
+  final score = detail.scoreValue;
+  return score != null && score.isFinite && score > 0 && score <= 10
+      ? score
+      : null;
+}
+
 /// Independent novel-only view; the upstream rank page opens mixed media.
 class NovelRankings extends StatefulWidget {
   const NovelRankings({
     super.key,
     this.catalogLoader,
     this.boardLoader,
+    this.scoreLoader,
     this.cache,
   });
   final NovelRankCatalogLoader? catalogLoader;
   final NovelRankBoardLoader? boardLoader;
+  final NovelRankScoreLoader? scoreLoader;
   final RankCache? cache;
   @override
   State<NovelRankings> createState() => _NovelRankingsState();
@@ -73,6 +129,14 @@ class _NovelRankingsState extends State<NovelRankings> {
   String? _error;
   DateTime? _cachedAt;
   BackendRequest? _request;
+  BackendRequest? _scoreRequest;
+  // Pagination cancels in-flight loads, which must remain eligible to retry.
+  final _completedScoreAttempts = <String>{};
+  RankBoard? _firstPage;
+  ({String rankId, int algo, int categoryId})? _firstPageKey;
+  Timer? _scoreSaveTimer;
+  void Function()? _pendingScoreSave;
+  Future<void> _saveTail = Future.value();
   final _scroll = ScrollController();
   RankCache get _cache => widget.cache ?? RankCache.instance;
   List<RankCategory> get _categories => _catalog.categories.isEmpty
@@ -108,6 +172,117 @@ class _NovelRankingsState extends State<NovelRankings> {
       )
       .toList(growable: false);
 
+  void _enqueueBoardSave(
+    RankCache cache,
+    ({String rankId, int algo, int categoryId}) key,
+    RankBoard board,
+  ) {
+    _saveTail = _saveTail.then((_) async {
+      try {
+        await cache.saveBoard(
+          rankId: key.rankId,
+          algo: key.algo,
+          categoryId: key.categoryId,
+          board: board,
+        );
+      } catch (_) {}
+    });
+  }
+
+  void _flushScoreSave() {
+    _scoreSaveTimer?.cancel();
+    _scoreSaveTimer = null;
+    final save = _pendingScoreSave;
+    _pendingScoreSave = null;
+    save?.call();
+  }
+
+  void _scheduleScoreSave() {
+    final board = _firstPage;
+    final key = _firstPageKey;
+    if (board == null || key == null) return;
+    final cache = _cache;
+    _scoreSaveTimer?.cancel();
+    _pendingScoreSave = () => _enqueueBoardSave(cache, key, board);
+    _scoreSaveTimer = Timer(const Duration(milliseconds: 500), _flushScoreSave);
+  }
+
+  void _scheduleScoreLoads(int generation) {
+    final loader =
+        widget.scoreLoader ??
+        (widget.boardLoader == null ? _novelRankScore : null);
+    if (loader == null) return;
+    final ids = [
+      for (final entry in _entries)
+        if (entry.validScore == null &&
+            !_completedScoreAttempts.contains(entry.id))
+          entry.id,
+    ];
+    if (ids.isEmpty) return;
+    final request = _scoreRequest = BackendRequest();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _generation || request.isCancelled) return;
+      var next = 0;
+      Future<void> worker() async {
+        while (mounted && generation == _generation && !request.isCancelled) {
+          if (next >= ids.length) return;
+          final id = ids[next++];
+          try {
+            final score = await loader(id, request);
+            if (!mounted || generation != _generation || request.isCancelled) {
+              return;
+            }
+            _completedScoreAttempts.add(id);
+            if (score == null || !score.isFinite || score <= 0 || score > 10) {
+              continue;
+            }
+            final index = _entries.indexWhere((entry) => entry.id == id);
+            if (index < 0 || _entries[index].validScore != null) continue;
+            final fetchedAt = DateTime.now().millisecondsSinceEpoch;
+            final updated = _entries[index].withScore(
+              score,
+              fetchedAt: fetchedAt,
+            );
+            _rememberRankScore(updated, fallbackTime: fetchedAt);
+            var firstPageChanged = false;
+            setState(() {
+              _entries = List.of(_entries)..[index] = updated;
+              final firstPage = _firstPage;
+              if (firstPage != null &&
+                  _novelEntries(
+                    firstPage.entries,
+                  ).any((entry) => entry.id == id)) {
+                firstPageChanged = true;
+                _firstPage = RankBoard(
+                  entries: [
+                    for (final entry in firstPage.entries)
+                      if (entry.id == id && _novelEntries([entry]).isNotEmpty)
+                        entry.withScore(score, fetchedAt: fetchedAt)
+                      else
+                        entry,
+                  ],
+                  hasMore: firstPage.hasMore,
+                );
+              }
+            });
+            if (firstPageChanged) _scheduleScoreSave();
+          } catch (_) {
+            if (!mounted || generation != _generation || request.isCancelled) {
+              return;
+            }
+            _completedScoreAttempts.add(id);
+            // A failed optional detail request leaves this book unrated;
+            // re-entering or refreshing the board can retry it.
+          }
+        }
+      }
+
+      for (var index = 0; index < 2 && index < ids.length; index++) {
+        unawaited(worker());
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -126,6 +301,8 @@ class _NovelRankingsState extends State<NovelRankings> {
   Future<void> _bootstrap() async {
     final generation = ++_generation;
     _request?.cancel();
+    _scoreRequest?.cancel();
+    _flushScoreSave();
     final request = _request = BackendRequest();
     setState(() {
       _loading = true;
@@ -145,6 +322,7 @@ class _NovelRankingsState extends State<NovelRankings> {
       if (catalog.rankId.isEmpty || _novelTabs(catalog).isEmpty) {
         throw StateError('榜单目录不可用');
       }
+      if (!mounted || generation != _generation || request.isCancelled) return;
       unawaited(_cache.saveCatalog(catalog));
     } catch (_) {
       failed = true;
@@ -174,6 +352,9 @@ class _NovelRankingsState extends State<NovelRankings> {
     if (_loading && !reset) return;
     final generation = ++_generation;
     _request?.cancel();
+    _scoreRequest?.cancel();
+    _flushScoreSave();
+    if (reset) _completedScoreAttempts.clear();
     final request = _request = BackendRequest();
     final rankId = _catalog.rankId, algo = _tab.algo, category = _categoryId;
     final snapshot = reset
@@ -181,6 +362,14 @@ class _NovelRankingsState extends State<NovelRankings> {
         : null;
     if (reset) {
       _entries = snapshot == null ? [] : _novelEntries(snapshot.board.entries);
+      _firstPage = snapshot?.board;
+      _firstPageKey = (rankId: rankId, algo: algo, categoryId: category);
+      if (snapshot != null) {
+        final fallbackTime = snapshot.savedAt.millisecondsSinceEpoch;
+        for (final entry in _entries) {
+          _rememberRankScore(entry, fallbackTime: fallbackTime);
+        }
+      }
       _offset = snapshot?.board.entries.length ?? 0;
       _hasMore = snapshot?.board.hasMore ?? false;
       _cachedAt = snapshot?.savedAt;
@@ -204,7 +393,11 @@ class _NovelRankingsState extends State<NovelRankings> {
       // The existing parser maps malformed payloads to an empty board. Treat
       // that ambiguity as retryable instead of claiming a verified empty list.
       if (page.entries.isEmpty) throw StateError('榜单数据暂不可用');
-      final selected = _novelEntries(page.entries);
+      final originals = _novelEntries(page.entries);
+      final enhanced = <RankEntry, RankEntry>{
+        for (final entry in originals) entry: _rankEntryWithCachedScore(entry),
+      };
+      final selected = [for (final entry in originals) enhanced[entry]!];
       if (widget.boardLoader == null) {
         _rememberNovelBooks(selected.map((entry) => entry.toMediaItem()));
       }
@@ -220,15 +413,13 @@ class _NovelRankingsState extends State<NovelRankings> {
         _cachedAt = null;
       });
       if (reset) {
-        unawaited(
-          _cache.saveBoard(
-            rankId: rankId,
-            algo: algo,
-            categoryId: category,
-            board: page,
-          ),
+        _firstPage = RankBoard(
+          entries: [for (final entry in page.entries) enhanced[entry] ?? entry],
+          hasMore: page.hasMore,
         );
+        _enqueueBoardSave(_cache, _firstPageKey!, _firstPage!);
       }
+      _scheduleScoreLoads(generation);
     } catch (_) {
       if (mounted && generation == _generation) {
         setState(() => _error = '榜单数据暂不可用，请重试');
@@ -243,6 +434,8 @@ class _NovelRankingsState extends State<NovelRankings> {
   @override
   void dispose() {
     _request?.cancel();
+    _scoreRequest?.cancel();
+    _flushScoreSave();
     ++_generation;
     _scroll.dispose();
     super.dispose();
@@ -332,35 +525,47 @@ class _NovelRankingsState extends State<NovelRankings> {
                 )
               else
                 Expanded(
-                  child: ListView.builder(
-                    controller: _scroll,
-                    itemCount: _entries.length + 1,
-                    itemBuilder: (context, index) {
-                      if (index == _entries.length) {
-                        return _BottomLoader(
-                          loading: _loading,
-                          hasMore: _hasMore,
-                          error: _error,
-                          onMore: () => _loadBoard(reset: _cachedAt != null),
-                        );
-                      }
-                      final entry = _entries[index];
-                      return Row(
-                        key: ValueKey('novel-rank-${entry.id}'),
-                        children: [
-                          SizedBox(
-                            width: 48,
-                            child: Center(
-                              child: Text(
-                                '${entry.position}',
-                                style: Theme.of(context).textTheme.titleMedium,
+                  child: RefreshIndicator(
+                    onRefresh: () => _loadBoard(reset: true),
+                    child: ListView.builder(
+                      controller: _scroll,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      itemCount: _entries.length + 1,
+                      itemBuilder: (context, index) {
+                        if (index == _entries.length) {
+                          return _BottomLoader(
+                            loading: _loading,
+                            hasMore: _hasMore,
+                            error: _error,
+                            onMore: () => _loadBoard(reset: _cachedAt != null),
+                          );
+                        }
+                        final entry = _entries[index];
+                        final book = entry.toMediaItem();
+                        return Row(
+                          key: ValueKey('novel-rank-${entry.id}'),
+                          children: [
+                            SizedBox(
+                              width: 48,
+                              child: Center(
+                                child: Text(
+                                  '${entry.position}',
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.titleMedium,
+                                ),
                               ),
                             ),
-                          ),
-                          Expanded(child: _BookRow(entry.toMediaItem())),
-                        ],
-                      );
-                    },
+                            Expanded(
+                              child: _BookRow(
+                                book,
+                                subtitle: book.score == null ? '暂无评分' : null,
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
                   ),
                 ),
             ],

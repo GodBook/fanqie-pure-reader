@@ -23,6 +23,7 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter analyze --no-pub
+      - run: flutter test --no-pub test/novel_book_progress_test.dart test/novel_rank_score_test.dart test/rank_cache_test.dart test/novel_reading_reports_test.dart test/novel_reader_selection_lookup_test.dart test/reader_paragraph_actions_test.dart test/reader_ai_merge_test.dart
       - run: flutter test --no-pub test/reader_ideas_viewport_regression_test.dart test/novel_personal_recommendations_test.dart test/novel_personalization_api_test.dart test/novel_search_matcher_test.dart test/novel_search_catalog_test.dart test/novel_search_matching_ui_test.dart test/novel_personal_search_ui_test.dart
       - run: flutter test --no-pub test/chapter_cache_store_test.dart test/novel_ideas_loading_test.dart test/reader_bookmarks_and_find_test.dart test/reader_preferences_test.dart test/reading_stats_test.dart
       - run: flutter test --no-pub test/novel_feature_backup_test.dart test/novel_feature_pages_test.dart test/novel_local_transfer_test.dart test/novel_local_reader_isolation_test.dart test/novel_reader_sheet_safe_area_test.dart test/novel_discovery_extensions_test.dart test/novel_reader_research_features_test.dart test/novel_shelf_download_queue_test.dart test/novel_download_responsive_test.dart test/novel_space_usage_test.dart test/rank_test.dart test/imported_book_store_test.dart test/imported_book_manifest_cache_test.dart

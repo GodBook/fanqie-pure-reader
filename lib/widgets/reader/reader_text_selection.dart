@@ -124,6 +124,80 @@ int snapToCharacter(String text, int offset) {
   return consumed <= target ? text.length : boundary;
 }
 
+/// The next/previous complete grapheme in a chapter's selectable body.
+/// Paragraph separators and image placeholders are skipped as destinations.
+int nextReaderCharacterBoundary(ReaderChapterLayout layout, int offset) {
+  for (final block in layout.blocks) {
+    if (block.isTitle || block.isImage || block.end <= offset) continue;
+    final local = math.max(0, offset - block.start);
+    var end = 0;
+    for (final character in block.text.characters) {
+      end += character.length;
+      if (end > local) return block.start + end;
+    }
+  }
+  return layout.selectableTextRange?.$2 ?? offset;
+}
+
+int previousReaderCharacterBoundary(ReaderChapterLayout layout, int offset) {
+  for (final block in layout.blocks.reversed) {
+    if (block.isTitle || block.isImage || block.start >= offset) continue;
+    final local = math.min(block.text.length, offset - block.start);
+    var start = 0;
+    for (final character in block.text.characters) {
+      final end = start + character.length;
+      if (end >= local) return block.start + start;
+      start = end;
+    }
+  }
+  return layout.selectableTextRange?.$1 ?? offset;
+}
+
+/// Retains the original opposite endpoint as a finger crosses a selection.
+class ReaderSelectionDrag {
+  ReaderSelectionDrag(ReaderTextSelection selection, {required this.isStart})
+    : anchor = isStart ? selection.end : selection.start,
+      movingIsStart = isStart;
+
+  final int anchor;
+  final bool isStart;
+  bool movingIsStart;
+
+  bool get crossed => movingIsStart != isStart;
+
+  ReaderTextSelection update({
+    required int offset,
+    required int Function(int) previousBoundary,
+    required int Function(int) nextBoundary,
+  }) {
+    if (offset < anchor) {
+      movingIsStart = true;
+      return ReaderTextSelection(start: offset, end: anchor);
+    }
+    if (offset > anchor) {
+      movingIsStart = false;
+      return ReaderTextSelection(start: anchor, end: offset);
+    }
+    // Never split a surrogate pair or combining sequence when the endpoints
+    // meet. Prefer the original drag direction, falling back at a chapter end.
+    if (isStart) {
+      final next = nextBoundary(anchor);
+      if (next > anchor) {
+        movingIsStart = false;
+        return ReaderTextSelection(start: anchor, end: next);
+      }
+    }
+    final previous = previousBoundary(anchor);
+    if (previous < anchor) {
+      movingIsStart = true;
+      return ReaderTextSelection(start: previous, end: anchor);
+    }
+    final next = nextBoundary(anchor);
+    movingIsStart = false;
+    return ReaderTextSelection(start: anchor, end: next);
+  }
+}
+
 /// Where the selection caret attaches for the bound at block-text [offset]:
 /// the glyph edge x on that line plus the measured line's vertical extent, in
 /// the block's coordinate space. 官方画法(yd5.j.I())是贴着选区行的 1dp 竖杆
@@ -135,13 +209,18 @@ int snapToCharacter(String text, int offset) {
   required bool isStart,
   required double columnWidth,
 }) {
-  final line = lineForOffset(block, textOffset);
+  final characterStart = snapToCharacter(block.text, textOffset);
+  final characterEnd = characterStart < block.text.length
+      ? characterStart +
+            block.text.substring(characterStart).characters.first.length
+      : characterStart;
+  final line = lineForOffset(block, characterStart);
   var x = isStart ? 0.0 : columnWidth;
   final leading = block.isTitle ? 0 : 1;
   final boxes = painter.getBoxesForSelection(
     TextSelection(
-      baseOffset: textOffset + leading,
-      extentOffset: textOffset + leading + 1,
+      baseOffset: characterStart + leading,
+      extentOffset: characterEnd + leading,
     ),
     boxHeightStyle: BoxHeightStyle.tight,
   );
@@ -195,10 +274,14 @@ class ReaderSelectionEntry {
     required this.windowBottom,
   });
 
-  double distanceTo(double y) {
-    if (y < windowTop) return windowTop - y;
-    if (y > windowBottom) return y - windowBottom;
-    return 0;
+  double distanceTo(Offset local) {
+    final dx = local.dx < 0
+        ? -local.dx
+        : math.max(0.0, local.dx - box.size.width);
+    final dy = local.dy < windowTop
+        ? windowTop - local.dy
+        : math.max(0.0, local.dy - windowBottom);
+    return dx * dx + dy * dy;
   }
 }
 
@@ -209,6 +292,7 @@ class ReaderSelectionEntry {
 /// [chapterOffsetAt] picks the entry whose window holds the point.
 class ReaderSelectionGeometry {
   final List<ReaderSelectionEntry> _entries = [];
+  ReaderSelectionDrag? activeDrag;
 
   void register({required ReaderSelectionEntry entry}) {
     unregister(entry.blockIndex);
@@ -234,7 +318,7 @@ class ReaderSelectionGeometry {
     for (final entry in _entries) {
       if (!entry.box.attached) continue;
       final local = entry.box.globalToLocal(global);
-      final distance = entry.distanceTo(local.dy);
+      final distance = entry.distanceTo(local);
       if (distance < bestDistance) {
         bestDistance = distance;
         best = entry;
@@ -259,6 +343,37 @@ class ReaderSelectionGeometry {
       entry.block.text.length,
     );
     return entry.block.start + snapToCharacter(entry.block.text, textOffset);
+  }
+
+  /// Resolves the platform word boundary without changing display offsets.
+  ReaderTextSelection? wordAt(Offset global, int blockIndex) {
+    final entry = entryFor(blockIndex);
+    if (entry == null || entry.block.text.isEmpty) return null;
+    final local = entry.box.globalToLocal(global);
+    final y = local.dy
+        .clamp(0.0, math.max(0.0, entry.block.height - .01))
+        .toDouble();
+    final position = entry.painter.getPositionForOffset(Offset(local.dx, y));
+    final leading = entry.block.isTitle ? 0 : 1;
+    final word = entry.painter.getWordBoundary(position);
+    final text = entry.block.text;
+    final start = snapToCharacter(
+      text,
+      (word.start - leading).clamp(0, text.length),
+    );
+    final rawEnd = (word.end - leading).clamp(0, text.length);
+    var end = snapToCharacter(text, rawEnd);
+    if (end < rawEnd && end < text.length) {
+      end += text.substring(end).characters.first.length;
+    }
+    if (end <= start && start < text.length) {
+      end = start + text.substring(start).characters.first.length;
+    }
+    if (end <= start) return null;
+    return ReaderTextSelection(
+      start: entry.block.start + start,
+      end: entry.block.start + end,
+    );
   }
 }
 
@@ -549,7 +664,7 @@ class _ReaderBlockMarkLayerState extends State<ReaderBlockMarkLayer> {
 /// The ink never leaves the line's own row by more than the 6dp dot, so it
 /// never covers the neighbouring lines' text. The touch area is far larger
 /// than the ink, with the spare space on the far side of the line.
-class ReaderSelectionHandle extends StatelessWidget {
+class ReaderSelectionHandle extends StatefulWidget {
   final bool isStart;
   final Color color;
 
@@ -574,26 +689,68 @@ class ReaderSelectionHandle extends StatelessWidget {
   static const _caretWidth = 1.0;
 
   /// Horizontal touch/ink span; the overlay positions the widget by this.
-  static const touchWidth = 24.0;
-  static const touchMargin = 16.0;
+  static const touchWidth = 48.0;
+  static const hitInset = 8.0;
+
+  static double touchMarginFor(double lineHeight) =>
+      math.max(30.0, 42.0 - lineHeight);
 
   /// The dot protrudes 6dp beyond the line edge (centre 3dp out, radius 3).
   static const dotOverhang = _circleRadius * 2;
 
-  double get height => lineHeight + dotOverhang + touchMargin;
+  double get height => lineHeight + dotOverhang + touchMarginFor(lineHeight);
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-    behavior: HitTestBehavior.translucent,
-    onPanStart: (_) => onDragStart(),
-    onPanUpdate: (details) => onDragUpdate(details.globalPosition),
-    onPanEnd: (details) => onDragEnd(details.globalPosition),
-    child: CustomPaint(
-      size: Size(touchWidth, height),
-      painter: _CaretPainter(
-        isStart: isStart,
-        color: color,
-        lineHeight: lineHeight,
+  State<ReaderSelectionHandle> createState() => _ReaderSelectionHandleState();
+}
+
+class _ReaderSelectionHandleState extends State<ReaderSelectionHandle> {
+  Offset _dragAdjustment = Offset.zero;
+  Offset _lastGlobal = Offset.zero;
+  bool _dragStarted = false;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: widget.isStart ? '选区起点' : '选区终点',
+    hint: '拖动调整选中文字',
+    child: GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onPanDown: (details) {
+        final inkX = widget.isStart
+            ? ReaderSelectionHandle.touchWidth - ReaderSelectionHandle.hitInset
+            : ReaderSelectionHandle.hitInset;
+        final inkY =
+            (widget.isStart
+                ? ReaderSelectionHandle.dotOverhang
+                : ReaderSelectionHandle.touchMarginFor(widget.lineHeight)) +
+            widget.lineHeight / 2;
+        _dragAdjustment = Offset(inkX, inkY) - details.localPosition;
+        _lastGlobal = details.globalPosition + _dragAdjustment;
+      },
+      onPanStart: (details) {
+        _dragStarted = true;
+        _lastGlobal = details.globalPosition + _dragAdjustment;
+        widget.onDragStart();
+      },
+      onPanUpdate: (details) {
+        _lastGlobal = details.globalPosition + _dragAdjustment;
+        widget.onDragUpdate(_lastGlobal);
+      },
+      onPanEnd: (details) {
+        _dragStarted = false;
+        widget.onDragEnd(details.globalPosition + _dragAdjustment);
+      },
+      onPanCancel: () {
+        if (_dragStarted) widget.onDragEnd(_lastGlobal);
+        _dragStarted = false;
+      },
+      child: CustomPaint(
+        size: Size(ReaderSelectionHandle.touchWidth, widget.height),
+        painter: _CaretPainter(
+          isStart: widget.isStart,
+          color: widget.color,
+          lineHeight: widget.lineHeight,
+        ),
       ),
     ),
   );
@@ -605,7 +762,6 @@ class _CaretPainter extends CustomPainter {
   final double lineHeight;
 
   static const _circleRadius = ReaderSelectionHandle._circleRadius;
-  static const touchMargin = ReaderSelectionHandle.touchMargin;
 
   const _CaretPainter({
     required this.isStart,
@@ -619,18 +775,23 @@ class _CaretPainter extends CustomPainter {
     // Bar: 1dp wide along the selected line's full height. Start ink hugs the
     // top of the widget (dot above the line, touch margin below); end ink
     // hugs the bottom (touch margin above, dot below).
-    final barTop = isStart ? _circleRadius * 2 : touchMargin;
+    final barTop = isStart
+        ? _circleRadius * 2
+        : ReaderSelectionHandle.touchMarginFor(lineHeight);
     final barBottom = barTop + lineHeight;
+    final x = isStart
+        ? size.width - ReaderSelectionHandle.hitInset
+        : ReaderSelectionHandle.hitInset;
     canvas.drawLine(
-      Offset(size.width / 2, barTop),
-      Offset(size.width / 2, barBottom),
+      Offset(x, barTop),
+      Offset(x, barBottom),
       paint..strokeWidth = ReaderSelectionHandle._caretWidth,
     );
     // Dot: centre 3dp outside the line edge, tangent to it.
     final dotCentre = isStart
         ? barTop - _circleRadius
         : barBottom + _circleRadius;
-    canvas.drawCircle(Offset(size.width / 2, dotCentre), _circleRadius, paint);
+    canvas.drawCircle(Offset(x, dotCentre), _circleRadius, paint);
   }
 
   @override

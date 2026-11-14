@@ -57,6 +57,8 @@ class RankEntry {
     this.creationStatus = -1,
     this.wordNumber = 0,
     this.readCount = '',
+    this.score,
+    this.scoreFetchedAt,
     this.kind = 'book',
     this.seriesId = '',
     this.tags = const [],
@@ -73,6 +75,14 @@ class RankEntry {
   final int creationStatus;
   final int wordNumber;
   final String readCount;
+
+  /// A book rating, not the rank's popularity or algorithm score.
+  final double? score;
+
+  /// When this rating was obtained, in milliseconds since the epoch.
+  final int? scoreFetchedAt;
+
+  double? get validScore => MediaItem.fromRaw({'score': score}).score;
 
   /// 'book' | 'video' | 'manju' — mirrors MediaItem.kind. Drama-board
   /// entries open the series detail instead of the book detail.
@@ -111,8 +121,27 @@ class RankEntry {
     kind: kind,
     seriesId: seriesId.isEmpty ? null : seriesId,
     readCount: readCount,
+    score: validScore,
     creationStatus: creationStatus,
     rankTags: tags,
+  );
+
+  RankEntry withScore(double value, {required int fetchedAt}) => RankEntry(
+    position: position,
+    id: id,
+    title: title,
+    cover: cover,
+    author: author,
+    abstract: abstract,
+    category: category,
+    creationStatus: creationStatus,
+    wordNumber: wordNumber,
+    readCount: readCount,
+    score: MediaItem.fromRaw({'score': value}).score,
+    scoreFetchedAt: fetchedAt,
+    kind: kind,
+    seriesId: seriesId,
+    tags: tags,
   );
 
   Map<String, dynamic> toJson() => {
@@ -126,6 +155,9 @@ class RankEntry {
     'creationStatus': creationStatus,
     'wordNumber': wordNumber,
     'readCount': readCount,
+    if (validScore != null) 'score': validScore,
+    if (validScore != null && scoreFetchedAt != null)
+      'scoreFetchedAt': scoreFetchedAt,
     'kind': kind,
     'seriesId': seriesId,
     if (tags.isNotEmpty) 'tags': tags,
@@ -144,6 +176,10 @@ class RankEntry {
         : -1,
     wordNumber: map['wordNumber'] is int ? map['wordNumber'] as int : 0,
     readCount: map['readCount'] is String ? map['readCount'] as String : '',
+    score: MediaItem.fromRaw({'score': map['score']}).score,
+    scoreFetchedAt: map['scoreFetchedAt'] is int
+        ? map['scoreFetchedAt'] as int
+        : null,
     kind: map['kind'] is String ? map['kind'] as String : 'book',
     seriesId: map['seriesId'] is String ? map['seriesId'] as String : '',
     tags: map['tags'] is List
@@ -410,6 +446,7 @@ class RankCatalog {
     if (id.isEmpty && title.isEmpty) return null;
     final category = _string(book['category']);
     final media = _bookMediaType(book, cell);
+    final score = MediaItem.fromRaw(book).score;
     return RankEntry(
       position: position,
       id: id,
@@ -423,6 +460,10 @@ class RankCatalog {
       creationStatus: _int(book['creation_status'], fallback: -1),
       wordNumber: _int(book['word_number']),
       readCount: _string(book['read_count']),
+      score: score,
+      scoreFetchedAt: score == null
+          ? null
+          : DateTime.now().millisecondsSinceEpoch,
       kind: media.kind,
       seriesId: media.seriesId ?? (isVideoKind(media.kind) ? id : ''),
       tags: parseRankTags(book['secondary_info_list']),

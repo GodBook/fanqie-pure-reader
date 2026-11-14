@@ -268,6 +268,8 @@ mixin _ReaderPageFields on State<ReaderPage> {
   /// True while a long-press drag is reshaping the selection without the
   /// finger ever having grabbed a handle (官方不抬手拖动).
   bool _longPressDragging = false;
+  Offset? _longPressOrigin;
+  int _selectionGeneration = 0;
 
   int _underlineRevision = 0;
   int _layoutUnderlineRevision = -1;

@@ -9,6 +9,7 @@ import '../../services/reader_preferences.dart';
 import '../wenku/wenku_ui.dart';
 import 'reader_theme.dart';
 import 'reader_value_slider.dart';
+import 'novel_book_progress.dart';
 
 class ReaderChapterProgress extends StatefulWidget {
   const ReaderChapterProgress({
@@ -21,6 +22,7 @@ class ReaderChapterProgress extends StatefulWidget {
     required this.onPreviewChanged,
     this.onPrevious,
     this.onNext,
+    this.bookProgress,
   });
 
   final ReaderThemePreset preset;
@@ -31,6 +33,7 @@ class ReaderChapterProgress extends StatefulWidget {
   final ValueChanged<bool> onPreviewChanged;
   final VoidCallback? onPrevious;
   final VoidCallback? onNext;
+  final double? bookProgress;
 
   @override
   State<ReaderChapterProgress> createState() => _ReaderChapterProgressState();
@@ -101,61 +104,76 @@ class _ReaderChapterProgressState extends State<ReaderChapterProgress> {
         radius: 24,
         tintColor: widget.preset.panelColor,
         padding: const EdgeInsets.symmetric(horizontal: 6),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            GlassIconButton(
-              key: const ValueKey('reader-previous-chapter'),
-              icon: CupertinoIcons.backward_end,
-              label: '上一章',
-              liveGlass: false,
-              transparent: true,
-              haptic: HapticCue.pageTurn,
-              onPressed: widget.onPrevious,
-            ),
-            const SizedBox(width: 4),
-            Expanded(
-              child: ReaderValueSlider(
-                sliderKey: const ValueKey('reader-chrome-progress-slider'),
-                label: '本章进度',
-                inline: true,
-                showLabels: false,
-                value: widget.fraction ?? 0,
-                reconcileValue: true,
-                preset: widget.preset,
-                min: 0,
-                max: 1,
-                divisions: 500,
-                hapticSteps: 100,
-                format: (value) => '${(value * 100).round()}%',
-                onPreview: (value) {
-                  if (!mounted) return;
-                  _preview.value = value;
-                  widget.onPreview(value);
-                },
-                onCommitted: widget.fraction == null
-                    ? null
-                    : widget.onCommitted,
-                onInteractionChanged: (active) {
-                  if (!mounted) return;
-                  if (active) {
-                    _preview.value = widget.fraction ?? 0;
-                    _hint.show();
-                  } else {
-                    _hint.hide();
-                  }
-                  widget.onPreviewChanged(active);
-                },
+            if (widget.bookProgress case final value?)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: NovelBookProgress(
+                  fraction: value,
+                  foregroundColor: widget.preset.textColor,
+                  trackColor: widget.preset.borderColor,
+                  textColor: widget.preset.textColor,
+                ),
               ),
-            ),
-            const SizedBox(width: 4),
-            GlassIconButton(
-              key: const ValueKey('reader-next-chapter'),
-              icon: CupertinoIcons.forward_end,
-              label: '下一章',
-              liveGlass: false,
-              transparent: true,
-              haptic: HapticCue.pageTurn,
-              onPressed: widget.onNext,
+            Row(
+              children: [
+                GlassIconButton(
+                  key: const ValueKey('reader-previous-chapter'),
+                  icon: CupertinoIcons.backward_end,
+                  label: '上一章',
+                  liveGlass: false,
+                  transparent: true,
+                  haptic: HapticCue.pageTurn,
+                  onPressed: widget.onPrevious,
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: ReaderValueSlider(
+                    sliderKey: const ValueKey('reader-chrome-progress-slider'),
+                    label: '本章进度',
+                    inline: true,
+                    showLabels: false,
+                    value: widget.fraction ?? 0,
+                    reconcileValue: true,
+                    preset: widget.preset,
+                    min: 0,
+                    max: 1,
+                    divisions: 500,
+                    hapticSteps: 100,
+                    format: (value) => '${(value * 100).round()}%',
+                    onPreview: (value) {
+                      if (!mounted) return;
+                      _preview.value = value;
+                      widget.onPreview(value);
+                    },
+                    onCommitted: widget.fraction == null
+                        ? null
+                        : widget.onCommitted,
+                    onInteractionChanged: (active) {
+                      if (!mounted) return;
+                      if (active) {
+                        _preview.value = widget.fraction ?? 0;
+                        _hint.show();
+                      } else {
+                        _hint.hide();
+                      }
+                      widget.onPreviewChanged(active);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 4),
+                GlassIconButton(
+                  key: const ValueKey('reader-next-chapter'),
+                  icon: CupertinoIcons.forward_end,
+                  label: '下一章',
+                  liveGlass: false,
+                  transparent: true,
+                  haptic: HapticCue.pageTurn,
+                  onPressed: widget.onNext,
+                ),
+              ],
             ),
           ],
         ),

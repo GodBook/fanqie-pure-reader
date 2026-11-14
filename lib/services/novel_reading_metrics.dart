@@ -136,6 +136,140 @@ class NovelReadingMetricEntry {
   }
 }
 
+enum NovelReadingReportPeriod { month, year }
+
+class NovelReadingReportBucket {
+  const NovelReadingReportBucket({
+    required this.start,
+    required this.milliseconds,
+  });
+
+  final DateTime start;
+  final int milliseconds;
+}
+
+class NovelReadingReportBook {
+  const NovelReadingReportBook({
+    required this.bookId,
+    required this.title,
+    required this.milliseconds,
+  });
+
+  final String bookId;
+  final String title;
+  final int milliseconds;
+}
+
+/// Aggregates the persisted v1 day/book samples without estimating history.
+class NovelReadingReport {
+  NovelReadingReport._({
+    required this.period,
+    required this.start,
+    required this.milliseconds,
+    required this.activeDays,
+    required this.buckets,
+    required this.books,
+  });
+
+  factory NovelReadingReport.fromEntries({
+    required Iterable<NovelReadingMetricEntry> entries,
+    required DateTime date,
+    required NovelReadingReportPeriod period,
+  }) {
+    final isMonth = period == NovelReadingReportPeriod.month;
+    final start = isMonth
+        ? DateTime(date.year, date.month)
+        : DateTime(date.year);
+    final firstDay = novelReadingDay(start);
+    final lastDay = novelReadingDay(
+      isMonth
+          ? DateTime(date.year, date.month + 1, 0)
+          : DateTime(date.year, 12, 31),
+    );
+    final bucketCount = isMonth
+        ? DateTime(date.year, date.month + 1, 0).day
+        : 12;
+    final bucketDurations = List<int>.filled(bucketCount, 0);
+    final activeDays = <String>{};
+    final books =
+        <String, ({String title, String titleDay, int milliseconds})>{};
+    var milliseconds = 0;
+    for (final entry in entries) {
+      if (entry.milliseconds <= 0 ||
+          entry.day.compareTo(firstDay) < 0 ||
+          entry.day.compareTo(lastDay) > 0) {
+        continue;
+      }
+      final entryDate = DateTime.parse(entry.day);
+      final bucketIndex = isMonth ? entryDate.day - 1 : entryDate.month - 1;
+      bucketDurations[bucketIndex] += entry.milliseconds;
+      milliseconds += entry.milliseconds;
+      activeDays.add(entry.day);
+      final previous = books[entry.bookId];
+      final title = entry.title.trim();
+      final useTitle =
+          title.isNotEmpty &&
+          (previous == null ||
+              previous.title.isEmpty ||
+              entry.day.compareTo(previous.titleDay) > 0);
+      books[entry.bookId] = (
+        title: useTitle ? title : (previous?.title ?? ''),
+        titleDay: useTitle ? entry.day : (previous?.titleDay ?? ''),
+        milliseconds: (previous?.milliseconds ?? 0) + entry.milliseconds,
+      );
+    }
+    final rankedBooks =
+        [
+          for (final item in books.entries)
+            NovelReadingReportBook(
+              bookId: item.key,
+              title: item.value.title.isEmpty ? '未命名书籍' : item.value.title,
+              milliseconds: item.value.milliseconds,
+            ),
+        ]..sort((a, b) {
+          final byDuration = b.milliseconds.compareTo(a.milliseconds);
+          if (byDuration != 0) return byDuration;
+          final byTitle = a.title.compareTo(b.title);
+          return byTitle != 0 ? byTitle : a.bookId.compareTo(b.bookId);
+        });
+    return NovelReadingReport._(
+      period: period,
+      start: start,
+      milliseconds: milliseconds,
+      activeDays: activeDays.length,
+      buckets: List.unmodifiable([
+        for (var index = 0; index < bucketCount; index++)
+          NovelReadingReportBucket(
+            start: isMonth
+                ? DateTime(date.year, date.month, index + 1)
+                : DateTime(date.year, index + 1),
+            milliseconds: bucketDurations[index],
+          ),
+      ]),
+      books: List.unmodifiable(rankedBooks),
+    );
+  }
+
+  final NovelReadingReportPeriod period;
+  final DateTime start;
+  final int milliseconds;
+  final int activeDays;
+  final List<NovelReadingReportBucket> buckets;
+  final List<NovelReadingReportBook> books;
+}
+
+/// Presents whole seconds without displaying a positive sample as zero.
+String novelReadingDuration(int milliseconds) {
+  if (milliseconds > 0 && milliseconds < 1000) return '不足1秒';
+  final totalSeconds = milliseconds ~/ 1000;
+  final hours = totalSeconds ~/ 3600;
+  final minutes = (totalSeconds % 3600) ~/ 60;
+  final seconds = totalSeconds % 60;
+  if (hours > 0) return '$hours 小时 $minutes 分 $seconds 秒';
+  if (minutes > 0) return '$minutes 分 $seconds 秒';
+  return '$seconds 秒';
+}
+
 class NovelReadingMetricsStore {
   NovelReadingMetricsStore();
   static final instance = NovelReadingMetricsStore();

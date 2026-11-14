@@ -68,8 +68,11 @@ extension _ReaderPageSelection on _ReaderPageState {
     Offset position,
   ) async {
     if (block.isTitle || block.isImage || block.textId == null) return;
+    final selectionGeneration = ++_selectionGeneration;
     _clearLocationHighlight();
     _longPressDragging = false;
+    _longPressOrigin = position;
+    _marksScope?.geometry.activeDrag = null;
     // 选中文字,暂停自动翻页 — the official selection helper does the same
     // (selection/h.java#a).
     _stopAutoTurn();
@@ -90,13 +93,47 @@ extension _ReaderPageSelection on _ReaderPageState {
         }
       }
     }
-    final selection = ReaderTextSelection(
-      start: hit?.start ?? block.start,
-      end: hit?.end ?? block.end,
-    );
+    final word = widget.novelOnly && hit == null
+        ? _marksScope?.geometry.wordAt(position, block.index)
+        : null;
+    final selection = hit != null
+        ? ReaderTextSelection(start: hit.start, end: hit.end)
+        : word ?? ReaderTextSelection(start: block.start, end: block.end);
     _setState(() {
       _selection = selection.copyWith(
         isWholeParagraph: _isWholeParagraphSelection(selection),
+      );
+    });
+    _updateHandlePositions();
+    _openSelectionBar(anchor: position);
+    if (word == null || hit != null || !widget.novelOnly) return;
+    final initial = _selection;
+    final layout = _chapterLayout;
+    final loadGeneration = _loadGeneration;
+    final chapterId = _chapter.itemId;
+    final boundary = await ReaderWordBoundary.resolve(
+      block.text,
+      word.start - block.start,
+    );
+    if (!mounted ||
+        boundary == null ||
+        selectionGeneration != _selectionGeneration ||
+        loadGeneration != _loadGeneration ||
+        _chapter.itemId != chapterId ||
+        !identical(layout, _chapterLayout) ||
+        !identical(initial, _selection) ||
+        !_selectionBarOpen ||
+        _longPressDragging ||
+        _marksScope?.geometry.activeDrag != null) {
+      return;
+    }
+    final expanded = ReaderTextSelection(
+      start: block.start + boundary.$1,
+      end: block.start + boundary.$2,
+    );
+    _setState(() {
+      _selection = expanded.copyWith(
+        isWholeParagraph: _isWholeParagraphSelection(expanded),
       );
     });
     _updateHandlePositions();
@@ -110,13 +147,25 @@ extension _ReaderPageSelection on _ReaderPageState {
     final selection = _selection;
     if (selection == null || !selection.isValid) return;
     if (!_longPressDragging) {
+      final origin = _longPressOrigin;
+      // Tiny finger jitter (and repeated stationary move events) must not
+      // cancel an in-flight word lookup or reshape the initial selection.
+      if (widget.novelOnly &&
+          (origin == null ||
+              (global - origin).distanceSquared < kTouchSlop * kTouchSlop)) {
+        return;
+      }
       _longPressDragging = true;
-      _closeSelectionBar(clearSelection: false);
+      _onHandleDragStart(_dragIsStartBound(global));
     }
-    _onHandleDrag(_dragIsStartBound(global), global);
+    _onHandleDrag(
+      _marksScope?.geometry.activeDrag?.isStart ?? _dragIsStartBound(global),
+      global,
+    );
   }
 
   void _onParagraphLongPressEnd(Offset global) {
+    _longPressOrigin = null;
     if (!_longPressDragging) return;
     _longPressDragging = false;
     _onHandleDragEnd(false, global);
@@ -205,6 +254,7 @@ extension _ReaderPageSelection on _ReaderPageState {
     }
     final media = MediaQuery.of(context);
     final underlined = _selectionUnderlined;
+    final showSelectParagraph = widget.novelOnly && !selection.isWholeParagraph;
     var anchor = _selectionBarAnchor;
     var topAnchor = _selectionBarTopAnchor;
     var view = media.size;
@@ -255,6 +305,8 @@ extension _ReaderPageSelection on _ReaderPageState {
       showBookmark: true,
       showNote: widget.novelOnly,
       showAi: !widget.novelOnly && _currentAiView?.aiEnabled == true,
+      showTextTools: widget.novelOnly,
+      showSelectParagraph: showSelectParagraph,
       avoidBottom: avoidBottom,
     );
     return Positioned(
@@ -269,13 +321,23 @@ extension _ReaderPageSelection on _ReaderPageState {
         showNote: widget.novelOnly,
         maxWidth: (view.width - 20).clamp(0.0, double.infinity),
         showAi: !widget.novelOnly && _currentAiView?.aiEnabled == true,
+        showTextTools: widget.novelOnly,
+        showSelectParagraph: showSelectParagraph,
         isDark: preset.isDark,
         belowAnchor: below,
         onAction: (action) {
+          ++_selectionGeneration;
           unawaited(() async {
-            await _applySelectionAction(action);
-            // Every action consumes the selection, like the official bar.
-            if (mounted) _closeSelectionBar(clearSelection: true);
+            final chapterId = _chapter.itemId;
+            final generation = _loadGeneration;
+            final consumed = await _applySelectionAction(action);
+            if (consumed &&
+                mounted &&
+                _chapter.itemId == chapterId &&
+                _loadGeneration == generation &&
+                _selection == selection) {
+              _closeSelectionBar(clearSelection: true);
+            }
           }());
         },
       ),
@@ -283,7 +345,10 @@ extension _ReaderPageSelection on _ReaderPageState {
   }
 
   void _clearSelection() {
+    ++_selectionGeneration;
+    _longPressOrigin = null;
     _longPressDragging = false;
+    _marksScope?.geometry.activeDrag = null;
     if (_selection == null) return;
     _setState(() => _selection = null);
   }
@@ -314,22 +379,57 @@ extension _ReaderPageSelection on _ReaderPageState {
     );
   }
 
-  Future<void> _applySelectionAction(ReaderParagraphAction action) async {
+  Future<bool> _applySelectionAction(ReaderParagraphAction action) async {
     final selection = _selection;
     final layout = _chapterLayout;
-    if (selection == null || layout == null || !selection.isValid) return;
+    if (selection == null || layout == null || !selection.isValid) return false;
     switch (action) {
       case ReaderParagraphAction.copy:
-        await Clipboard.setData(
-          ClipboardData(
-            text: layout.textInRange(selection.start, selection.end),
-          ),
+        try {
+          await Clipboard.setData(
+            ClipboardData(
+              text: layout.textInRange(selection.start, selection.end),
+            ),
+          );
+          if (mounted) _showMessage('已复制');
+        } catch (_) {
+          if (mounted) _showMessage('复制失败，请重试');
+          return false;
+        }
+      case ReaderParagraphAction.translate:
+      case ReaderParagraphAction.dictionary:
+        final bounds = layout.selectableTextRange;
+        final error = await showReaderTextLookup(
+          _selectionOverlayKey.currentContext ?? context,
+          kind: action == ReaderParagraphAction.translate
+              ? ReaderTextLookupKind.translate
+              : ReaderTextLookupKind.dictionary,
+          text: layout.textInRange(selection.start, selection.end),
+          wholeChapter:
+              bounds != null &&
+              selection.start <= bounds.$1 &&
+              selection.end >= bounds.$2,
         );
-        if (mounted) _showMessage('已复制');
+        if (mounted && error != null) _showMessage(error);
+        return false;
+      case ReaderParagraphAction.selectParagraph:
+        final block = layout.blockForAnchor(selection.start, isStart: true);
+        if (block != null && !block.isTitle && !block.isImage) {
+          _setState(() {
+            _selection = ReaderTextSelection(
+              start: block.start,
+              end: block.end,
+              isWholeParagraph: true,
+            );
+          });
+          _updateHandlePositions();
+          _openSelectionBar(anchor: _selectionBarAnchor);
+        }
+        return false;
       case ReaderParagraphAction.listen:
         final block = layout.blockAtOffset(selection.start);
         final textId = block?.textId;
-        if (block == null || textId == null) return;
+        if (block == null || textId == null) return false;
         await _openListening(fromMs: block.startMs, textId: textId);
       case ReaderParagraphAction.bookmark:
         try {
@@ -397,6 +497,7 @@ extension _ReaderPageSelection on _ReaderPageState {
       case ReaderParagraphAction.missedChange:
         await _markMissedSelection();
     }
+    return true;
   }
 
   Future<void> _markMissedSelection() async {

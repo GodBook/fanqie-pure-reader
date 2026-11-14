@@ -141,6 +141,7 @@ kotlin {
     sourceSets.named("main") {
         kotlin.setIncludes(listOf(
             "**/MainActivity.kt", "**/ReaderDevicePlugin.kt",
+            "**/ReaderWordBoundaryPlugin.kt",
             "**/ReaderBrightnessSession.kt", "**/ReaderSystemBarsSession.kt",
             "**/NativeGestureLevels.kt",
             "**/RendererCompatibility.kt", "**/EinkRefreshPlugin.kt",

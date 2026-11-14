@@ -35,6 +35,7 @@ class ReaderControls extends StatelessWidget {
     this.onDownload,
     this.aiLabel = 'AI 校对',
     this.novelOnly = false,
+    this.bookProgress,
   });
 
   final ReaderPreferences preferences;
@@ -58,6 +59,7 @@ class ReaderControls extends StatelessWidget {
   final VoidCallback? onDownload;
   final String aiLabel;
   final bool novelOnly;
+  final double? bookProgress;
 
   @override
   Widget build(BuildContext context) {
@@ -101,7 +103,12 @@ class ReaderControls extends StatelessWidget {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 620),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+              padding: EdgeInsets.fromLTRB(
+                novelOnly ? 8 : 12,
+                0,
+                novelOnly ? 8 : 12,
+                6,
+              ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -124,6 +131,7 @@ class ReaderControls extends StatelessWidget {
                         )),
                         preset: preset,
                         fraction: fraction,
+                        bookProgress: novelOnly ? bookProgress : null,
                         chapterLabel: chapterTitle,
                         onPreview: onPreview,
                         onCommitted: onCommitted,
@@ -166,6 +174,7 @@ class ReaderControls extends StatelessWidget {
                                 final requiredWidth =
                                     minActionWidth * labels.length;
                                 final scrolls =
+                                    novelOnly &&
                                     constraints.maxWidth < requiredWidth;
                                 return Semantics(
                                   label: scrolls ? '阅读操作，可横向滚动' : '阅读操作',

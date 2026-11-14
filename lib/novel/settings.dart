@@ -231,8 +231,8 @@ class _NovelSettingsState extends State<NovelSettings> {
             children: [
               _SettingsLink(
                 icon: Icons.query_stats,
-                title: '阅读时长',
-                subtitle: '查看本机记录的今日、每周与分书前台时长',
+                title: '阅读报告',
+                subtitle: '阅读时长、月度总结与年度回顾',
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute<void>(

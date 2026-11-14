@@ -214,7 +214,9 @@ List<String> _savedReadingPosition(Map<String, dynamic> entry) {
   }
   final progress = entry['progress'];
   if (progress is num && progress.isFinite && progress >= 0 && progress <= 1) {
-    parts.add('进度 ${(progress * 100).toStringAsFixed(1)}%');
+    parts.add(
+      '进度 ${novelBookProgressPercent(progress.toDouble(), compact: false)}%',
+    );
   }
   return parts.isEmpty ? parts : [parts.join(' · ')];
 }
@@ -714,6 +716,7 @@ extension _NovelShelfLibrary on _NovelShelfState {
                 child: _ShelfContinueReading(
                   book: resume.item,
                   detail: _shelfResumeInfo(history[resume.item.id]!),
+                  progress: novelSavedBookProgress(history[resume.item.id]),
                   opening: _openingId == resume.item.id,
                   onPressed: _openingId == null
                       ? () => _open(resume.item)
@@ -959,12 +962,14 @@ class _ShelfContinueReading extends StatelessWidget {
     required this.detail,
     required this.opening,
     required this.onPressed,
+    this.progress,
   });
 
   final MediaItem book;
   final String detail;
   final bool opening;
   final VoidCallback? onPressed;
+  final double? progress;
 
   @override
   Widget build(BuildContext context) {
@@ -996,6 +1001,10 @@ class _ShelfContinueReading extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
+          if (progress case final value?) ...[
+            NovelBookProgress(fraction: value),
+            const SizedBox(height: 16),
+          ],
           ConstrainedBox(
             constraints: const BoxConstraints(minHeight: 48),
             child: FilledButton.tonalIcon(

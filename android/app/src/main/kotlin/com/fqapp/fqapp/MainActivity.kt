@@ -45,6 +45,7 @@ class MainActivity : FlutterActivity() {
             // Normal release build.
         }
         flutterEngine.plugins.add(ReaderDevicePlugin())
+        flutterEngine.plugins.add(ReaderWordBoundaryPlugin())
         // 全屏播放用 WindowInsetsController 隐藏系统栏；immersiveSticky 在
         // target SDK 36 的 edge-to-edge 下已不生效（issue #176）。
         // 官方系统分享是 Intent.ACTION_SEND；没有可分享的应用时回 false。

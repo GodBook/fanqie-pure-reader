@@ -78,29 +78,40 @@ extension _ReaderPageSelectionOverlay on _ReaderPageState {
     // height; the dot protrudes 6dp beyond the line edge. Start ink hugs the
     // widget top, end ink hugs the bottom — the touch margin sits on the far
     // side of the line.
-    Widget handle(bool isStart, ({double x, double top, double bottom}) caret) {
+    Widget handle(
+      bool isStart,
+      bool keyIsStart,
+      ({double x, double top, double bottom}) caret,
+    ) {
       final lineHeight = caret.bottom - caret.top;
       final widget = ReaderSelectionHandle(
         isStart: isStart,
         color: scope.handleColor,
         lineHeight: lineHeight,
-        onDragStart: _onHandleDragStart,
+        onDragStart: () => _onHandleDragStart(isStart),
         onDragUpdate: (global) => _onHandleDrag(isStart, global),
         onDragEnd: (global) => _onHandleDragEnd(isStart, global),
       );
       return Positioned(
-        key: ValueKey('reader-selection-handle-${isStart ? 'start' : 'end'}'),
-        left: caret.x - ReaderSelectionHandle.touchWidth / 2,
+        key: ValueKey(
+          'reader-selection-handle-${keyIsStart ? 'start' : 'end'}',
+        ),
+        left: isStart
+            ? caret.x -
+                  ReaderSelectionHandle.touchWidth +
+                  ReaderSelectionHandle.hitInset
+            : caret.x - ReaderSelectionHandle.hitInset,
         top: isStart
             ? caret.top - ReaderSelectionHandle.dotOverhang
-            : caret.top - ReaderSelectionHandle.touchMargin,
+            : caret.top - ReaderSelectionHandle.touchMarginFor(lineHeight),
         child: widget,
       );
     }
 
+    final crossed = scope.geometry.activeDrag?.crossed ?? false;
     return [
-      if (start != null) handle(true, start),
-      if (end != null) handle(false, end),
+      if (start != null) handle(true, !crossed, start),
+      if (end != null) handle(false, crossed, end),
     ];
   }
 
@@ -162,7 +173,15 @@ extension _ReaderPageSelectionOverlay on _ReaderPageState {
     });
   }
 
-  void _onHandleDragStart() {
+  void _onHandleDragStart(bool isStart) {
+    ++_selectionGeneration;
+    final selection = _selection;
+    if (selection != null) {
+      _marksScope?.geometry.activeDrag = ReaderSelectionDrag(
+        selection,
+        isStart: isStart,
+      );
+    }
     // The bar would sit under the finger; pop it, keep the selection.
     _closeSelectionBar(clearSelection: false);
   }
@@ -176,22 +195,29 @@ extension _ReaderPageSelectionOverlay on _ReaderPageState {
     final selection = _selection;
     final layout = _chapterLayout;
     if (selection == null || layout == null) return;
-    final offset = _marksScope?.geometry.chapterOffsetAt(global);
+    final geometry = _marksScope?.geometry;
+    final offset = geometry?.chapterOffsetAt(global);
     if (offset == null) return;
     final range = layout.selectableTextRange;
     if (range == null) return;
-    var next = selection.withBound(
+    final drag = geometry!.activeDrag ??= ReaderSelectionDrag(
+      selection,
       isStart: isStart,
+    );
+    final wasCrossed = drag.crossed;
+    var next = drag.update(
       offset: offset.clamp(range.$1, range.$2),
-      textLength: range.$2,
+      previousBoundary: (position) =>
+          previousReaderCharacterBoundary(layout, position),
+      nextBoundary: (position) => nextReaderCharacterBoundary(layout, position),
     );
     // A drag can land a bound on the '\n' separator between two blocks; such
     // a range paints nothing, so grow it onto the next real character — the
     // finger must never hold an invisible selection.
     if (next.isValid && next.end < range.$2 && _selectionPaintsNothing(next)) {
-      next = next.copyWith(end: next.end + 1);
+      next = next.copyWith(end: nextReaderCharacterBoundary(layout, next.end));
     }
-    if (next == selection) return;
+    if (next == selection && wasCrossed == drag.crossed) return;
     _setState(() => _selection = next);
   }
 
@@ -210,6 +236,7 @@ extension _ReaderPageSelectionOverlay on _ReaderPageState {
   }
 
   void _onHandleDragEnd(bool isStart, Offset global) {
+    _marksScope?.geometry.activeDrag = null;
     final selection = _selection;
     if (selection == null || !selection.isValid) {
       _clearSelection();
