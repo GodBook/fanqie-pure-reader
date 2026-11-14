@@ -401,6 +401,28 @@ class LibraryStore implements ReaderStore {
     };
   }
 
+  /// Explicit per-book choice from a validated restore preview. No retention
+  /// sweep, and never creates or overwrites another kind of history.
+  Future<void> replaceBackupProgress(List<Map<String, dynamic>> records) {
+    final guard = ReadingDataWriteGuard(this);
+    return _serialize(() async {
+      if (!guard.canWriteHistory) throw StateError('历史已改变，请重新预览备份');
+      for (final entry in records) {
+        final clean = _historyRecord(entry);
+        if (clean == null || clean['kind'] != 'book') {
+          throw const FormatException('仅可恢复有效小说进度');
+        }
+        final id = clean['id'] as String;
+        final existing = _historyRecord(_histBox.get(id), id: id);
+        if (existing == null || existing['kind'] != 'book') {
+          throw StateError('本机阅读记录已改变，请重新预览');
+        }
+        await _histBox.put(id, clean);
+      }
+      await _histBox.flush();
+    });
+  }
+
   /// Import only novels. Older history-only imports receive missing metadata
   /// and chapter IDs; a newer local reading position always wins.
   Future<int> mergeFanqie(List<Map<String, dynamic>> records) {

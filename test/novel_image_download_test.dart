@@ -178,11 +178,17 @@ void main() {
         );
       }
       expect(fetched, hasLength(1));
+      final usage = await images.storageUsage(['one', 'two']);
+      expect(usage.totalBytes, _png.length);
+      expect(usage.bookBytes['one'], _png.length);
+      expect(usage.bookBytes['two'], _png.length);
       await images.removeBook('one');
       expect(await images.localFile(_url), isNotNull);
       expect((await images.summary('two', {'chapter'})).saved, 1);
+      expect((await images.storageUsage(['two'])).totalBytes, _png.length);
       await images.removeBook('two');
       expect(await images.localFile(_url), isNull);
+      expect((await images.storageUsage([])).totalBytes, 0);
     },
   );
 

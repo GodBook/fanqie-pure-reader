@@ -19,6 +19,25 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 
+/** Keep the format suffix when limiting a provider's potentially long name. */
+internal fun localNovelDocumentName(displayName: String?, mimeType: String?): String {
+    val original = displayName?.trim().orEmpty().ifEmpty { "book" }
+    val extension = when {
+        original.endsWith(".txt", ignoreCase = true) -> ".txt"
+        original.endsWith(".epub", ignoreCase = true) -> ".epub"
+        !original.contains('.') && mimeType == "text/plain" -> ".txt"
+        !original.contains('.') && mimeType == "application/epub+zip" -> ".epub"
+        else -> ""
+    }
+    if (extension.isEmpty()) return original.take(240)
+    val stem = if (original.endsWith(extension, ignoreCase = true)) {
+        original.dropLast(extension.length)
+    } else {
+        original
+    }
+    return stem.take(240 - extension.length) + extension
+}
+
 /** SAF picker for local novels. It grants access only to the document the user chose. */
 class LocalBookPickerPlugin : FlutterPlugin, ActivityAware,
     MethodChannel.MethodCallHandler, PluginRegistry.ActivityResultListener {
@@ -119,9 +138,10 @@ class LocalBookPickerPlugin : FlutterPlugin, ActivityAware,
 
     private fun readDocument(uri: Uri): Map<String, Any?> {
         val resolver = appContext.contentResolver
-        val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.getString(0)?.take(240) else null
-        } ?: "book"
+        val displayName = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+        val name = localNovelDocumentName(displayName, resolver.getType(uri))
         val bytes = resolver.openInputStream(uri)?.use { input ->
             val output = ByteArrayOutputStream()
             val buffer = ByteArray(16 * 1024)

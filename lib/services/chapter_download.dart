@@ -73,6 +73,7 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
     required int count,
     bool pin = false,
     bool onlyCached = false,
+    bool saveCatalogue = true,
   }) async {
     if (_disposed || value.running) return;
     final job = ++_job;
@@ -91,7 +92,7 @@ class ChapterDownload extends ValueNotifier<ChapterDownloadState> {
         chapters = chapters.where((c) => ids.contains(c.itemId)).toList();
         value = ChapterDownloadState(running: true, total: chapters.length);
       }
-      await cache.saveBook(book);
+      if (saveCatalogue) await cache.saveBook(book);
       for (final chapter in chapters) {
         if (!_alive(job)) return;
         stage = 'storage';

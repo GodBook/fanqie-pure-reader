@@ -61,6 +61,19 @@ mixin _ReaderPageFields on State<ReaderPage> {
   double _lastMaxScroll = 0;
   String? _error;
   ReaderPreferences _preferences = const ReaderPreferences();
+  ReaderPreferences _globalPreferences = const ReaderPreferences();
+  NovelReaderLayout? _bookLayout;
+  NovelReaderLayout? _savedBookLayout;
+  bool _bookLayoutAvailable = true;
+  final _novelClock = Stopwatch()..start();
+  final _novelForegroundClock = NovelForegroundClock();
+  final _novelRest = NovelRestReminder();
+  Timer? _novelTimeTimer;
+  final List<NovelDayDuration> _novelPendingDurations = [];
+  int _novelPendingGeneration = 0;
+  bool _novelMetricsWriting = false;
+  bool _novelMetricsFailureShown = false;
+  int _novelRestRevision = 0;
   ReaderThemePreset _dayTheme = ReaderThemePreset.light;
   final ValueNotifier<bool> _controlsVisibility = ValueNotifier(false);
   bool get _controlsVisible => _controlsVisibility.value;
@@ -188,6 +201,7 @@ mixin _ReaderPageFields on State<ReaderPage> {
   Future<void>? _catalogFuture;
   late final ReaderHistory _history = ReaderHistory(_readerStore);
   late final ReaderDevice _device = widget.readerDevice ?? ReaderDevice();
+  late final Future<ReaderPreferences> _globalPreferencesFuture;
   late final Future<void> _preferencesFuture;
   StreamSubscription<ReaderDeviceStatus>? _deviceSubscription;
   ReaderDeviceStatus _deviceStatus = ReaderDeviceStatus(time: DateTime.now());

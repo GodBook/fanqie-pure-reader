@@ -1,6 +1,196 @@
 part of 'app.dart';
 
 final _recommendationSettingsChanged = ValueNotifier(0);
+Future<void>? _pendingFilterSave;
+
+void _saveDiscoveryFilters(
+  NovelFeedFilters filters, {
+  bool keepGenre = false,
+  VoidCallback? onError,
+}) {
+  Future<void> save() async {
+    final prefs = await SharedPreferences.getInstance();
+    final value = keepGenre
+        ? filters.copyWith(genre: NovelFeedFilters.load(prefs).genre)
+        : filters;
+    await value.save(prefs);
+    if (keepGenre) _recommendationSettingsChanged.value++;
+  }
+
+  final previous = _pendingFilterSave;
+  final write = previous == null
+      ? Future<void>.sync(save)
+      : previous.then((_) => save());
+  final settled = write.then<void>(
+    (_) {},
+    onError: (Object _, StackTrace _) {},
+  );
+  _pendingFilterSave = settled;
+  unawaited(
+    write.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) => onError?.call(),
+    ),
+  );
+  unawaited(
+    settled.whenComplete(() {
+      if (identical(_pendingFilterSave, settled)) _pendingFilterSave = null;
+    }),
+  );
+}
+
+Set<String> _novelShelfIds() => {
+  for (final record in ShelfStore.instance.records())
+    if (record.item.kind == 'book' && record.item.source == 'fanqie')
+      record.item.id,
+};
+
+Set<String> _novelHistoryIds() {
+  if (!LibraryStore.instance.isInitialized) return {};
+  final otherSourceIds = {
+    for (final record in ShelfStore.instance.records())
+      if (record.item.kind == 'book' && record.item.source != 'fanqie')
+        record.item.id,
+  };
+  return {
+    for (final record in LibraryStore.instance.historySnapshot())
+      if ((record['kind'] ?? 'book') == 'book' &&
+          (record['source'] == 'fanqie' ||
+              ((record['source'] == null || record['source'] == '') &&
+                  !otherSourceIds.contains(
+                    (record['contentId'] ?? record['id']).toString(),
+                  ))) &&
+          RegExp(
+            r'^\d{1,20}$',
+          ).hasMatch((record['contentId'] ?? record['id']).toString()))
+        (record['contentId'] ?? record['id']).toString(),
+  };
+}
+
+Future<NovelFindPlan?> _chooseFindPlan(
+  BuildContext context,
+  NovelFeedFilters filters,
+  String query,
+) => showModalBottomSheet<NovelFindPlan>(
+  context: context,
+  isScrollControlled: true,
+  builder: (sheetContext) => SafeArea(
+    child: SizedBox(
+      height: MediaQuery.sizeOf(sheetContext).height * .7,
+      child: Column(
+        children: [
+          const ListTile(title: Text('找书方案'), subtitle: Text('保存在本机，打开时重新查询')),
+          Expanded(
+            child: ValueListenableBuilder<int>(
+              valueListenable: NovelFindPlansStore.instance.changes,
+              builder: (context, _, _) => FutureBuilder<List<NovelFindPlan>>(
+                future: NovelFindPlansStore.instance.all(),
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) {
+                    return const Center(child: Text('方案读取失败，请稍后重试'));
+                  }
+                  if (!snapshot.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final plans = snapshot.data!;
+                  if (plans.isEmpty) {
+                    return const Center(child: Text('还没有保存方案'));
+                  }
+                  return ListView.builder(
+                    itemCount: plans.length,
+                    itemBuilder: (context, index) {
+                      final plan = plans[index];
+                      return ListTile(
+                        key: ValueKey('find-plan-${plan.name}'),
+                        title: Text(plan.name),
+                        subtitle: Text(
+                          [
+                            if (plan.query.isNotEmpty) plan.query else '书城',
+                            plan.filters.category.name,
+                            novelWordRangeLabels[plan.filters.wordRange]!,
+                          ].join(' · '),
+                        ),
+                        onTap: () => Navigator.pop(sheetContext, plan),
+                        trailing: IconButton(
+                          tooltip: '删除方案 ${plan.name}',
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () async {
+                            try {
+                              await NovelFindPlansStore.instance.remove(
+                                plan.name,
+                              );
+                            } catch (_) {
+                              if (sheetContext.mounted) {
+                                ScaffoldMessenger.of(sheetContext).showSnackBar(
+                                  const SnackBar(content: Text('删除失败，请重试')),
+                                );
+                              }
+                            }
+                          },
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: FilledButton.icon(
+              icon: const Icon(Icons.bookmark_add_outlined),
+              label: const Text('保存当前条件'),
+              onPressed: () async {
+                final input = TextEditingController();
+                final name = await showDialog<String>(
+                  context: sheetContext,
+                  builder: (dialogContext) => AlertDialog(
+                    title: const Text('保存找书方案'),
+                    content: TextField(
+                      controller: input,
+                      maxLength: 40,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: '方案名称',
+                        helperText: '同名方案会被替换',
+                      ),
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext),
+                        child: const Text('取消'),
+                      ),
+                      FilledButton(
+                        onPressed: () =>
+                            Navigator.pop(dialogContext, input.text.trim()),
+                        child: const Text('保存'),
+                      ),
+                    ],
+                  ),
+                );
+                input.dispose();
+                if (name == null || name.isEmpty || !sheetContext.mounted) {
+                  return;
+                }
+                try {
+                  await NovelFindPlansStore.instance.put(
+                    NovelFindPlan(name: name, query: query, filters: filters),
+                  );
+                } catch (_) {
+                  if (sheetContext.mounted) {
+                    ScaffoldMessenger.of(
+                      sheetContext,
+                    ).showSnackBar(const SnackBar(content: Text('保存失败，请重试')));
+                  }
+                }
+              },
+            ),
+          ),
+        ],
+      ),
+    ),
+  ),
+);
 
 typedef NovelFeedPageLoader =
     Future<HomepagePage> Function(
@@ -32,10 +222,12 @@ class NovelFeed extends StatefulWidget {
     this.pageLoader,
     this.categoryLoader,
     this.initialBooks,
+    this.initialFilters,
   });
   final NovelFeedPageLoader? pageLoader;
   final NovelSearchPageLoader? categoryLoader;
   final List<MediaItem> Function(int genre)? initialBooks;
+  final NovelFeedFilters? initialFilters;
   @override
   State<NovelFeed> createState() => _NovelFeedState();
 }
@@ -72,6 +264,7 @@ class _NovelFeedState extends State<NovelFeed> {
   bool _seedShown = false;
   bool _firstFrameReported = false;
   bool _showScrollTop = false;
+  Listenable? _historyChanges;
   final _visits = <int, _NovelFeedVisit>{};
   bool get _production =>
       widget.pageLoader == null && widget.categoryLoader == null;
@@ -103,6 +296,7 @@ class _NovelFeedState extends State<NovelFeed> {
   }
 
   void _restoreReadyCache() {
+    _bindHistory();
     if (!_production || !mounted || !NovelRuntime.localReady.value) {
       return;
     }
@@ -128,7 +322,11 @@ class _NovelFeedState extends State<NovelFeed> {
 
   List<MediaItem> get _visible {
     final selected = _filters
-        .select(_books)
+        .select(
+          _books,
+          shelfIds: _filters.hideShelf ? _novelShelfIds() : const {},
+          historyIds: _filters.hideHistory ? _novelHistoryIds() : const {},
+        )
         .where(
           (b) =>
               !_hiddenBooks.contains(b.id) &&
@@ -274,6 +472,8 @@ class _NovelFeedState extends State<NovelFeed> {
   void initState() {
     super.initState();
     NovelRuntime.localReady.addListener(_restoreReadyCache);
+    ShelfStore.instance.listenable.addListener(_localChanged);
+    _bindHistory();
     _recommendationSettingsChanged.addListener(_restoreHidden);
     _scroll.addListener(() {
       final showTop = _scroll.offset > 500;
@@ -290,10 +490,22 @@ class _NovelFeedState extends State<NovelFeed> {
     _restore();
   }
 
+  void _bindHistory() {
+    if (_historyChanges != null || !LibraryStore.instance.isInitialized) return;
+    _historyChanges = LibraryStore.instance.historyListenable;
+    _historyChanges!.addListener(_localChanged);
+  }
+
+  void _localChanged() {
+    if (mounted && (_filters.hideShelf || _filters.hideHistory)) {
+      setState(() => _order = []);
+    }
+  }
+
   Future<void> _restore() async {
     _preferences = await SharedPreferences.getInstance();
     if (!mounted) return;
-    _filters = NovelFeedFilters.load(_preferences!);
+    _filters = widget.initialFilters ?? NovelFeedFilters.load(_preferences!);
     _hiddenBooks = (_preferences!.getStringList('novel_hidden_books') ?? [])
         .toSet();
     _hiddenAuthors = (_preferences!.getStringList('novel_hidden_authors') ?? [])
@@ -309,12 +521,16 @@ class _NovelFeedState extends State<NovelFeed> {
           .toSet();
       _hiddenAuthors =
           (_preferences?.getStringList('novel_hidden_authors') ?? []).toSet();
+      if (_preferences != null) _filters = NovelFeedFilters.load(_preferences!);
+      _order = [];
     });
   }
 
   @override
   void dispose() {
     NovelRuntime.localReady.removeListener(_restoreReadyCache);
+    ShelfStore.instance.listenable.removeListener(_localChanged);
+    _historyChanges?.removeListener(_localChanged);
     _recommendationSettingsChanged.removeListener(_restoreHidden);
     _request?.cancel();
     _generation++;
@@ -322,7 +538,7 @@ class _NovelFeedState extends State<NovelFeed> {
     super.dispose();
   }
 
-  void _change(NovelFeedFilters filters) {
+  void _change(NovelFeedFilters filters, {bool refresh = false}) {
     final categoryChanged = filters.genre != _filters.genre;
     var reused = false;
     if (categoryChanged) {
@@ -338,8 +554,21 @@ class _NovelFeedState extends State<NovelFeed> {
         reused = _showLocal();
       }
     });
-    if (_preferences != null) unawaited(filters.save(_preferences!));
-    if (categoryChanged) {
+    if (_preferences != null) {
+      _saveDiscoveryFilters(
+        filters,
+        onError: () {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('筛选条件保存失败')));
+          }
+        },
+      );
+    }
+    if (refresh) {
+      unawaited(_load(refresh: true));
+    } else if (categoryChanged) {
       if (!reused) {
         unawaited(_load(refresh: true));
       } else if (_visible.isEmpty && _hasMore) {
@@ -347,6 +576,24 @@ class _NovelFeedState extends State<NovelFeed> {
       }
     } else if (!_loading && _hasMore && _visible.isEmpty) {
       _load();
+    }
+  }
+
+  Future<void> _plans() async {
+    final plan = await _chooseFindPlan(context, _filters, '');
+    if (!mounted || plan == null) return;
+    if (plan.query.isNotEmpty) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => NovelSearch(
+            initialQuery: plan.query,
+            initialFilters: plan.filters,
+          ),
+        ),
+      );
+    } else {
+      _change(plan.filters, refresh: true);
     }
   }
 
@@ -702,6 +949,23 @@ class _NovelFeedState extends State<NovelFeed> {
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
                 child: Row(
                   children: [
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ActionChip(
+                        key: const ValueKey('open-novel-rankings'),
+                        avatar: const Icon(
+                          Icons.leaderboard_outlined,
+                          size: 20,
+                        ),
+                        label: const Text('小说榜单'),
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute<void>(
+                            builder: (_) => const NovelRankings(),
+                          ),
+                        ),
+                      ),
+                    ),
                     for (var i = 0; i < NovelGenre.choices.length; i++)
                       Padding(
                         padding: const EdgeInsets.only(right: 8),
@@ -762,6 +1026,32 @@ class _NovelFeedState extends State<NovelFeed> {
                       options: _statusLabels,
                       onChanged: (value) =>
                           _change(_filters.copyWith(status: value)),
+                    ),
+                    _filter<NovelWordRange>(
+                      id: 'words',
+                      label: novelWordRangeLabels[_filters.wordRange]!,
+                      value: _filters.wordRange,
+                      active: _filters.wordRange != NovelWordRange.any,
+                      options: novelWordRangeLabels,
+                      onChanged: (value) =>
+                          _change(_filters.copyWith(wordRange: value)),
+                    ),
+                    FilterChip(
+                      label: const Text('隐藏书架'),
+                      selected: _filters.hideShelf,
+                      onSelected: (value) =>
+                          _change(_filters.copyWith(hideShelf: value)),
+                    ),
+                    FilterChip(
+                      label: const Text('隐藏有阅读记录'),
+                      selected: _filters.hideHistory,
+                      onSelected: (value) =>
+                          _change(_filters.copyWith(hideHistory: value)),
+                    ),
+                    TextButton.icon(
+                      onPressed: _plans,
+                      icon: const Icon(Icons.bookmarks_outlined),
+                      label: const Text('找书方案'),
                     ),
                     _filter<NovelSort>(
                       id: 'sort',
@@ -976,13 +1266,22 @@ Future<NovelSearchPage> _loadNovelSearchPage(
   BackendRequest request,
 ) async {
   await NovelRuntime.ensureOnline();
-  if (RegExp(r'^\d{15,20}$').hasMatch(query)) {
+  final id = RegExp(r'^\d{15,20}$').hasMatch(query)
+      ? query
+      : novelShareBookId(query);
+  if (id != null) {
     final book = await ApiClient.instance.withCancellation(
       request,
-      () => ApiClient.instance.lookupMediaById(query),
+      () => ApiClient.instance.lookupMediaById(id),
     );
     return NovelSearchPage(
-      items: book == null ? [] : [book],
+      items:
+          book != null &&
+              book.kind == 'book' &&
+              book.source == 'fanqie' &&
+              book.id == id
+          ? [book]
+          : [],
       hasMore: false,
       nextOffset: offset,
     );
@@ -1001,9 +1300,13 @@ class NovelSearch extends StatefulWidget {
     this.suggestionLoader,
     this.initialQuery = '',
     this.isCategoryKeyword = false,
+    this.isTagKeyword = false,
+    this.initialFilters,
   });
   final String initialQuery;
   final bool isCategoryKeyword;
+  final bool isTagKeyword;
+  final NovelFeedFilters? initialFilters;
   final NovelSearchPageLoader? pageLoader;
   final Future<List<String>> Function(String)? suggestionLoader;
   @override
@@ -1028,6 +1331,54 @@ class _NovelSearchState extends State<NovelSearch> {
   int _suggestGeneration = 0;
   List<String> _suggestions = [];
   NovelFeedFilters _resultFilters = const NovelFeedFilters();
+  Listenable? _historyChanges;
+
+  void _bindHistory() {
+    if (_historyChanges != null || !LibraryStore.instance.isInitialized) return;
+    _historyChanges = LibraryStore.instance.historyListenable;
+    _historyChanges!.addListener(_localChanged);
+  }
+
+  void _localChanged() {
+    if (mounted && (_resultFilters.hideShelf || _resultFilters.hideHistory)) {
+      setState(() {});
+    }
+  }
+
+  void _setResultFilters(NovelFeedFilters filters) {
+    setState(() => _resultFilters = filters);
+    _saveDiscoveryFilters(
+      filters,
+      keepGenre: true,
+      onError: () {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('筛选条件保存失败')));
+        }
+      },
+    );
+  }
+
+  Future<void> _plans() async {
+    final plan = await _chooseFindPlan(
+      context,
+      _resultFilters,
+      _query.isEmpty ? _input.text.trim() : _query,
+    );
+    if (!mounted || plan == null) return;
+    if (plan.query.isEmpty) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => NovelFeed(initialFilters: plan.filters),
+        ),
+      );
+    } else {
+      _setResultFilters(plan.filters);
+      await _search(query: plan.query);
+    }
+  }
 
   void _edited(String value) {
     _suggestTimer?.cancel();
@@ -1048,6 +1399,7 @@ class _NovelSearchState extends State<NovelSearch> {
       return;
     }
     setState(() => _suggestions = []);
+    if (novelShareBookId(value) != null) return;
     _suggestTimer = Timer(const Duration(milliseconds: 320), () async {
       try {
         final values =
@@ -1107,6 +1459,9 @@ class _NovelSearchState extends State<NovelSearch> {
   @override
   void initState() {
     super.initState();
+    ShelfStore.instance.listenable.addListener(_localChanged);
+    NovelRuntime.localReady.addListener(_bindHistory);
+    _bindHistory();
     _loadHistory();
     _scroll.addListener(() {
       if (_scroll.position.extentAfter < 500 &&
@@ -1121,10 +1476,12 @@ class _NovelSearchState extends State<NovelSearch> {
   Future<void> _loadHistory() async {
     final preferences = await SharedPreferences.getInstance();
     if (mounted) {
-      setState(
-        () =>
-            _history = preferences.getStringList('novel_search_history') ?? [],
-      );
+      setState(() {
+        _history = preferences.getStringList('novel_search_history') ?? [];
+        _resultFilters =
+            widget.initialFilters ??
+            NovelFeedFilters.load(preferences).copyWith(genre: 0);
+      });
       if (widget.initialQuery.isNotEmpty && _query.isEmpty) {
         _search(query: widget.initialQuery);
       }
@@ -1202,6 +1559,9 @@ class _NovelSearchState extends State<NovelSearch> {
     _suggestRequest?.cancel();
     ++_suggestGeneration;
     _request?.cancel();
+    ShelfStore.instance.listenable.removeListener(_localChanged);
+    NovelRuntime.localReady.removeListener(_bindHistory);
+    _historyChanges?.removeListener(_localChanged);
     _generation++;
     _input.dispose();
     _scroll.dispose();
@@ -1268,7 +1628,7 @@ class _NovelSearchState extends State<NovelSearch> {
         textInputAction: TextInputAction.search,
         onChanged: _edited,
         decoration: InputDecoration(
-          hintText: '书名、作者或编号',
+          hintText: '书名、作者、编号或官方小说链接',
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 14,
             vertical: 10,
@@ -1286,6 +1646,11 @@ class _NovelSearchState extends State<NovelSearch> {
         onSubmitted: (text) => _search(query: text),
       ),
       actions: [
+        IconButton(
+          tooltip: '找书方案',
+          onPressed: _plans,
+          icon: const Icon(Icons.bookmarks_outlined),
+        ),
         TextButton(
           key: const ValueKey('search-submit'),
           onPressed: () => _search(),
@@ -1296,12 +1661,14 @@ class _NovelSearchState extends State<NovelSearch> {
     ),
     body: Column(
       children: [
-        if (widget.isCategoryKeyword &&
+        if ((widget.isCategoryKeyword || widget.isTagKeyword) &&
             _query.isNotEmpty &&
             _query == widget.initialQuery.trim())
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: Text('分类关键词搜索，结果不限定分类'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Text(
+              widget.isTagKeyword ? '标签关键词搜索，结果不限定标签' : '分类关键词搜索，结果不限定分类',
+            ),
           ),
         Expanded(
           child: _suggestions.isNotEmpty
@@ -1388,10 +1755,8 @@ class _NovelSearchState extends State<NovelSearch> {
                               for (final score in novelScoreOptions)
                                 score: novelScoreLabel(score),
                             },
-                            onSelected: (v) => setState(
-                              () => _resultFilters = _resultFilters.copyWith(
-                                minScore: v,
-                              ),
+                            onSelected: (v) => _setResultFilters(
+                              _resultFilters.copyWith(minScore: v),
                             ),
                           ),
                           _resultFilter<NovelStatus>(
@@ -1402,10 +1767,35 @@ class _NovelSearchState extends State<NovelSearch> {
                             value: _resultFilters.status,
                             active: _resultFilters.status != NovelStatus.any,
                             options: _NovelFeedState._statusLabels,
-                            onSelected: (v) => setState(
-                              () => _resultFilters = _resultFilters.copyWith(
-                                status: v,
-                              ),
+                            onSelected: (v) => _setResultFilters(
+                              _resultFilters.copyWith(status: v),
+                            ),
+                          ),
+                          _resultFilter<NovelWordRange>(
+                            id: 'words',
+                            tooltip: '搜索字数筛选',
+                            label:
+                                novelWordRangeLabels[_resultFilters.wordRange]!,
+                            value: _resultFilters.wordRange,
+                            active:
+                                _resultFilters.wordRange != NovelWordRange.any,
+                            options: novelWordRangeLabels,
+                            onSelected: (v) => _setResultFilters(
+                              _resultFilters.copyWith(wordRange: v),
+                            ),
+                          ),
+                          FilterChip(
+                            label: const Text('隐藏书架'),
+                            selected: _resultFilters.hideShelf,
+                            onSelected: (v) => _setResultFilters(
+                              _resultFilters.copyWith(hideShelf: v),
+                            ),
+                          ),
+                          FilterChip(
+                            label: const Text('隐藏有阅读记录'),
+                            selected: _resultFilters.hideHistory,
+                            onSelected: (v) => _setResultFilters(
+                              _resultFilters.copyWith(hideHistory: v),
                             ),
                           ),
                           _resultFilter<NovelSort>(
@@ -1417,10 +1807,8 @@ class _NovelSearchState extends State<NovelSearch> {
                             active:
                                 _resultFilters.sort != NovelSort.recommended,
                             options: _NovelFeedState._sortLabels,
-                            onSelected: (v) => setState(
-                              () => _resultFilters = _resultFilters.copyWith(
-                                sort: v,
-                              ),
+                            onSelected: (v) => _setResultFilters(
+                              _resultFilters.copyWith(sort: v),
                             ),
                           ),
                         ],
@@ -1450,13 +1838,17 @@ class _NovelSearchState extends State<NovelSearch> {
   );
 
   Widget _resultList() {
-    final selected = _resultFilters.select(_books);
+    final selected = _resultFilters.select(
+      _books,
+      shelfIds: _resultFilters.hideShelf ? _novelShelfIds() : const {},
+      historyIds: _resultFilters.hideHistory ? _novelHistoryIds() : const {},
+    );
     final exact = selected
         .where(
           (b) =>
               b.title.trim() == _query ||
               b.author.trim() == _query ||
-              b.id == _query,
+              b.id == (novelShareBookId(_query) ?? _query),
         )
         .toList();
     final related = selected.where((b) => !exact.contains(b)).toList();

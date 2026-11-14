@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'dart:math';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
@@ -156,6 +157,7 @@ class ImportedBookStore {
 
   final Future<Directory> Function() _rootDirectoryProvider;
   Future<Directory>? _rootFuture;
+  Future<void> _imports = Future<void>.value();
   static final _random = Random.secure();
 
   /// Manifests read by [chapterText], LRU-bounded so a large shelf cannot grow
@@ -211,6 +213,24 @@ class ImportedBookStore {
     required Uint8List bytes,
     String? decodedText,
     int? sourceByteLength,
+  }) {
+    final result = _imports.then(
+      (_) => _importBytes(
+        fileName: fileName,
+        bytes: bytes,
+        decodedText: decodedText,
+        sourceByteLength: sourceByteLength,
+      ),
+    );
+    _imports = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
+
+  Future<ImportedBook> _importBytes({
+    required String fileName,
+    required Uint8List bytes,
+    String? decodedText,
+    int? sourceByteLength,
   }) async {
     if (bytes.isEmpty && decodedText == null) {
       throw const FormatException('文件内容为空');
@@ -227,6 +247,22 @@ class ImportedBookStore {
         decodedText: decodedText,
       );
       return {
+        'fingerprint': sha256
+            .convert(
+              utf8.encode(
+                jsonEncode([
+                  parsed.format,
+                  parsed.author,
+                  if (parsed.format == 'epub') parsed.title,
+                  if (parsed.cover != null) parsed.cover!.extension,
+                  if (parsed.cover != null)
+                    sha256.convert(parsed.cover!.bytes).toString(),
+                  for (final chapter in parsed.chapters)
+                    [chapter.title, chapter.text],
+                ]),
+              ),
+            )
+            .toString(),
         'title': parsed.title,
         'author': parsed.author,
         'format': parsed.format,
@@ -258,7 +294,13 @@ class ImportedBookStore {
       ],
     );
     final root = await _root();
-    final id = _newId();
+    final identities = await _readIdentities();
+    final fingerprint = parsedData['fingerprint']! as String;
+    final id = identities[fingerprint] ?? _newId();
+    final existing = await book(id);
+    if (existing != null) return existing;
+    identities[fingerprint] = id;
+    await _writeIdentities(identities);
     final staging = Directory('${root.path}${Platform.pathSeparator}.$id.tmp');
     final target = Directory('${root.path}${Platform.pathSeparator}$id');
     await staging.create();
@@ -350,6 +392,83 @@ class ImportedBookStore {
     return books;
   }
 
+  static Map<String, String> validatePortableIdentities(dynamic input) {
+    if (input is! Map || input.length > 10000) {
+      throw const FormatException('本地书籍身份记录无效');
+    }
+    final identities = <String, String>{};
+    for (final entry in input.entries) {
+      if (entry.key is! String ||
+          !RegExp(r'^[a-f0-9]{64}$').hasMatch(entry.key as String) ||
+          entry.value is! String ||
+          !isLocalBookId(entry.value as String)) {
+        throw const FormatException('本地书籍身份记录条目无效');
+      }
+      identities[entry.key as String] = entry.value as String;
+    }
+    if (identities.values.toSet().length != identities.length) {
+      throw const FormatException('本地书籍身份记录重复');
+    }
+    return identities;
+  }
+
+  Future<Map<String, String>> _readIdentities() async {
+    final root = await _root();
+    final file = File('${root.path}${Platform.pathSeparator}identities.json');
+    if (!await file.exists()) return {};
+    if (await file.length() > 2 * 1024 * 1024) {
+      throw const FormatException('本地书籍身份记录超过容量限制');
+    }
+    try {
+      return validatePortableIdentities(jsonDecode(await file.readAsString()));
+    } on FormatException {
+      throw const FormatException('本地书籍身份记录损坏，请保留原文件并稍后重试');
+    }
+  }
+
+  Future<void> _writeIdentities(Map<String, String> identities) async {
+    validatePortableIdentities(identities);
+    final root = await _root();
+    final file = File('${root.path}${Platform.pathSeparator}identities.json');
+    final temporary = File('${file.path}.tmp');
+    await temporary.writeAsString(jsonEncode(identities), flush: true);
+    await temporary.rename(file.path);
+  }
+
+  Future<Map<String, String>> exportPortableIdentities() async {
+    await _imports;
+    return _readIdentities();
+  }
+
+  /// Reserve backed-up identities before the source file is reimported. A file
+  /// already imported on this device keeps its own identity; callers remap notes.
+  Future<Map<String, String>> mergePortableIdentities(
+    Map<String, dynamic> input,
+  ) {
+    final incoming = validatePortableIdentities(input);
+    final result = _imports.then((_) async {
+      final local = await _readIdentities();
+      final bindings = <String, String>{};
+      for (final entry in incoming.entries) {
+        var id = local[entry.key];
+        if (id == null) {
+          id = entry.value;
+          if (local.values.contains(id) || await book(id) != null) {
+            do {
+              id = _newId();
+            } while (local.values.contains(id) || await book(id) != null);
+          }
+          local[entry.key] = id;
+        }
+        bindings[entry.value] = id;
+      }
+      await _writeIdentities(local);
+      return bindings;
+    });
+    _imports = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
+
   /// Deletes one imported book and its private directory.
   ///
   /// Called when a locally imported book leaves the shelf: the chapters and the
@@ -438,6 +557,10 @@ ParsedImportedBook _parseTxt(String fileTitle, String source) {
 
   final chapters = <ParsedBookChapter>[];
   if (headings.length > 1) {
+    final preface = lines.take(headings.first).join('\n').trim();
+    if (preface.isNotEmpty && preface.replaceAll(RegExp(r'\s'), '') != '目录') {
+      chapters.add(ParsedBookChapter(title: '前言', text: preface));
+    }
     for (var index = 0; index < headings.length; index++) {
       final start = headings[index];
       final end = index + 1 < headings.length

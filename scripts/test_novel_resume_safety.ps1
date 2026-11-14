@@ -4,7 +4,9 @@ param(
     [string]$JdkRoot = 'D:\dev\jdk-17',
     [string]$BuildRoot = 'D:\dev\fanqie-pure',
     [string]$DartTarget = 'integration_test/novel_resume_safety_test.dart',
-    [string]$Driver = 'test_driver/novel_resume_safety.dart'
+    [string]$Driver = 'test_driver/novel_resume_safety.dart',
+    [switch]$SkipBuild,
+    [switch]$InstallWithDeviceRoot
 )
 $ErrorActionPreference = 'Stop'
 $resumeDevices = @(& adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '^\S+\s+device$' } | ForEach-Object { ($_ -split '\s+')[0] })
@@ -23,9 +25,29 @@ Push-Location -LiteralPath $BuildRoot
 try {
     $env:JAVA_HOME = $JdkRoot
     $env:PATH = (Join-Path $JdkRoot 'bin') + ';' + $env:PATH
-    Invoke-ResumeChecked 'flutter' @('--no-version-check', 'build', 'apk', '--no-pub', '--profile',
-        '--target-platform', 'android-arm64', '--target', $DartTarget)
-    Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'install', '-r', '-t', 'build/app/outputs/flutter-apk/app-profile.apk')
+    if (-not $SkipBuild) {
+        Invoke-ResumeChecked 'flutter' @('--no-version-check', 'build', 'apk', '--no-pub', '--profile',
+            '--target-platform', 'android-arm64', '--target', $DartTarget)
+    }
+    $resumeSdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { $env:ANDROID_SDK_ROOT }
+    if (-not $resumeSdk) { throw 'Set ANDROID_HOME before verifying the isolated test package.' }
+    $resumeBuildTools = Get-ChildItem -LiteralPath (Join-Path $resumeSdk 'build-tools') -Directory |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+    $resumeBadging = (& (Join-Path $resumeBuildTools.FullName 'aapt.exe') dump badging 'build/app/outputs/flutter-apk/app-profile.apk') -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $resumeBadging -notmatch "package: name='com\.fanqie\.pure\.reader\.test'") {
+        throw 'Refusing to install an APK outside the isolated .test package.'
+    }
+    if ($InstallWithDeviceRoot) {
+        Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'push', 'build/app/outputs/flutter-apk/app-profile.apk', '/data/local/tmp/fq-features-test.apk')
+        try {
+            Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'shell', 'su', '-c', 'pm install -r -t /data/local/tmp/fq-features-test.apk')
+        } finally {
+            & adb -s $resumeSerial shell rm -f /data/local/tmp/fq-features-test.apk
+        }
+    } else {
+        Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'install', '-r', '-t', 'build/app/outputs/flutter-apk/app-profile.apk')
+    }
     Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'shell', 'am', 'force-stop', 'com.fanqie.pure.reader.test')
     Invoke-ResumeChecked 'adb' @('-s', $resumeSerial, 'shell', 'am', 'start', '-n',
         'com.fanqie.pure.reader.test/com.fqapp.fqapp.MainActivity', '--ez', 'start-paused', 'true',

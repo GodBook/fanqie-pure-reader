@@ -73,7 +73,7 @@ class LibraryBackupPlugin : FlutterPlugin, ActivityAware,
             captureFile(call, result)
             return
         }
-        if (call.method != "openBackup" && call.method != "saveBackup" &&
+        if (call.method != "openBackup" && call.method != "saveBackup" && call.method != "saveTextDocument" &&
             call.method != "exportFanqieCapture") {
             result.notImplemented()
             return
@@ -88,7 +88,15 @@ class LibraryBackupPlugin : FlutterPlugin, ActivityAware,
             return
         }
         val exporting = call.method == "exportFanqieCapture"
-        val saving = call.method == "saveBackup" || exporting
+        val textDocument = call.method == "saveTextDocument"
+        val saving = call.method == "saveBackup" || exporting || textDocument
+        val textMime = call.argument<String>("mime")
+        val textName = call.argument<String>("name")
+        if (textDocument && (textMime !in setOf("text/plain", "text/markdown") ||
+            textName == null || !Regex("[a-zA-Z0-9_.-]{1,100}\\.(txt|md)").matches(textName))) {
+            result.error("DOCUMENT_FORMAT", "请选择有效的文本文件名和格式", null)
+            return
+        }
         val bytes = if (saving) call.argument<ByteArray>("bytes") else null
         if (saving && (bytes == null || bytes.isEmpty() || bytes.size > MAX_BYTES)) {
             result.error("BACKUP_SIZE", "备份为空或超过 16 MB", null)
@@ -106,11 +114,13 @@ class LibraryBackupPlugin : FlutterPlugin, ActivityAware,
         } else null
         val intent = Intent(if (saving) Intent.ACTION_CREATE_DOCUMENT else Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = if (exporting) "application/zip" else if (saving) "application/json" else "*/*"
+            type = if (textDocument) textMime else if (exporting) "application/zip" else if (saving) "application/json" else "*/*"
             if (saving) {
-                val name = call.argument<String>("name")
-                    ?.takeIf { it.matches(if (exporting) ZIP_NAME else Regex("[a-zA-Z0-9_.-]{1,100}\\.json")) }
-                    ?: if (exporting) "fqapp-fanqie-capture.zip" else "fqapp-backup.json"
+                val name = if (textDocument) textName!! else (
+                    call.argument<String>("name")
+                        ?.takeIf { it.matches(if (exporting) ZIP_NAME else Regex("[a-zA-Z0-9_.-]{1,100}\\.json")) }
+                        ?: if (exporting) "fqapp-fanqie-capture.zip" else "fqapp-backup.json"
+                    )
                 putExtra(Intent.EXTRA_TITLE, name)
                 addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             } else {

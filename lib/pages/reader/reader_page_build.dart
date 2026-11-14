@@ -2,6 +2,22 @@ part of '../reader_page.dart';
 
 /// Reader scaffold: desktop chrome, surface, toolbar and error view.
 extension _ReaderPageBuild on _ReaderPageState {
+  bool get _hasDownloadHandler =>
+      widget.onDownloadAtChapter != null || widget.onDownload != null;
+
+  Future<void> _openBookDownloads() async {
+    final callback = widget.onDownloadAtChapter;
+    if (callback == null) {
+      await widget.onDownload?.call(context, widget.chapters);
+      return;
+    }
+    final chapters = List<Chapter>.unmodifiable(widget.chapters);
+    final index =
+        (_joined ? _joinedKey.currentState?.position?.index : null) ?? _index;
+    final current = index >= 0 && index < chapters.length ? index : null;
+    await callback(context, chapters, current);
+  }
+
   Widget _buildReader(BuildContext context) {
     if (!isWindowsDesktop) return _buildReaderSurface(context);
     return LayoutBuilder(
@@ -282,6 +298,49 @@ extension _ReaderPageBuild on _ReaderPageState {
                     !_progressPreviewActive)
                   ReaderEdgeBlur(animation: _chrome),
                 _menuEdge(top: true, child: _buildToolbar(preset)),
+                if (widget.novelOnly &&
+                    _novelRest.due &&
+                    _routeCurrent &&
+                    _appActive)
+                  Positioned(
+                    left: 12,
+                    right: 12,
+                    top: windowPadding.top + 8,
+                    child: Material(
+                      key: const ValueKey('reader-rest-reminder'),
+                      color: preset.panelColor,
+                      elevation: 4,
+                      borderRadius: BorderRadius.circular(12),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text('已达到设定的阅读时间，可以休息一下。自动翻页已暂停。'),
+                            Wrap(
+                              alignment: WrapAlignment.end,
+                              spacing: 8,
+                              children: [
+                                TextButton(
+                                  onPressed: () =>
+                                      _answerNovelRest(snooze: true),
+                                  child: const Text('5 分钟后提醒'),
+                                ),
+                                FilledButton(
+                                  onPressed: () =>
+                                      _answerNovelRest(snooze: false),
+                                  child: const Text('继续阅读'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 Positioned(
                   bottom: 0,
                   left: 0,
@@ -445,7 +504,7 @@ extension _ReaderPageBuild on _ReaderPageState {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (widget.novelOnly)
+            if (widget.novelOnly && !_isImportedBook)
               GlassMenuItem(
                 key: const ValueKey('reader-ideas-toggle'),
                 icon: _preferences.showParagraphBubbles
@@ -461,7 +520,7 @@ extension _ReaderPageBuild on _ReaderPageState {
                 label: _ideasFailed ? '段评加载失败 · 重试' : '段落评论',
                 onPressed: () => Navigator.pop(menu, 'paragraphs'),
               ),
-            if (widget.novelOnly && widget.onDownload != null)
+            if (widget.novelOnly && _hasDownloadHandler)
               GlassMenuItem(
                 key: const ValueKey('reader-download-menu'),
                 icon: CupertinoIcons.tray_arrow_down,
@@ -474,6 +533,20 @@ extension _ReaderPageBuild on _ReaderPageState {
                 icon: CupertinoIcons.arrow_clockwise,
                 label: '刷新目录',
                 onPressed: () => Navigator.pop(menu, 'refresh-directory'),
+              ),
+            if (widget.novelOnly)
+              GlassMenuItem(
+                key: const ValueKey('reader-book-layout'),
+                icon: CupertinoIcons.textformat,
+                label: '本书阅读配置',
+                onPressed: () => Navigator.pop(menu, 'book-layout'),
+              ),
+            if (widget.novelOnly)
+              GlassMenuItem(
+                key: const ValueKey('reader-rest-settings'),
+                icon: CupertinoIcons.clock,
+                label: '休息提醒',
+                onPressed: () => Navigator.pop(menu, 'rest-settings'),
               ),
             if (!widget.novelOnly && !widget.localOnly)
               GlassMenuItem(
@@ -527,9 +600,13 @@ extension _ReaderPageBuild on _ReaderPageState {
       case 'cache':
         await _showCache();
       case 'download':
-        await widget.onDownload?.call(context, widget.chapters);
+        await _openBookDownloads();
       case 'refresh-directory':
         await widget.onRefreshCatalogue?.call();
+      case 'book-layout':
+        await _showBookLayout();
+      case 'rest-settings':
+        await _showNovelRestSettings();
       case 'comments':
         await _showIdeas(focusParaIndex: _chapterEndParagraph());
       case 'shelf':
@@ -591,9 +668,9 @@ extension _ReaderPageBuild on _ReaderPageState {
           onOperations: () => _showAppearanceSettings(
             section: ReaderSettingsSection.operations,
           ),
-          onDownload: widget.onDownload == null
-              ? null
-              : () => unawaited(widget.onDownload!(context, widget.chapters)),
+          onDownload: _hasDownloadHandler
+              ? () => unawaited(_openBookDownloads())
+              : null,
           onFind: _loading || !_progressReady ? null : _showFind,
           onAi: !widget.novelOnly && _currentAiView?.aiEnabled == true
               ? _showAiPanel
@@ -618,7 +695,10 @@ extension _ReaderPageBuild on _ReaderPageState {
             ),
           ),
           const SizedBox(height: 12),
-          if (widget.novelOnly && widget.localOnly && !_offlineOnlineEnabled)
+          if (widget.novelOnly &&
+              widget.localOnly &&
+              !_isImportedBook &&
+              !_offlineOnlineEnabled)
             FilledButton.icon(
               key: const ValueKey('reader-go-online'),
               icon: const Icon(Icons.wifi),

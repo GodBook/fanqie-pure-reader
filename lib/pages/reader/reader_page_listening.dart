@@ -17,6 +17,10 @@ extension _ReaderPageListening on _ReaderPageState {
       _stopAutoTurn();
       return;
     }
+    if (widget.novelOnly && _novelRest.due) {
+      _showMessage('请先选择继续阅读或稍后提醒');
+      return;
+    }
     _setControlsVisible(false);
     _autoTurnTimer = Timer.periodic(
       Duration(seconds: _preferences.autoTurnSeconds),

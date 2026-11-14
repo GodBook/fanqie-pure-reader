@@ -160,6 +160,7 @@ extension _ReaderJoinedContent on _ReaderPageState {
     Chapter chapter,
     int generation,
   ) async {
+    if (_isImportedBook) return;
     if (_unverifiedChapterVersions.containsKey(chapter.itemId)) return;
     if (widget.novelOnly && !_preferences.showParagraphBubbles) {
       return;

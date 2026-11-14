@@ -2,12 +2,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:fqapp/models/chapter_ideas.dart';
 import 'package:fqapp/models/media_item.dart';
 import 'package:fqapp/pages/reader_page.dart';
 import 'package:fqapp/services/chapter_cache_store.dart';
 import 'package:fqapp/services/chapter_ideas_store.dart';
 import 'package:fqapp/services/chapter_text_formatter.dart';
+import 'package:fqapp/services/novel_reader_profiles.dart';
+import 'package:fqapp/services/reader_preferences.dart';
 import 'package:fqapp/widgets/reader/reader_paged_view.dart';
 import 'support/fakes.dart';
 
@@ -47,6 +50,21 @@ class DelayedWriteCache extends MemoryChapterCache {
   Future<void> saveBook(CachedBook book) async {
     await saving.future;
     await super.saveBook(book);
+  }
+}
+
+class DelayedProfileWrite extends InMemorySharedPreferencesStore {
+  DelayedProfileWrite() : super.withData({'flutter.reader_page_mode': 'paged'});
+  final entered = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (key.endsWith('novel_reader_profiles_v1')) {
+      if (!entered.isCompleted) entered.complete();
+      await release.future;
+    }
+    return super.setValue(valueType, key, value);
   }
 }
 
@@ -144,6 +162,62 @@ void main() {
       await tester.pumpAndSettle();
     },
   );
+
+  testWidgets('profile persistence does not delay the chapter index request', (
+    tester,
+  ) async {
+    await size(tester);
+    final original = SharedPreferencesStorePlatform.instance;
+    final backend = DelayedProfileWrite();
+    SharedPreferences.resetStatic();
+    SharedPreferencesStorePlatform.instance = backend;
+    addTearDown(() {
+      if (!backend.release.isCompleted) backend.release.complete();
+      SharedPreferences.resetStatic();
+      SharedPreferencesStorePlatform.instance = original;
+    });
+    final pending = NovelReaderProfilesStore.instance.saveBook(
+      'b',
+      const NovelReaderLayout(
+        fontSize: 20,
+        lineHeight: 1.8,
+        pageMode: ReaderPageMode.paged,
+      ),
+    );
+    await tester.pump();
+    expect(backend.entered.isCompleted, isTrue);
+    final body = Completer<String>();
+    final index = Completer<ChapterIdeas>();
+    var bodyCalls = 0;
+    var indexCalls = 0;
+    try {
+      await tester.pumpWidget(
+        reader(
+          chapterLoader: (_) {
+            bodyCalls++;
+            return body.future;
+          },
+          loader: (_) {
+            indexCalls++;
+            return index.future;
+          },
+        ),
+      );
+      await tester.pump();
+      expect(bodyCalls, 1);
+      expect(indexCalls, 1);
+      expect(backend.release.isCompleted, isFalse);
+    } finally {
+      backend.release.complete();
+      body.complete(text);
+      index.complete(ideas);
+      await tester.pumpAndSettle();
+      await pending;
+    }
+    expect(find.byType(ReaderPagedView), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+  });
 
   testWidgets(
     'successful indices remain visible through failure and incomplete empty responses',

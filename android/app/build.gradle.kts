@@ -145,7 +145,7 @@ kotlin {
             "**/NativeGestureLevels.kt",
             "**/RendererCompatibility.kt", "**/EinkRefreshPlugin.kt",
             "**/FairMemoryPlugin.kt", "**/SharePlugin.kt", "**/DownloadsPlugin.kt",
-            "**/LibraryBackupPlugin.kt", "**/AppUpdatePlugin.kt",
+            "**/LibraryBackupPlugin.kt", "**/AppUpdatePlugin.kt", "**/LocalBookPickerPlugin.kt",
         ))
     }
     compilerOptions {

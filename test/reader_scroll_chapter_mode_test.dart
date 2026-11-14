@@ -401,6 +401,99 @@ void main() {
     expect(state.position!.index, greaterThan(0));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('下载入口使用连续滚动的可见章节并保留目录快照', (tester) async {
+    final chapters = List.generate(
+      8,
+      (i) => Chapter(itemId: 'c$i', title: '章 $i', volumeName: '正文'),
+    );
+    final indexes = <int?>[];
+    final snapshots = <List<Chapter>>[];
+    await _mountReader(
+      tester,
+      MemoryReaderStore(),
+      novelOnly: true,
+      chapters: chapters,
+      onDownloadAtChapter: (_, snapshot, index) async {
+        indexes.add(index);
+        snapshots.add(snapshot);
+      },
+    );
+    final joined = tester.state<ReaderJoinedScrollState>(
+      find.byType(ReaderJoinedScroll),
+    );
+    joined.jumpToChapterOffset(1, 240);
+    await tester.pumpAndSettle();
+    expect(joined.position?.index, 1);
+    await _openDownloadControls(tester);
+    await tester.tap(find.byKey(const ValueKey('reader-download-entry')));
+    await tester.pumpAndSettle();
+    expect(indexes, [1]);
+    chapters.insert(0, Chapter(itemId: 'new', title: '新章', volumeName: ''));
+    expect(snapshots.single[1].itemId, 'c1');
+    chapters.removeAt(0);
+    await tester.tap(find.byKey(const ValueKey('reader-header-more')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reader-download-menu')));
+    await tester.pumpAndSettle();
+    expect(indexes, [1, 1]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('切章后的下载入口使用新章节', (tester) async {
+    SharedPreferences.setMockInitialValues({'reader_page_mode': 'paged'});
+    final indexes = <int?>[];
+    await _mountReader(
+      tester,
+      MemoryReaderStore(),
+      novelOnly: true,
+      onDownloadAtChapter: (_, _, index) async => indexes.add(index),
+    );
+    await _openDownloadControls(tester);
+    await tester.tap(find.byKey(const ValueKey('reader-catalogue-entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reader-directory-row-2')));
+    await tester.pumpAndSettle();
+    await _openDownloadControls(tester);
+    await tester.tap(find.byKey(const ValueKey('reader-download-entry')));
+    await tester.pumpAndSettle();
+    expect(indexes, [2]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('旧版两参数下载回调仍适用于两个入口', (tester) async {
+    var calls = 0;
+    await _mountReader(
+      tester,
+      MemoryReaderStore(),
+      novelOnly: true,
+      onDownload: (_, _) async {
+        calls++;
+      },
+    );
+    await _openDownloadControls(tester);
+    await tester.tap(find.byKey(const ValueKey('reader-download-entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reader-header-more')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reader-download-menu')));
+    await tester.pumpAndSettle();
+    expect(calls, 2);
+    expect(tester.takeException(), isNull);
+  });
+}
+
+Future<void> _openDownloadControls(WidgetTester tester) async {
+  if (find
+      .byKey(const ValueKey('reader-catalogue-entry'))
+      .hitTestable()
+      .evaluate()
+      .isEmpty) {
+    await tester.tapAt(
+      tester.getCenter(find.byKey(const ValueKey('reader-page-surface'))),
+    );
+    await tester.pumpAndSettle();
+  }
 }
 
 Future<void> _mountReader(
@@ -409,6 +502,10 @@ Future<void> _mountReader(
   ChapterTextLoader? loader,
   ChapterIdeasLoader? ideasLoader,
   ParagraphCommentResolver? commentResolver,
+  bool novelOnly = false,
+  List<Chapter>? chapters,
+  Future<void> Function(BuildContext, List<Chapter>)? onDownload,
+  Future<void> Function(BuildContext, List<Chapter>, int?)? onDownloadAtChapter,
 }) async {
   tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   await tester.binding.setSurfaceSize(const Size(400, 600));
@@ -423,6 +520,10 @@ Future<void> _mountReader(
       loader: loader,
       ideasLoader: ideasLoader,
       commentResolver: commentResolver,
+      novelOnly: novelOnly,
+      chapters: chapters,
+      onDownload: onDownload,
+      onDownloadAtChapter: onDownloadAtChapter,
     ),
   );
   await tester.pumpAndSettle();
@@ -439,21 +540,30 @@ Widget _readerApp(
   ChapterTextLoader? loader,
   ChapterIdeasLoader? ideasLoader,
   ParagraphCommentResolver? commentResolver,
+  bool novelOnly = false,
+  List<Chapter>? chapters,
+  Future<void> Function(BuildContext, List<Chapter>)? onDownload,
+  Future<void> Function(BuildContext, List<Chapter>, int?)? onDownloadAtChapter,
 }) => MaterialApp(
   theme: ThemeData(splashFactory: NoSplash.splashFactory),
   home: ReaderPage(
     bookId: 'joined-test',
     title: '拼接测试',
     startIndex: start,
-    chapters: List.generate(
-      8,
-      (i) => Chapter(itemId: 'c$i', title: '章 $i', volumeName: '正文'),
-    ),
+    chapters:
+        chapters ??
+        List.generate(
+          8,
+          (i) => Chapter(itemId: 'c$i', title: '章 $i', volumeName: '正文'),
+        ),
     readerStore: store,
     underlineStore: ReaderUnderlineStore(),
     chapterCache: MemoryChapterCache(),
     chapterLoader: loader ?? (chapter) async => _text(chapter),
     ideasLoader: ideasLoader,
     commentResolver: commentResolver,
+    novelOnly: novelOnly,
+    onDownload: onDownload,
+    onDownloadAtChapter: onDownloadAtChapter,
   ),
 );

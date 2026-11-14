@@ -227,6 +227,15 @@ void main() {
     expect(await store.cachedChapterIds('a'), {'4', '6'});
   });
 
+  test('search peek does not change the chapter eviction order', () async {
+    final store = ChapterCacheStore(keys: keys, maxEntries: 2);
+    await _write(store, 'a', '1', 'aaaa');
+    await _write(store, 'a', '2', 'bbbb');
+    expect(await store.peek(bookId: 'a', chapterId: '1'), 'aaaa');
+    await _write(store, 'a', '3', 'cccc');
+    expect(await store.cachedChapterIds('a'), {'2', '3'});
+  });
+
   test(
     'a catalogue saved before its first chapter survives other evictions',
     () async {

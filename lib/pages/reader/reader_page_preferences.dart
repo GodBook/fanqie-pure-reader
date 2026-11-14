@@ -113,12 +113,27 @@ extension _ReaderPagePreferences on _ReaderPageState {
     );
   }
 
-  Future<void> _loadPreferences() async {
-    ReaderPreferences preferences;
+  Future<ReaderPreferences> _loadGlobalPreferences() async {
     try {
-      preferences = await ReaderPreferences.load();
+      return await ReaderPreferences.load();
     } catch (_) {
-      preferences = const ReaderPreferences();
+      return const ReaderPreferences();
+    }
+  }
+
+  Future<void> _loadPreferences() async {
+    var preferences = await _globalPreferencesFuture;
+    _globalPreferences = preferences;
+    if (widget.novelOnly) {
+      try {
+        _bookLayout = await NovelReaderProfilesStore.instance.loadBook(
+          widget.bookId,
+        );
+        _savedBookLayout = _bookLayout;
+        preferences = _bookLayout?.apply(preferences) ?? preferences;
+      } catch (_) {
+        _bookLayoutAvailable = false;
+      }
     }
     if (!mounted) return;
     _setState(() {
@@ -128,6 +143,7 @@ extension _ReaderPagePreferences on _ReaderPageState {
         _dayTheme = preferences.themePreset;
       }
     });
+    if (!_bookLayoutAvailable) _showMessage('本书排版读取失败，原有数据已保留');
     if (_controlsVisible) _loadReaderMenuData();
     _syncSystemBars();
     _syncVolumeKeyEnabled();
@@ -194,13 +210,69 @@ extension _ReaderPagePreferences on _ReaderPageState {
       unawaited(_device.keepScreenOn(_preferences.keepScreenOn));
     }
     if (!_preferencesReady || !_preferencesDirty) return;
-    final snapshot = _preferences;
+    final bookSnapshot = _bookLayout == null
+        ? null
+        : NovelReaderLayout.fromPreferences(_preferences);
+    final snapshot = bookSnapshot == null
+        ? _preferences
+        : _preferences.copyWith(
+            fontSize: _globalPreferences.fontSize,
+            lineHeight: _globalPreferences.lineHeight,
+            pageMode: _globalPreferences.pageMode,
+          );
     _preferencesDirty = false;
     try {
+      if (bookSnapshot != null) {
+        await NovelReaderProfilesStore.instance.saveBook(
+          widget.bookId,
+          bookSnapshot,
+        );
+        _bookLayout = bookSnapshot;
+        _savedBookLayout = bookSnapshot;
+      }
       await snapshot.save();
+      _globalPreferences = snapshot;
     } catch (_) {
       _preferencesDirty = true;
+      if (mounted && bookSnapshot != null && _savedBookLayout != null) {
+        _setSettingsPreview(true);
+        _previewPreferences(_savedBookLayout!.apply(_preferences));
+        _setSettingsPreview(false);
+      }
       if (mounted) _showMessage('设置保存失败，请重试');
+    }
+  }
+
+  Future<void> _showBookLayout() async {
+    if (!_preferencesReady || !_bookLayoutAvailable) {
+      _showMessage('本书排版暂不可用，请重新进入阅读器');
+      return;
+    }
+    _stopAutoTurn();
+    _readerPanelOpen = true;
+    final choice = await showNovelBookLayout(
+      context: context,
+      current: NovelReaderLayout.fromPreferences(_preferences),
+      global: NovelReaderLayout.fromPreferences(_globalPreferences),
+      inherits: _bookLayout == null,
+    );
+    if (choice == null || !mounted) return;
+    final layout = choice.inherit ? null : choice.layout;
+    try {
+      await NovelReaderProfilesStore.instance.saveBook(widget.bookId, layout);
+      if (!mounted) return;
+      _bookLayout = layout;
+      _savedBookLayout = layout;
+      _setSettingsPreview(true);
+      _previewPreferences(
+        (layout ?? NovelReaderLayout.fromPreferences(_globalPreferences)).apply(
+          _preferences,
+        ),
+      );
+      _setSettingsPreview(false);
+      await _savePreferences();
+    } catch (_) {
+      if (mounted) _showMessage('本书排版保存失败，原设置未改变');
     }
   }
 

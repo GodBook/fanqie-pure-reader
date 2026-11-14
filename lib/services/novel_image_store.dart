@@ -32,6 +32,18 @@ class NovelImageSummary {
   }
 }
 
+/// File bytes are counted once globally. Per-book values may overlap when
+/// multiple books refer to the same image and must not be added together.
+@immutable
+class NovelImageStorageUsage {
+  const NovelImageStorageUsage({
+    required this.totalBytes,
+    required this.bookBytes,
+  });
+  final int totalBytes;
+  final Map<String, int> bookBytes;
+}
+
 /// User-requested novel illustrations live outside the disposable poster cache.
 /// Files and reference manifests use hashes; no credentials or chapter text are
 /// written into filenames or exported by the reading-data backup.
@@ -60,7 +72,16 @@ class NovelImageStore {
 
   String _hash(String value) => sha256.convert(utf8.encode(value)).toString();
 
-  Future<Directory> _root() => _rootFuture ??= _directory();
+  Future<Directory> _root() => _rootFuture ??= _openRoot();
+
+  Future<Directory> _openRoot() async {
+    try {
+      return await _directory();
+    } catch (_) {
+      _rootFuture = null;
+      rethrow;
+    }
+  }
 
   Future<File> _imageFile(String hash) async =>
       File('${(await _root()).path}/files/$hash.image');
@@ -260,6 +281,38 @@ class NovelImageStore {
       return NovelImageSummary(uncheckedChapters: chapters.length);
     }
   }
+
+  Future<NovelImageStorageUsage> storageUsage(Iterable<String> bookIds) =>
+      _serialize(() async {
+        final refsByBook = <String, Set<String>>{};
+        for (final id in bookIds.toSet()) {
+          final manifest = await _readManifest(await _manifestFile(id));
+          refsByBook[id] = manifest.values.expand((refs) => refs).toSet();
+        }
+        final sizes = <String, int>{};
+        final directory = Directory('${(await _root()).path}/files');
+        if (await directory.exists()) {
+          await for (final entity in directory.list()) {
+            if (entity is! File) continue;
+            final name = entity.uri.pathSegments.last;
+            if (!RegExp(r'^[0-9a-f]{64}\.image$').hasMatch(name)) continue;
+            final stat = await entity.stat();
+            if (stat.type == FileSystemEntityType.file) {
+              sizes[name.substring(0, 64)] = stat.size;
+            }
+          }
+        }
+        return NovelImageStorageUsage(
+          totalBytes: sizes.values.fold<int>(0, (sum, size) => sum + size),
+          bookBytes: Map.unmodifiable({
+            for (final entry in refsByBook.entries)
+              entry.key: entry.value.fold<int>(
+                0,
+                (sum, hash) => sum + (sizes[hash] ?? 0),
+              ),
+          }),
+        );
+      });
 
   Future<void> invalidate(String url) => _serialize(() async {
     final file = await _imageFile(_hash(url));

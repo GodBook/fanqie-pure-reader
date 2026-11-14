@@ -12,6 +12,10 @@ import 'chapter_download.dart';
 import 'connectivity_status.dart';
 import 'app_log.dart';
 import 'novel_image_store.dart';
+import 'novel_shelf_management.dart';
+
+export 'novel_shelf_management.dart';
+export 'novel_download_queue.dart';
 
 /// Foreground update checks only. A saved catalogue tail makes a partial
 /// download follow new chapters without downloading the existing backlog.
@@ -57,6 +61,8 @@ class NovelDownloadManager extends ChangeNotifier {
   final manualTask = ValueNotifier<ChapterDownload?>(null);
   final Expando<int> _batchStarts = Expando<int>();
   final Expando<bool> _imagesOnly = Expando<bool>();
+  final Expando<bool> _invalidRanges = Expando<bool>();
+  final Expando<List<String>> _batchChapterIds = Expando<List<String>>();
   SharedPreferences? _preferences;
   Future<void>? _opening;
   Map<String, String> _tails = {};
@@ -66,6 +72,7 @@ class NovelDownloadManager extends ChangeNotifier {
   bool _foreground = true;
   bool _disposed = false;
   int _manualGeneration = 0;
+  Future<void> _manualWrites = Future.value();
   int _checkGeneration = 0;
   ChapterDownload? _automaticDownload;
   DateTime? _lastCheck;
@@ -98,11 +105,31 @@ class NovelDownloadManager extends ChangeNotifier {
       if (raw is Map && raw['id'] is String) {
         final book = await cache.savedCatalogue(raw['id'] as String);
         if (book != null && raw['start'] is int && raw['count'] is int) {
-          final start = (raw['start'] as int).clamp(0, book.chapters.length);
-          final count = (raw['count'] as int).clamp(
+          var start = (raw['start'] as int).clamp(0, book.chapters.length);
+          var count = (raw['count'] as int).clamp(
             0,
             book.chapters.length - start,
           );
+          final storedIds = raw['chapterIds'];
+          var validRange = true;
+          if (storedIds is List && storedIds.every((id) => id is String)) {
+            final requested = storedIds.cast<String>();
+            start = requested.isEmpty
+                ? -1
+                : book.chapters.indexWhere((c) => c.itemId == requested.first);
+            validRange =
+                start >= 0 &&
+                listEquals(
+                  book.chapters
+                      .skip(start)
+                      .take(requested.length)
+                      .map((c) => c.itemId)
+                      .toList(),
+                  requested,
+                );
+            count = requested.length;
+            if (!validRange) start = 0;
+          }
           final ids = await cache.cachedChapterIds(book.id);
           final selectedIds = book.chapters
               .skip(start)
@@ -128,7 +155,9 @@ class NovelDownloadManager extends ChangeNotifier {
             completed: completed,
             total: total,
             incompleteImages: incompleteImages,
-            message: incompleteImages > 0
+            message: !validRange
+                ? '目录已变化，请重新选择下载范围；已下载章节保留'
+                : incompleteImages > 0
                 ? '正文已保存 $completed/$total 章 · 插图待补存，可继续'
                 : completed == total
                 ? '下载完成 · $completed/$total 章'
@@ -136,6 +165,13 @@ class NovelDownloadManager extends ChangeNotifier {
           );
           _batchStarts[batch] = start;
           _imagesOnly[batch] = imagesOnly;
+          _invalidRanges[batch] = !validRange;
+          _batchChapterIds[batch] =
+              storedIds is List && storedIds.every((id) => id is String)
+              ? List<String>.unmodifiable(storedIds.cast<String>())
+              : List<String>.unmodifiable(
+                  book.chapters.skip(start).take(count).map((c) => c.itemId),
+                );
           manualTask.value = batch;
           active.value = batch;
         }
@@ -148,12 +184,38 @@ class NovelDownloadManager extends ChangeNotifier {
   Future<void> _saveTails() async =>
       _preferences!.setString('novel_followed_tails', jsonEncode(_tails));
 
+  Future<String?> _storeManualTask(String? value, int generation) async {
+    final operation = _manualWrites.then((_) async {
+      if (generation != _manualGeneration) return null;
+      final previous = _preferences!.getString('novel_manual_task');
+      try {
+        final saved = value == null
+            ? await _preferences!.remove('novel_manual_task')
+            : await _preferences!.setString('novel_manual_task', value);
+        if (!saved) throw StateError('下载任务保存失败');
+      } catch (error, stack) {
+        try {
+          if (previous == null) {
+            await _preferences!.remove('novel_manual_task');
+          } else {
+            await _preferences!.setString('novel_manual_task', previous);
+          }
+        } catch (_) {}
+        Error.throwWithStackTrace(error, stack);
+      }
+      return previous;
+    });
+    _manualWrites = operation.then<void>((_) {}, onError: (Object _) {});
+    return operation;
+  }
+
   Future<void> configure({bool? autoUpdate, bool? onlyWifi}) async {
     await initialize();
     final changed =
         (autoUpdate != null && autoUpdate != enabled) ||
         (onlyWifi != null && onlyWifi != wifiOnly);
     if (changed) {
+      NovelShelfManagement.instance.invalidateChecks();
       _checkGeneration++;
       _automaticDownload?.cancel();
     }
@@ -168,15 +230,21 @@ class NovelDownloadManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool get isForeground => _foreground && !_disposed;
+
   void setForeground(bool value) {
+    if (_foreground == value) return;
+    NovelShelfManagement.instance.invalidateChecks();
     if (_foreground && !value) _checkGeneration++;
     _foreground = value;
     if (!value) _automaticDownload?.cancel();
+    if (!_disposed) notifyListeners();
   }
 
   /// A connection may disappear and return while a directory request waits.
   /// Invalidate that check even if the next connectivity probe sees it online.
   void networkChanged() {
+    NovelShelfManagement.instance.invalidateChecks();
     if (!checking) return;
     _checkGeneration++;
     _automaticDownload?.cancel();
@@ -186,7 +254,7 @@ class NovelDownloadManager extends ChangeNotifier {
     await initialize();
     // Invalidate an update that already captured this book's catalogue, so a
     // delayed response cannot recreate content the user just deleted.
-    _manualGeneration++;
+    final generation = ++_manualGeneration;
     _checkGeneration++;
     _automaticDownload?.cancel();
     final forgotten = manualTask.value;
@@ -204,10 +272,10 @@ class NovelDownloadManager extends ChangeNotifier {
     final raw = _preferences!.getString('novel_manual_task');
     try {
       if (raw != null && (jsonDecode(raw) as Map)['id'] == bookId) {
-        await _preferences!.remove('novel_manual_task');
+        await _storeManualTask(null, generation);
       }
     } on FormatException {
-      await _preferences!.remove('novel_manual_task');
+      await _storeManualTask(null, generation);
     }
     await imageStore?.removeBook(bookId);
   }
@@ -217,45 +285,99 @@ class NovelDownloadManager extends ChangeNotifier {
     int? count,
     int startIndex = 0,
     bool imagesOnly = false,
+    bool foregroundOnly = false,
+    bool onlyWhenIdle = false,
+    bool preserveExistingCatalogue = false,
+    bool Function()? canStart,
   }) async {
     await initialize();
+    if ((foregroundOnly && !isForeground) ||
+        (onlyWhenIdle && active.value?.value.running == true) ||
+        canStart?.call() == false) {
+      return;
+    }
+    var first = startIndex.clamp(0, book.chapters.length);
+    final selectedCount = (count ?? book.chapters.length).clamp(
+      0,
+      book.chapters.length - first,
+    );
+    final selectedIds = book.chapters
+        .skip(first)
+        .take(selectedCount)
+        .map((c) => c.itemId)
+        .toList();
+    if (preserveExistingCatalogue) {
+      final currentCache = cache;
+      final current = currentCache is ConditionalChapterCatalogue
+          ? await (currentCache as ConditionalChapterCatalogue)
+                .preserveOrCreateCatalogue(book)
+          : await currentCache.savedCatalogue(book.id) ?? book;
+      first = selectedIds.isEmpty
+          ? -1
+          : current.chapters.indexWhere(
+              (chapter) => chapter.itemId == selectedIds.first,
+            );
+      if (first < 0 ||
+          !listEquals(
+            current.chapters
+                .skip(first)
+                .take(selectedIds.length)
+                .map((chapter) => chapter.itemId)
+                .toList(),
+            selectedIds,
+          )) {
+        throw StateError('目录已变化，请重新选择下载范围；已下载章节保留');
+      }
+      book = current;
+      if (currentCache is! ConditionalChapterCatalogue &&
+          await currentCache.savedCatalogue(book.id) == null) {
+        await currentCache.saveBook(book);
+      }
+    }
     final generation = ++_manualGeneration;
     _checkGeneration++;
     active.value?.cancel();
-    await cache.saveBook(book);
-    await _preferences!.setString(
-      'novel_manual_task',
+    if (!preserveExistingCatalogue) await cache.saveBook(book);
+    final previousTask = await _storeManualTask(
       jsonEncode({
         'id': book.id,
-        'start': startIndex,
-        'count': (count ?? book.chapters.length).clamp(
-          0,
-          book.chapters.length - startIndex.clamp(0, book.chapters.length),
-        ),
+        'start': first,
+        'count': selectedCount,
+        'chapterIds': selectedIds,
         'imagesOnly': imagesOnly,
       }),
+      generation,
     );
+    if (generation != _manualGeneration || _disposed) return;
     if (book.chapters.isNotEmpty) {
       _tails.putIfAbsent(book.id, () => book.chapters.last.itemId);
       await _saveTails();
     }
     if (generation != _manualGeneration || _disposed) return;
+    if ((foregroundOnly && !isForeground) ||
+        (onlyWhenIdle && active.value?.value.running == true) ||
+        canStart?.call() == false) {
+      await _storeManualTask(previousTask, generation);
+      return;
+    }
     final batch = ChapterDownload(
       cache: cache,
       book: book,
       loader: contentLoader,
       imageStore: imageStore,
     );
-    _batchStarts[batch] = startIndex;
+    _batchStarts[batch] = first;
     _imagesOnly[batch] = imagesOnly;
+    _batchChapterIds[batch] = List.unmodifiable(selectedIds);
     manualTask.value = batch;
     active.value = batch;
     unawaited(
       batch.start(
-        startIndex: startIndex,
-        count: count ?? book.chapters.length,
+        startIndex: first,
+        count: selectedCount,
         pin: true,
         onlyCached: imagesOnly,
+        saveCatalogue: !preserveExistingCatalogue,
       ),
     );
   }
@@ -266,17 +388,87 @@ class NovelDownloadManager extends ChangeNotifier {
     active.value?.cancel();
   }
 
-  Future<void> resume(ChapterDownload download) {
+  Future<void> resume(ChapterDownload download) async {
+    if (_invalidRanges[download] == true) {
+      throw StateError('目录已变化，请重新选择下载范围');
+    }
     final imagesOnly =
         _imagesOnly[download] == true ||
         (download.value.completed == download.value.total &&
             download.value.incompleteImages > 0);
+    final book = await cache.savedCatalogue(download.book.id);
+    if (!identical(manualTask.value, download)) throw StateError('下载任务已改变');
+    var startIndex = 0;
+    final selected = _batchChapterIds[download];
+    if (!imagesOnly) {
+      startIndex = book == null || selected == null || selected.isEmpty
+          ? -1
+          : book.chapters.indexWhere(
+              (chapter) => chapter.itemId == selected.first,
+            );
+      if (startIndex < 0 ||
+          book == null ||
+          selected == null ||
+          !listEquals(
+            book.chapters
+                .skip(startIndex)
+                .take(selected.length)
+                .map((chapter) => chapter.itemId)
+                .toList(),
+            selected,
+          )) {
+        _invalidRanges[download] = true;
+        final state = download.value;
+        download.value = ChapterDownloadState(
+          completed: state.completed,
+          total: state.total,
+          incompleteImages: state.incompleteImages,
+          message: '目录已变化，请重新选择下载范围；已下载章节保留',
+        );
+        throw StateError('目录已变化，请重新选择下载范围');
+      }
+    }
+    if (book == null) throw StateError('目录不可用，请重新选择下载范围');
     return start(
-      download.book,
-      count: imagesOnly ? download.book.chapters.length : download.value.total,
-      startIndex: imagesOnly ? 0 : _batchStarts[download] ?? 0,
+      book,
+      count: imagesOnly ? book.chapters.length : selected!.length,
+      startIndex: imagesOnly ? 0 : startIndex,
       imagesOnly: imagesOnly,
     );
+  }
+
+  bool needsRangeReselection(ChapterDownload download) =>
+      _invalidRanges[download] == true;
+
+  bool manualRangeMatches(String bookId, List<String> chapterIds) {
+    final task = manualTask.value;
+    return task != null &&
+        !needsRangeReselection(task) &&
+        manualRangeIdentical(bookId, chapterIds);
+  }
+
+  /// Identity is retained even if a later catalogue makes this range invalid.
+  bool manualRangeIdentical(String bookId, List<String> chapterIds) {
+    final task = manualTask.value;
+    if (task == null || task.book.id != bookId || _imagesOnly[task] == true) {
+      return false;
+    }
+    return listEquals(_batchChapterIds[task], chapterIds);
+  }
+
+  /// Forget only the selected task; cached chapters and illustrations stay.
+  Future<void> clearManualTask(ChapterDownload task) async {
+    await initialize();
+    if (!identical(manualTask.value, task)) return;
+    final generation = ++_manualGeneration;
+    _checkGeneration++;
+    task.cancel();
+    await _storeManualTask(null, generation);
+    if (generation != _manualGeneration || !identical(manualTask.value, task)) {
+      return;
+    }
+    if (identical(active.value, task)) active.value = null;
+    manualTask.value = null;
   }
 
   Future<bool> _allowed({bool manual = false}) async {

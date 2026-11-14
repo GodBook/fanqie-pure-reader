@@ -79,13 +79,28 @@ try {
         $env:RELEASE_KEY_ALIAS = 'novel-reader'
     }
 
+    # Bind the compiler action to actual Dart sources, including after tests.
+    $sourceManifest = @(@(Get-ChildItem -LiteralPath (Join-Path $BuildRoot 'lib') -Recurse -File -Filter '*.dart') +
+        @(Get-Item -LiteralPath (Join-Path $BuildRoot 'pubspec.yaml')) | Sort-Object FullName | ForEach-Object {
+            [pscustomobject]@{
+                path = [IO.Path]::GetRelativePath($BuildRoot, $_.FullName).Replace('\', '/')
+                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        })
+    $sourceCanonical = ($sourceManifest | ForEach-Object { $_.path + "`t" + $_.sha256 }) -join "`n"
+    $sourceDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($sourceCanonical))).ToLowerInvariant()
     # Flutter prepares production-only plugin registration for release; calling
     # Gradle directly after a widget test can leave dev-only plugins registered.
     Invoke-Checked 'flutter' @('--no-version-check', 'build', 'apk', "--$BuildMode",
-        '--target-platform', 'android-arm64', '--target', $DartTarget)
+        '--target-platform', 'android-arm64', '--target', $DartTarget, "--dart-define=FQAPP_SOURCE_DIGEST=$sourceDigest")
 
     $apk = Join-Path $BuildRoot "build/app/outputs/flutter-apk/app-$BuildMode.apk"
     if (-not (Test-Path -LiteralPath $apk)) { throw 'Gradle completed without the expected APK.' }
+    foreach ($sourceEntry in $sourceManifest) {
+        if ((Get-FileHash -LiteralPath (Join-Path $BuildRoot $sourceEntry.path) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sourceEntry.sha256) {
+            throw "Source changed during build: $($sourceEntry.path). Rebuild the final source."
+        }
+    }
     if ($BuildMode -eq 'release' -and -not $AcceptancePackage) {
         & (Join-Path $projectRoot 'scripts/verify_novel_apk.ps1') -ApkPath $apk -ReportPath (Join-Path $BuildRoot 'build/novel-validation/package.json')
     }
@@ -95,6 +110,11 @@ try {
     $destination = Join-Path $distribution "fanqie-pure-$outputKind-arm64.apk"
     Copy-Item -LiteralPath $apk -Destination $destination -Force
     $hash = Get-FileHash -LiteralPath $destination -Algorithm SHA256
+    $bindingDirectory = Join-Path $BuildRoot 'build/novel-validation'
+    New-Item -ItemType Directory -Path $bindingDirectory -Force | Out-Null
+    [pscustomobject]@{ target = $DartTarget; mode = $BuildMode; sourceDigest = $sourceDigest;
+        sourceFiles = $sourceManifest; apk = $destination; sha256 = $hash.Hash.ToLowerInvariant() } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bindingDirectory 'build-source-binding.json') -Encoding utf8
     "$($hash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($destination))" |
         Set-Content -LiteralPath (Join-Path $distribution "$outputKind-SHA256SUMS") -Encoding utf8
     Write-Host "APK: $destination"

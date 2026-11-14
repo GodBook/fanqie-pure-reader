@@ -163,7 +163,10 @@ void main() {
         find.descendant(of: firstTile, matching: find.byTooltip('编辑笔记')),
       );
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), '修改第一条');
+      await tester.enterText(
+        find.byKey(const ValueKey('reader-note-input')),
+        '修改第一条',
+      );
       await tester.tap(find.text('保存'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));

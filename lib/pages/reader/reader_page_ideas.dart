@@ -48,6 +48,7 @@ extension _ReaderPageIdeas on _ReaderPageState {
     Chapter chapter, {
     bool force = false,
   }) async {
+    if (_isImportedBook) return ChapterIdeas.empty;
     final key = _ideasKey(chapter);
     final cached = _ideasCache[key];
     final fetched = _ideasFetchedAt[key];
@@ -111,7 +112,10 @@ extension _ReaderPageIdeas on _ReaderPageState {
     bool retry = false,
     bool force = false,
   }) async {
-    if (widget.novelOnly) await _preferencesFuture;
+    if (_isImportedBook) return;
+    final globalPreferences = widget.novelOnly
+        ? await _globalPreferencesFuture
+        : null;
     bool current() =>
         mounted &&
         generation == _loadGeneration &&
@@ -120,7 +124,9 @@ extension _ReaderPageIdeas on _ReaderPageState {
         !_unverifiedChapterVersions.containsKey(chapter.itemId);
     if (!current() ||
         (widget.novelOnly &&
-            !_preferences.showParagraphBubbles &&
+            !(_preferencesReady
+                ? _preferences.showParagraphBubbles
+                : globalPreferences!.showParagraphBubbles) &&
             !explicitlyRequested)) {
       return;
     }
@@ -169,6 +175,10 @@ extension _ReaderPageIdeas on _ReaderPageState {
   /// A stable entry even when a bubble is off-screen or its index request
   /// failed. Text reading remains usable while comments can be retried.
   Future<void> _showNovelParagraphs() async {
+    if (_isImportedBook) {
+      _showMessage('本地书籍不支持段落评论');
+      return;
+    }
     final chapter = _chapter;
     if (_ideas.isNotEmpty && _ideasFailed) {
       unawaited(
@@ -277,6 +287,7 @@ extension _ReaderPageIdeas on _ReaderPageState {
     ChapterIdeas? sourceIdeas,
     ChapterContent? sourceContent,
   }) async {
+    if (_isImportedBook) return;
     final ideaSnapshot = sourceIdeas ?? _ideas;
     if (ideaSnapshot.isEmpty) return;
     final chapter = sourceChapter ?? widget.chapters[_index];

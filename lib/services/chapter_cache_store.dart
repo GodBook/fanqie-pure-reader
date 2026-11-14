@@ -44,6 +44,12 @@ abstract interface class ChapterCache {
   int get chapterCapacity;
 }
 
+/// Atomically retains an existing catalogue or creates it when absent.
+/// Queue admission must not overwrite a newer catalogue with its UI snapshot.
+abstract interface class ConditionalChapterCatalogue {
+  Future<CachedBook> preserveOrCreateCatalogue(CachedBook fallback);
+}
+
 class CachedBook {
   final String id;
   final String title;
@@ -117,6 +123,16 @@ class ChapterCacheStats {
   });
 }
 
+/// UTF-8 logical chapter bytes, grouped by the actual per-chapter pin flag.
+/// Neither category represents Hive's physical file size.
+@immutable
+class ChapterCacheUsage {
+  const ChapterCacheUsage({required this.downloaded, required this.temporary});
+
+  final ChapterCacheStats downloaded;
+  final ChapterCacheStats temporary;
+}
+
 class CachedBookSummary {
   final CachedBook book;
   final ChapterCacheStats stats;
@@ -132,10 +148,10 @@ class CachedBookSummary {
 /// and freeze the UI isolate for about a minute. The chapter body box is only
 /// opened when the reader actually needs a chapter text; list queries are
 /// proportional to the number of books, not the number of chapters.
-class ChapterCacheStore implements ChapterCache {
+class ChapterCacheStore implements ChapterCache, ConditionalChapterCatalogue {
   ChapterCacheStore({
     HiveInterface? hive,
-    this._keys,
+    this.keys,
     this.maxEntries = 500,
     this.maxBytes = 80 * 1024 * 1024,
     this.catalogTtl = const Duration(days: 30),
@@ -157,7 +173,7 @@ class ChapterCacheStore implements ChapterCache {
   /// Encryption-key source. Production uses the shared secure-storage
   /// provider; tests inject an in-memory one. Chapter text must never fall
   /// back to a plaintext box, so [_box] opens with `requireEncryption`.
-  final SecureKeyProvider? _keys;
+  final SecureKeyProvider? keys;
 
   /// Chapters the automatic cache keeps before evicting the least recently read
   /// ones. What the user downloads is pinned and lives outside this budget, so
@@ -181,6 +197,7 @@ class ChapterCacheStore implements ChapterCache {
   Future<void> _writes = Future<void>.value();
   final Map<String, int> _accessTimes = {};
   final _byteCounter = ChapterCacheByteCounter();
+  Map<String, ChapterCacheUsage>? _classifiedUsage;
   int _lastAccessTime = 0;
 
   /// Number of texts encoded to measure their size, so a regression test can
@@ -197,13 +214,14 @@ class ChapterCacheStore implements ChapterCache {
     final box = await (_opening ??= EncryptedHive.openLazyBox<dynamic>(
       _hive,
       _boxName,
-      keys: _keys,
+      keys: keys,
       requireEncryption: true,
       compactionStrategy: (entries, deleted) =>
           deleted >= 50 && deleted > entries ~/ 2,
     ));
     if (box.isOpen) return box;
     _opening = null;
+    _classifiedUsage = null;
     return _box();
   }
 
@@ -211,7 +229,7 @@ class ChapterCacheStore implements ChapterCache {
     final box = await (_catalogOpening ??= EncryptedHive.openBox<dynamic>(
       _hive,
       _catalogBoxName,
-      keys: _keys,
+      keys: keys,
       requireEncryption: true,
       compactionStrategy: (entries, deleted) =>
           deleted >= 50 && deleted > entries ~/ 2,
@@ -330,6 +348,67 @@ class ChapterCacheStore implements ChapterCache {
     byteCount: (record['cachedByteCount'] as num?)?.toInt() ?? 0,
   );
 
+  void _adjustUsage(
+    String bookId, {
+    required bool pinned,
+    required int bytes,
+    required int direction,
+  }) {
+    final usage = _classifiedUsage;
+    if (usage == null) return;
+    final previous =
+        usage[bookId] ??
+        const ChapterCacheUsage(
+          downloaded: ChapterCacheStats(chapterCount: 0, byteCount: 0),
+          temporary: ChapterCacheStats(chapterCount: 0, byteCount: 0),
+        );
+    final selected = pinned ? previous.downloaded : previous.temporary;
+    final changed = ChapterCacheStats(
+      chapterCount: selected.chapterCount + direction,
+      byteCount: selected.byteCount + direction * bytes,
+    );
+    final next = ChapterCacheUsage(
+      downloaded: pinned ? changed : previous.downloaded,
+      temporary: pinned ? previous.temporary : changed,
+    );
+    if (next.downloaded.chapterCount == 0 && next.temporary.chapterCount == 0) {
+      usage.remove(bookId);
+    } else {
+      usage[bookId] = next;
+    }
+  }
+
+  /// One lazy scan for old and current records, then maintained with writes
+  /// and deletions. It does not touch access timestamps or reading order.
+  Future<Map<String, ChapterCacheUsage>> classifiedUsage() =>
+      _serialize((box) async {
+        if (_classifiedUsage == null) {
+          _classifiedUsage = {};
+          try {
+            for (final key in box.keys) {
+              final parts = _chapterKeyParts(key);
+              if (parts == null) continue;
+              final raw = await box.get(key);
+              if (!_isChapter(raw) ||
+                  raw['bookId'] != parts[0] ||
+                  raw['chapterId'] != parts[1]) {
+                continue;
+              }
+              _adjustUsage(
+                parts[0],
+                pinned: _isPinned(raw as Map),
+                bytes: _bytes(raw),
+                direction: 1,
+              );
+            }
+          } catch (_) {
+            _classifiedUsage = null;
+            rethrow;
+          }
+        }
+        return Map.unmodifiable(_classifiedUsage!);
+      });
+
   @override
   Future<String?> read({required String bookId, required String chapterId}) =>
       _serialize((box) async {
@@ -354,6 +433,18 @@ class ChapterCacheStore implements ChapterCache {
         return entry['text'] as String;
       });
 
+  /// Reads a chapter for inspection without changing its eviction order.
+  Future<String?> peek({required String bookId, required String chapterId}) =>
+      _serialize((box) async {
+        final raw = await box.get(_key(bookId, chapterId));
+        if (!_isChapter(raw) ||
+            raw['bookId'] != bookId ||
+            raw['chapterId'] != chapterId) {
+          return null;
+        }
+        return raw['text'] as String;
+      });
+
   @override
   Future<void> write({
     required String bookId,
@@ -371,7 +462,7 @@ class ChapterCacheStore implements ChapterCache {
     final previousBytes = previousValid ? _bytes(previous as Map) : 0;
     final keepPinned = pinned || (previous is Map && _isPinned(previous));
     final accessedAt = _touch(key);
-    await box.put(key, {
+    final next = {
       'bookId': bookId,
       'chapterId': chapterId,
       'title': title,
@@ -379,7 +470,24 @@ class ChapterCacheStore implements ChapterCache {
       'bytes': bytes,
       'accessedAt': accessedAt,
       if (keepPinned) 'pinned': true,
-    });
+    };
+    try {
+      await box.put(key, next);
+    } catch (_) {
+      _classifiedUsage = null;
+      rethrow;
+    }
+    if (previousValid &&
+        previous['bookId'] == bookId &&
+        previous['chapterId'] == chapterId) {
+      _adjustUsage(
+        bookId,
+        pinned: _isPinned(previous),
+        bytes: previousBytes,
+        direction: -1,
+      );
+    }
+    _adjustUsage(bookId, pinned: keepPinned, bytes: bytes, direction: 1);
     await _updateCatalogueAfterWrite(
       bookId: bookId,
       chapterId: chapterId,
@@ -408,6 +516,26 @@ class ChapterCacheStore implements ChapterCache {
     await box.put('book:${book.id}', record);
     await _sweepCatalogues(box, keepBook: book.id);
   });
+
+  @override
+  Future<CachedBook> preserveOrCreateCatalogue(CachedBook fallback) =>
+      _serializeCatalog((box) async {
+        if (fallback.id.isEmpty || fallback.chapters.isEmpty) {
+          throw ArgumentError('目录为空');
+        }
+        final key = 'book:${fallback.id}';
+        final stored = box.get(key);
+        if (stored != null) {
+          final existing = CachedBook.fromMap(stored);
+          if (existing == null) throw StateError('本地目录不可用，请刷新后重选下载范围');
+          return existing;
+        }
+        final record = fallback.toMap();
+        record['cachedAt'] = DateTime.now().millisecondsSinceEpoch;
+        await box.put(key, record);
+        await _sweepCatalogues(box, keepBook: fallback.id);
+        return fallback;
+      });
 
   Future<void> _updateCatalogueAfterWrite({
     required String bookId,
@@ -534,15 +662,27 @@ class ChapterCacheStore implements ChapterCache {
   Future<void> clear({String? bookId}) => _serialize((box) async {
     final catalog = await _catalogBox();
     if (bookId == null) {
-      await box.clear();
+      try {
+        await box.clear();
+      } catch (_) {
+        _classifiedUsage = null;
+        rethrow;
+      }
+      _classifiedUsage?.clear();
       await catalog.clear();
       _accessTimes.clear();
     } else {
-      await box.deleteAll([
-        'book:$bookId',
-        for (final key in box.keys)
-          if ((_chapterKeyParts(key)?.first ?? '') == bookId) key,
-      ]);
+      try {
+        await box.deleteAll([
+          'book:$bookId',
+          for (final key in box.keys)
+            if ((_chapterKeyParts(key)?.first ?? '') == bookId) key,
+        ]);
+      } catch (_) {
+        _classifiedUsage = null;
+        rethrow;
+      }
+      _classifiedUsage?.remove(bookId);
       await catalog.deleteAll(['book:$bookId', 'progress:$bookId']);
       _accessTimes.removeWhere((key, _) {
         final parts = _chapterKeyParts(key);
@@ -598,9 +738,20 @@ class ChapterCacheStore implements ChapterCache {
       totalBytes -= entry.bytes;
     }
     if (removed.isNotEmpty) {
-      await box.deleteAll([for (final entry in removed) entry.key]);
+      try {
+        await box.deleteAll([for (final entry in removed) entry.key]);
+      } catch (_) {
+        _classifiedUsage = null;
+        rethrow;
+      }
       for (final entry in removed) {
         _accessTimes.remove(entry.key);
+        _adjustUsage(
+          entry.bookId,
+          pinned: false,
+          bytes: entry.bytes,
+          direction: -1,
+        );
       }
       await _removeFromCatalogue(removed);
     }
@@ -809,7 +960,7 @@ class ChapterCacheStore implements ChapterCache {
     final old = await EncryptedHive.openLazyBox<dynamic>(
       _hive,
       _boxName,
-      keys: _keys,
+      keys: keys,
       requireEncryption: true,
     );
     try {

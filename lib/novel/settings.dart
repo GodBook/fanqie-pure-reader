@@ -136,6 +136,30 @@ class _NovelSettingsState extends State<NovelSettings> {
                 subtitle: '字体、字号、背景、翻页与段评',
                 onTap: () => _globalReaderSettings(context),
               ),
+              const _SettingsDivider(),
+              _SettingsLink(
+                icon: Icons.tune,
+                title: '阅读配置方案',
+                subtitle: '保存常用排版，每本书也可独立设置',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => const NovelReaderProfilesPage(),
+                  ),
+                ),
+              ),
+              const _SettingsDivider(),
+              _SettingsLink(
+                icon: Icons.timer_outlined,
+                title: '休息提醒',
+                subtitle: '默认关闭，只在阅读器前台累计时间',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => const NovelRestSettingsPage(),
+                  ),
+                ),
+              ),
             ],
           ),
           _SettingsSection(
@@ -157,11 +181,35 @@ class _NovelSettingsState extends State<NovelSettings> {
                 padding: EdgeInsets.symmetric(horizontal: 16),
                 child: _AutoUpdateSettings(),
               ),
+              const _SettingsDivider(),
+              _SettingsLink(
+                icon: Icons.file_open_outlined,
+                title: '本地小说',
+                subtitle: '导入 TXT / EPUB，离线阅读与管理原文件副本',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => const NovelLocalBooks(),
+                  ),
+                ),
+              ),
             ],
           ),
           _SettingsSection(
             title: '阅读数据',
             children: [
+              _SettingsLink(
+                icon: Icons.query_stats,
+                title: '阅读时长',
+                subtitle: '查看本机记录的今日、每周与分书前台时长',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => const NovelReadingMetricsPage(),
+                  ),
+                ),
+              ),
+              const _SettingsDivider(),
               _SettingsLink(
                 icon: Icons.backup_outlined,
                 title: '备份与恢复阅读数据',

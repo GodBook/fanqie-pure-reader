@@ -14,16 +14,26 @@ import '../models/book_detail.dart';
 import '../models/media_item.dart';
 import '../models/chapter_ideas.dart';
 import '../models/novel_community.dart';
+import '../models/rank.dart';
 import '../models/category_front.dart';
 import '../widgets/reader/reader_ideas_sheet.dart';
 import '../services/reader_preferences.dart';
 import '../services/reader_device.dart';
 import '../services/novel_backup_service.dart';
+import '../services/novel_backup_snapshots.dart';
+import '../services/novel_portable_settings.dart';
+import '../services/novel_discovery_store.dart';
+import '../services/novel_reader_profiles.dart';
+import '../services/novel_reading_metrics.dart';
+import '../services/rank_cache.dart';
 import '../services/home_feed_cache.dart';
 import '../services/novel_app_update.dart';
 import '../services/novel_release.dart';
 import '../services/novel_color_theme.dart';
 import '../widgets/reader/reader_appearance_sheet.dart';
+import '../widgets/reader/novel_reader_profiles_page.dart';
+import '../widgets/reader/novel_reading_metrics_page.dart';
+import '../widgets/reader/novel_rest_settings_page.dart';
 import '../widgets/reader/reader_directory_sheet.dart';
 import '../services/ai_reading/ai_controller.dart';
 import '../pages/reader_page.dart';
@@ -40,6 +50,8 @@ import '../services/library_store.dart';
 import '../services/novel_download_manager.dart';
 import '../services/novel_image_store.dart';
 import '../services/reader_history.dart';
+import '../services/imported_book_store.dart';
+import '../services/novel_local_transfer.dart';
 import '../services/shelf_store.dart';
 import '../services/shelf_group_store.dart';
 import '../services/third_party_licenses.dart';
@@ -60,6 +72,9 @@ part 'categories.dart';
 part 'app_update.dart';
 part 'community.dart';
 part 'settings.dart';
+part 'local_books.dart';
+part 'backup_pages.dart';
+part 'rankings.dart';
 
 const novelAppName = '番茄小说纯净版';
 const novelAccent = Color(0xFFB84A38);
@@ -120,12 +135,58 @@ class NovelRuntime {
         LibraryStore.instance.init(),
         ShelfStore.instance.init(),
         ShelfGroupStore.instance.init(),
+        NovelShelfManagement.instance.initialize(),
         HomeFeedCache.instance.warmUp(),
       ]);
+      NovelPortableSettings.sections.addAll({
+        'library': (
+          capture: NovelShelfManagement.instance.exportPortable,
+          merge: NovelShelfManagement.instance.mergePortable,
+        ),
+        'discovery': (
+          capture: NovelFindPlansStore.instance.captureSection,
+          merge: NovelFindPlansStore.instance.mergeSection,
+        ),
+        'topics': (
+          capture: NovelTopicFavoritesStore.instance.captureSection,
+          merge: NovelTopicFavoritesStore.instance.mergeSection,
+        ),
+        'readerProfiles': (
+          capture: NovelReaderProfilesStore.instance.exportPortable,
+          merge: NovelReaderProfilesStore.instance.mergePortable,
+        ),
+        'readingMetrics': (
+          capture: NovelReadingMetricsStore.instance.exportPortable,
+          merge: NovelReadingMetricsStore.instance.mergePortable,
+        ),
+        'localBooks': (
+          capture: NovelLocalTransfer.captureSection,
+          merge: NovelLocalTransfer.mergeSection,
+        ),
+      });
+      NovelPortableSettings.validators.addAll({
+        'library': NovelShelfManagement.instance.validatePortable,
+        'discovery': NovelFindPlansStore.instance.validateSection,
+        'topics': NovelTopicFavoritesStore.instance.validateSection,
+        'readerProfiles': NovelReaderProfilesStore.instance.validatePortable,
+        'readingMetrics': NovelReadingMetricsStore.instance.validatePortable,
+        'localBooks': NovelLocalTransfer.validateSection,
+      });
       localReady.value = true;
+      unawaited(
+        NovelBackupSnapshots.instance
+            .save(onlyIfEnabled: true, daily: true)
+            .catchError((Object error) {
+              AppLog.w('novel-backup', '本机快照暂未保存 (${error.runtimeType})');
+            }),
+      );
       // Download recovery may scan large chapter indexes. It must not hold
       // the first actionable book list behind unrelated storage work.
-      unawaited(NovelDownloadManager.instance.initialize());
+      unawaited(
+        NovelDownloadQueue.instance.initialize().catchError((Object error) {
+          AppLog.w('novel-download', '下载队列暂未恢复 (${error.runtimeType})');
+        }),
+      );
     } catch (_) {
       _local = null;
       rethrow;
@@ -520,13 +581,20 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
   Timer? _updateTimer;
   Timer? _updateKickoff;
   StreamSubscription<List<ConnectivityResult>>? _network;
+  late bool _lastUpdateEnabled;
+  late bool _lastWifiOnly;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     final updates = NovelDownloadManager.instance;
-    updates.setForeground(true);
+    final state = WidgetsBinding.instance.lifecycleState;
+    updates.setForeground(state == null || state == AppLifecycleState.resumed);
+    _lastUpdateEnabled = updates.enabled;
+    _lastWifiOnly = updates.wifiOnly;
+    updates.addListener(_updatePolicyChanged);
+    NovelRuntime.localReady.addListener(_scheduleUpdateCheck);
     _scheduleUpdateCheck();
     _updateTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       _scheduleUpdateCheck();
@@ -550,11 +618,52 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
 
   void _scheduleUpdateCheck() {
     _updateKickoff?.cancel();
+    if (!mounted || !NovelDownloadManager.instance.isForeground) return;
     // Let the visible feed/chapter requests reach the backend before optional
     // catalogue checks for every downloaded book compete for its queue.
     _updateKickoff = Timer(const Duration(seconds: 3), () {
-      if (mounted) unawaited(NovelDownloadManager.instance.checkUpdates());
+      if (!mounted || !NovelRuntime.localReady.value) return;
+      unawaited(NovelDownloadManager.instance.checkUpdates());
+      unawaited(
+        _checkShelfUpdates().catchError((Object error) {
+          AppLog.w('novel-shelf', '追更检查暂未完成 (${error.runtimeType})');
+        }),
+      );
     });
+  }
+
+  void _updatePolicyChanged() {
+    final updates = NovelDownloadManager.instance;
+    if (_lastUpdateEnabled == updates.enabled &&
+        _lastWifiOnly == updates.wifiOnly) {
+      return;
+    }
+    _lastUpdateEnabled = updates.enabled;
+    _lastWifiOnly = updates.wifiOnly;
+    _scheduleUpdateCheck();
+  }
+
+  Future<void> _checkShelfUpdates() async {
+    final updates = NovelDownloadManager.instance;
+    await updates.initialize();
+    if (!mounted || !updates.isForeground || !NovelRuntime.localReady.value) {
+      return;
+    }
+    await NovelShelfManagement.instance.check(
+      books: ShelfStore.instance
+          .records()
+          .map((record) => record.item)
+          .where(
+            (book) =>
+                book.kind == 'book' &&
+                book.source == 'fanqie' &&
+                !ImportedBookStore.isLocalBookId(book.id),
+          ),
+      directoryLoader: updates.directoryLoader,
+      connectivity: updates.connectivity,
+      wifiOnly: updates.wifiOnly,
+      isForeground: () => mounted && updates.isForeground,
+    );
   }
 
   @override
@@ -563,6 +672,8 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
     _network?.cancel();
     _updateTimer?.cancel();
     _updateKickoff?.cancel();
+    NovelRuntime.localReady.removeListener(_scheduleUpdateCheck);
+    NovelDownloadManager.instance.removeListener(_updatePolicyChanged);
     NovelDownloadManager.instance.setForeground(false);
     super.dispose();
   }
@@ -664,6 +775,10 @@ Future<bool> _requireLocal(BuildContext context) async {
 
 Future<void> _openBook(BuildContext context, MediaItem book) async {
   if (!await _requireLocal(context) || !context.mounted) return;
+  if (ImportedBookStore.isLocalBookId(book.id)) {
+    await _readLocalNovel(context, book);
+    return;
+  }
   await Navigator.of(
     context,
   ).push(MaterialPageRoute<void>(builder: (_) => NovelBookPage(book: book)));
@@ -678,6 +793,10 @@ Future<void> _readBook(
 }) async {
   try {
     if (!await _requireLocal(context)) return;
+    if (ImportedBookStore.isLocalBookId(book.id)) {
+      if (context.mounted) await _readLocalNovel(context, book, index: index);
+      return;
+    }
     var fetchedDirectory = false;
     chapters ??= (await ChapterCacheStore.instance.savedCatalogue(
       book.id,
@@ -738,8 +857,13 @@ Future<void> _readBook(
             ensureOnline: NovelRuntime.ensureOnline,
             onRefreshCatalogue: offline ? null : refresh,
             shelfItem: book,
-            onDownload: (readerContext, directory) =>
-                _showBookDownloads(readerContext, book, directory),
+            onDownloadAtChapter: (readerContext, directory, currentIndex) =>
+                _showBookDownloads(
+                  readerContext,
+                  book,
+                  directory,
+                  currentIndex: currentIndex,
+                ),
           ),
         ),
       ),

@@ -78,7 +78,7 @@ class MemoryReaderStore implements ReaderStore {
   Future<void> forgetWatchedEpisodes(String id) async => watched.remove(id);
 }
 
-class MemoryChapterCache implements ChapterCache {
+class MemoryChapterCache implements ChapterCache, ConditionalChapterCatalogue {
   MemoryChapterCache({this.chapterCapacity = 500});
 
   final Map<String, Map<String, String>> content = {};
@@ -111,6 +111,10 @@ class MemoryChapterCache implements ChapterCache {
 
   @override
   Future<void> saveBook(CachedBook book) async => catalogs[book.id] = book;
+
+  @override
+  Future<CachedBook> preserveOrCreateCatalogue(CachedBook fallback) async =>
+      catalogs.putIfAbsent(fallback.id, () => fallback);
 
   @override
   Future<Set<String>> cachedChapterIds(String bookId) async =>

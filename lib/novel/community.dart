@@ -70,6 +70,78 @@ class NovelCommunity extends StatefulWidget {
   State<NovelCommunity> createState() => _NovelCommunityState();
 }
 
+String _topicSavedAt(DateTime value) {
+  final day = value.toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${day.year}-${two(day.month)}-${two(day.day)} ${two(day.hour)}:${two(day.minute)}';
+}
+
+class _FavoriteTopicsPage extends StatelessWidget {
+  const _FavoriteTopicsPage({this.topicLoader, this.postsLoader});
+  final NovelTopicLoader? topicLoader;
+  final NovelPostsLoader? postsLoader;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('收藏话题')),
+    body: ValueListenableBuilder<int>(
+      valueListenable: NovelTopicFavoritesStore.instance.changes,
+      builder: (context, _, _) => FutureBuilder<List<NovelTopicFavorite>>(
+        future: NovelTopicFavoritesStore.instance.all(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return const Center(child: Text('收藏读取失败，请稍后重试'));
+          }
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final favorites = snapshot.data!;
+          if (favorites.isEmpty) return const Center(child: Text('还没有收藏话题'));
+          return ListView.builder(
+            itemCount: favorites.length,
+            itemBuilder: (context, index) {
+              final favorite = favorites[index];
+              return ListTile(
+                key: ValueKey('favorite-topic-${favorite.topic.id}'),
+                title: Text(favorite.topic.title),
+                subtitle: Text('本地摘要 · 保存于 ${_topicSavedAt(favorite.savedAt)}'),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => NovelTopicPage(
+                      topic: favorite.topic,
+                      cachedAt: favorite.savedAt,
+                      topicLoader: topicLoader,
+                      postsLoader: postsLoader,
+                    ),
+                  ),
+                ),
+                trailing: IconButton(
+                  tooltip: '取消收藏 ${favorite.topic.title}',
+                  icon: const Icon(Icons.bookmark_remove_outlined),
+                  onPressed: () async {
+                    try {
+                      await NovelTopicFavoritesStore.instance.remove(
+                        favorite.topic.id,
+                      );
+                    } catch (_) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('取消收藏失败，请重试')),
+                        );
+                      }
+                    }
+                  },
+                ),
+              );
+            },
+          );
+        },
+      ),
+    ),
+  );
+}
+
 class _NovelCommunityState extends State<NovelCommunity> {
   final _scroll = ScrollController();
   BackendRequest? _request;
@@ -145,7 +217,24 @@ class _NovelCommunityState extends State<NovelCommunity> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('书荒广场')),
+      appBar: AppBar(
+        title: const Text('书荒广场'),
+        actions: [
+          IconButton(
+            tooltip: '收藏话题',
+            icon: const Icon(Icons.bookmarks_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => _FavoriteTopicsPage(
+                  topicLoader: widget.topicLoader,
+                  postsLoader: widget.postsLoader,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
       body: RefreshIndicator(
         onRefresh: () => _load(refresh: true),
         child: CustomScrollView(
@@ -269,10 +358,16 @@ class NovelTopicPage extends StatefulWidget {
     required this.topic,
     this.topicLoader,
     this.postsLoader,
+    this.cachedAt,
+    this.offlineCheck,
   });
   final NovelTopic topic;
   final NovelTopicLoader? topicLoader;
   final NovelPostsLoader? postsLoader;
+  final DateTime? cachedAt;
+
+  /// Optional connectivity probe, useful when displaying a cached topic.
+  final Future<bool> Function()? offlineCheck;
   @override
   State<NovelTopicPage> createState() => _NovelTopicPageState();
 }
@@ -285,11 +380,17 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
   int _generation = 0, _detailGeneration = 0, _offset = 0;
   String? _session, _error, _detailError;
   bool _loading = false, _more = true, _newest = false, _retryRefresh = false;
+  bool _favorite = false,
+      _favoriteReady = false,
+      _favoriteBusy = false,
+      _detailLoaded = false;
   List<NovelRecommendationPost> _posts = [];
   @override
   void initState() {
     super.initState();
     _topic = widget.topic;
+    NovelTopicFavoritesStore.instance.changes.addListener(_loadFavorite);
+    unawaited(_loadFavorite());
     _scroll.addListener(() {
       if (_scroll.position.extentAfter < 400 &&
           !_loading &&
@@ -300,6 +401,43 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
     });
     unawaited(_loadDetail());
     unawaited(_load(refresh: true));
+  }
+
+  Future<void> _loadFavorite() async {
+    try {
+      final favorites = await NovelTopicFavoritesStore.instance.all();
+      if (mounted) {
+        setState(() {
+          _favorite = favorites.any((f) => f.topic.id == widget.topic.id);
+          _favoriteReady = true;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _favoriteReady = false);
+    }
+  }
+
+  Future<void> _toggleFavorite() async {
+    if (_favoriteBusy) return;
+    setState(() => _favoriteBusy = true);
+    try {
+      if (_favorite) {
+        await NovelTopicFavoritesStore.instance.remove(widget.topic.id);
+      } else {
+        await NovelTopicFavoritesStore.instance.put(
+          NovelTopicFavorite.fromTopic(_topic),
+        );
+      }
+      await _loadFavorite();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('收藏保存失败，请重试')));
+      }
+    } finally {
+      if (mounted) setState(() => _favoriteBusy = false);
+    }
   }
 
   Future<void> _loadDetail() async {
@@ -313,13 +451,38 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
         request,
       );
       if (mounted && generation == _detailGeneration) {
-        setState(() => _topic = topic);
+        setState(() {
+          _topic = topic;
+          _detailLoaded = true;
+        });
+        unawaited(
+          NovelTopicFavoritesStore.instance
+              .refreshExisting(topic)
+              .catchError((Object _) {}),
+        );
       }
     } catch (error) {
       if (mounted && generation == _detailGeneration) {
-        setState(() => _detailError = _errorText(error));
+        final missing = error is ApiException && error.statusCode == 404;
+        // The network probe can be slow or unavailable. Show the actionable
+        // error immediately; it must not hold back an independent posts list.
+        setState(() => _detailError = missing ? '话题已失效' : _errorText(error));
+        if (!missing) {
+          try {
+            final offline = await (widget.offlineCheck ?? _isOffline)();
+            if (offline && mounted && generation == _detailGeneration) {
+              setState(() => _detailError = '当前离线');
+            }
+          } catch (_) {}
+        }
       }
     }
+  }
+
+  Future<bool> _isOffline() async {
+    final connectivity = await Connectivity().checkConnectivity();
+    return connectivity.isNotEmpty &&
+        connectivity.every((entry) => entry == ConnectivityResult.none);
   }
 
   Future<void> _load({bool refresh = false}) async {
@@ -381,6 +544,7 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
   void dispose() {
     _request?.cancel();
     _detailRequest?.cancel();
+    NovelTopicFavoritesStore.instance.changes.removeListener(_loadFavorite);
     ++_generation;
     ++_detailGeneration;
     _scroll.dispose();
@@ -391,7 +555,18 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('话题荐书')),
+      appBar: AppBar(
+        title: const Text('话题荐书'),
+        actions: [
+          IconButton(
+            tooltip: _favorite ? '取消收藏话题' : '收藏话题',
+            onPressed: !_favoriteReady || _favoriteBusy
+                ? null
+                : _toggleFavorite,
+            icon: Icon(_favorite ? Icons.bookmark : Icons.bookmark_border),
+          ),
+        ],
+      ),
       body: RefreshIndicator(
         onRefresh: () => _load(refresh: true),
         child: CustomScrollView(
@@ -412,11 +587,18 @@ class _NovelTopicPageState extends State<NovelTopicPage> {
                         height: 1.4,
                       ),
                     ),
+                    if (widget.cachedAt != null && !_detailLoaded)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          '本地摘要 · 保存于 ${_topicSavedAt(widget.cachedAt!)}',
+                        ),
+                      ),
                     if (_detailError != null)
                       TextButton(
                         key: const ValueKey('topic-detail-retry'),
                         onPressed: _loadDetail,
-                        child: Text('话题详情加载失败 · $_detailError · 重试'),
+                        child: Text('话题详情未更新 · $_detailError · 重试'),
                       ),
                     const SizedBox(height: 8),
                     Text(

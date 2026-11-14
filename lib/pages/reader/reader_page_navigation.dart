@@ -274,7 +274,7 @@ extension _ReaderPageNavigation on _ReaderPageState {
     _readerPanelOpen = true;
     _setControlsVisible(false);
     final preset = _effectivePreset;
-    final match = await showJellySheet<ReaderFindMatch>(
+    final match = await showJellySheet<Object>(
       context: context,
       reduceMotion: _reduceReaderMotion,
       surfaceWrapper: (child) => _readerOverlay(preset, child),
@@ -285,6 +285,7 @@ extension _ReaderPageNavigation on _ReaderPageState {
               ReaderFindParagraph(start: block.start, text: block.text),
         ],
         preset: preset,
+        cachedSearch: widget.novelOnly ? _searchCachedChapters : null,
       ),
     );
     if (!mounted ||
@@ -293,6 +294,11 @@ extension _ReaderPageNavigation on _ReaderPageState {
         _chapter.itemId != chapterId) {
       return;
     }
+    if (match is NovelCachedMatch) {
+      await _navigateCachedMatch(match, generation, origin);
+      return;
+    }
+    if (match is! ReaderFindMatch) return;
     // Geometry changes do not change display-text offsets. Mapping a match
     // through source offsets would expand a hit inside a replacement to the
     // entire replacement, so retain its exact range while the text is stable.
@@ -313,6 +319,104 @@ extension _ReaderPageNavigation on _ReaderPageState {
       navigationGeneration: generation,
     );
     if (landed) _rememberTemporaryJump(origin, generation);
+  }
+
+  Future<String?> _peekSearchChapter(String id) async {
+    final loader = widget.chapterLoader;
+    if (widget.localOnly && loader != null) {
+      final chapter = widget.chapters
+          .where((entry) => entry.itemId == id)
+          .firstOrNull;
+      return chapter == null ? null : loader(chapter);
+    }
+    final cache = _diskCache;
+    if (cache is ChapterCacheStore) {
+      return cache.peek(bookId: widget.bookId, chapterId: id);
+    }
+    // Injected caches are used by callers and tests; production uses peek.
+    return cache.read(bookId: widget.bookId, chapterId: id);
+  }
+
+  Future<NovelCachedSearchProgress> _searchCachedChapters(
+    String query,
+    void Function(NovelCachedSearchProgress) onProgress,
+    bool Function() cancelled,
+  ) async {
+    final chapters = List<Chapter>.of(widget.chapters);
+    final ids = widget.localOnly && widget.chapterLoader != null
+        ? chapters.map((chapter) => chapter.itemId).toSet()
+        : await _diskCache.cachedChapterIds(widget.bookId);
+    return searchNovelCachedChapters(
+      chapters: chapters,
+      cachedIds: ids,
+      peek: _peekSearchChapter,
+      query: query,
+      onProgress: onProgress,
+      cancelled: cancelled,
+    );
+  }
+
+  Future<void> _navigateCachedMatch(
+    NovelCachedMatch match,
+    int generation,
+    ({String chapterId, int sourceOffset})? origin,
+  ) async {
+    try {
+      final raw = await _peekSearchChapter(match.chapterId);
+      if (!mounted || generation != _readerNavigationGeneration) return;
+      if (raw == null ||
+          novelChapterContentHash(ChapterContent.fromCacheText(raw)) !=
+              match.contentHash) {
+        _showMessage('章节缓存已变化，请重新查找');
+        return;
+      }
+      final target = widget.chapters.indexWhere(
+        (c) => c.itemId == match.chapterId,
+      );
+      if (target < 0) {
+        _showMessage('目录中已找不到该章节，请重新查找');
+        return;
+      }
+      if (widget.chapters[target].title != match.chapterTitle) {
+        _showMessage('章节标题已变化，请重新查找');
+        return;
+      }
+      if (target != _index) {
+        await _jumpToChapter(target, navigationGeneration: generation);
+        if (mounted && _chapter.itemId == match.chapterId) {
+          _rememberTemporaryJump(origin, generation);
+        }
+      }
+      if (!mounted ||
+          generation != _readerNavigationGeneration ||
+          _chapter.itemId != match.chapterId ||
+          _error != null) {
+        return;
+      }
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted ||
+          generation != _readerNavigationGeneration ||
+          _chapter.itemId != match.chapterId) {
+        return;
+      }
+      final layout = _chapterLayout;
+      if (layout == null ||
+          !_progressReady ||
+          novelChapterContentHash(_chapterContent) != match.contentHash) {
+        _showMessage('正文已变化，请重新查找');
+        return;
+      }
+      final landed = await _landAtOffset(
+        layout.displayOffsetForSource(match.sourceStart),
+        end: layout.displayOffsetForSource(match.sourceEnd),
+        navigationGeneration: generation,
+      );
+      if (landed) _rememberTemporaryJump(origin, generation);
+    } catch (_) {
+      if (mounted && generation == _readerNavigationGeneration) {
+        _showMessage('章节暂时无法打开，请重新查找');
+      }
+    }
   }
 
   Future<ReaderBookmark?> _addBookmark({
@@ -370,6 +474,7 @@ extension _ReaderPageNavigation on _ReaderPageState {
       builder: (_) => widget.novelOnly
           ? ReaderMarksPanel(
               bookId: widget.bookId,
+              bookTitle: widget.title,
               chapters: widget.chapters,
               preset: preset,
               bookmarks: _bookmarkStore,

@@ -52,6 +52,7 @@ class MainActivity : FlutterActivity() {
         // 整本 TXT 导出：MediaStore.Downloads 或应用外部目录，见 DownloadsPlugin。
         flutterEngine.plugins.add(DownloadsPlugin())
         flutterEngine.plugins.add(LibraryBackupPlugin())
+        flutterEngine.plugins.add(LocalBookPickerPlugin())
         flutterEngine.plugins.add(AppUpdatePlugin())
         // 海信墨水屏整屏刷新（压残影）：反射调用厂商 EPD 接口。
         flutterEngine.plugins.add(EinkRefreshPlugin())

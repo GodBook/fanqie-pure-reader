@@ -82,6 +82,12 @@ void main() {
       if (call.method == 'write') secureValues[key!] = args['value'] as String;
       return null;
     });
+    const pathChannel = MethodChannel('plugins.flutter.io/path_provider');
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(pathChannel, (
+      _,
+    ) async {
+      throw PlatformException(code: 'unavailable');
+    });
     const bookId = 'offline-resume-fix';
     final book = CachedBook(
       id: bookId,
@@ -156,6 +162,10 @@ void main() {
           secureChannel,
           null,
         );
+        binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          pathChannel,
+          null,
+        );
       }
     });
 
@@ -171,8 +181,15 @@ void main() {
       ),
     );
     await _flushUi(tester);
+    expect(find.textContaining('部分空间统计暂不可用'), findsOneWidget);
     final row = find.byKey(const ValueKey('book-offline-resume-fix'));
-    expect(row, findsOneWidget);
+    await tester.scrollUntilVisible(
+      row,
+      180,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await _flushUi(tester);
+    expect(row.hitTestable(), findsOneWidget);
     await tester.runAsync(() => tester.tap(row));
     await _flushUi(tester);
     expect(find.text('上次阅读的章节未下载'), findsOneWidget);

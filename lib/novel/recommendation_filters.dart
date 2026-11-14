@@ -5,6 +5,25 @@ enum NovelSort { recommended, score, longest, shortest }
 
 enum NovelStatus { any, ongoing, completed }
 
+/// Upper bounds are exclusive; zero is unknown, never a short book.
+enum NovelWordRange { any, under300k, from300k, from1m, from3m }
+
+const novelWordRangeLabels = <NovelWordRange, String>{
+  NovelWordRange.any: '字数不限',
+  NovelWordRange.under300k: '30万字以下',
+  NovelWordRange.from300k: '30万–100万字',
+  NovelWordRange.from1m: '100万–300万字',
+  NovelWordRange.from3m: '300万字及以上',
+};
+
+bool novelWordRangeAccepts(NovelWordRange range, int words) => switch (range) {
+  NovelWordRange.any => true,
+  NovelWordRange.under300k => words > 0 && words < 300000,
+  NovelWordRange.from300k => words >= 300000 && words < 1000000,
+  NovelWordRange.from1m => words >= 1000000 && words < 3000000,
+  NovelWordRange.from3m => words >= 3000000,
+};
+
 /// Shared by discovery and search. Integer tenths avoid floating-point steps.
 const novelScoreOptions = <double>[
   0,
@@ -83,35 +102,59 @@ class NovelFeedFilters {
     this.minScore = 0,
     this.status = NovelStatus.any,
     this.sort = NovelSort.recommended,
+    this.wordRange = NovelWordRange.any,
+    this.hideShelf = false,
+    this.hideHistory = false,
   });
 
   final int genre;
   final double minScore;
   final NovelStatus status;
   final NovelSort sort;
+  final NovelWordRange wordRange;
+  final bool hideShelf;
+  final bool hideHistory;
   NovelGenre get category => NovelGenre.choices[genre];
   bool get restricted =>
-      genre != 0 || minScore > 0 || status != NovelStatus.any;
+      genre != 0 ||
+      minScore > 0 ||
+      status != NovelStatus.any ||
+      wordRange != NovelWordRange.any ||
+      hideShelf ||
+      hideHistory;
 
   NovelFeedFilters copyWith({
     int? genre,
     double? minScore,
     NovelStatus? status,
     NovelSort? sort,
+    NovelWordRange? wordRange,
+    bool? hideShelf,
+    bool? hideHistory,
   }) => NovelFeedFilters(
     genre: genre ?? this.genre,
     minScore: minScore ?? this.minScore,
     status: status ?? this.status,
     sort: sort ?? this.sort,
+    wordRange: wordRange ?? this.wordRange,
+    hideShelf: hideShelf ?? this.hideShelf,
+    hideHistory: hideHistory ?? this.hideHistory,
   );
 
-  List<MediaItem> select(Iterable<MediaItem> books) {
+  List<MediaItem> select(
+    Iterable<MediaItem> books, {
+    Set<String> shelfIds = const {},
+    Set<String> historyIds = const {},
+  }) {
     final result = books
         .where(
           (book) =>
               book.kind == 'book' &&
               book.source == 'fanqie' &&
               category.accepts(book) &&
+              novelWordRangeAccepts(wordRange, book.wordNumber) &&
+              (!hideShelf || !shelfIds.contains(book.id)) &&
+              (!hideHistory || !historyIds.contains(book.id)) &&
               (minScore == 0 ||
                   (book.score != null && book.score! >= minScore)) &&
               switch (status) {
@@ -154,15 +197,25 @@ class NovelFeedFilters {
         (value) => value.name == preferences.getString('novel_feed_sort'),
         orElse: () => NovelSort.recommended,
       ),
+      wordRange: NovelWordRange.values.firstWhere(
+        (value) => value.name == preferences.getString('novel_feed_words'),
+        orElse: () => NovelWordRange.any,
+      ),
+      hideShelf: preferences.getBool('novel_feed_hide_shelf') ?? false,
+      hideHistory: preferences.getBool('novel_feed_hide_history') ?? false,
     );
   }
 
   Future<void> save(SharedPreferences preferences) async {
-    await Future.wait([
+    final saved = await Future.wait([
       preferences.setInt('novel_feed_genre', genre),
       preferences.setDouble('novel_feed_score', minScore),
       preferences.setString('novel_feed_status', status.name),
       preferences.setString('novel_feed_sort', sort.name),
+      preferences.setString('novel_feed_words', wordRange.name),
+      preferences.setBool('novel_feed_hide_shelf', hideShelf),
+      preferences.setBool('novel_feed_hide_history', hideHistory),
     ]);
+    if (saved.any((ok) => !ok)) throw StateError('筛选条件保存失败');
   }
 }

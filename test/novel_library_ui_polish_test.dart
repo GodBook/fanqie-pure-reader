@@ -297,6 +297,48 @@ void main() {
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
 
+        final shelfSearch = find.widgetWithText(TextField, '搜索当前分组的书名或作者');
+        // Sliver children can be disposed when the book row is on screen;
+        // scroll upward until the search field is built again.
+        await tester.scrollUntilVisible(
+          shelfSearch,
+          -180,
+          scrollable: shelfScroll,
+        );
+        await tester.pumpAndSettle();
+        expect(shelfSearch.hitTestable(), findsOneWidget);
+        await tester.enterText(shelfSearch, first.title);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('书架管理'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('多选管理'));
+        await tester.pumpAndSettle();
+        await tester.scrollUntilVisible(
+          find.text('全选'),
+          180,
+          scrollable: shelfScroll,
+        );
+        await tester.tap(find.text('全选'));
+        await tester.pumpAndSettle();
+        expect(find.text('已选择 1 本'), findsOneWidget);
+        await tester.scrollUntilVisible(
+          shelfSearch,
+          -180,
+          scrollable: shelfScroll,
+        );
+        await tester.pumpAndSettle();
+        expect(shelfSearch.hitTestable(), findsOneWidget);
+        await tester.enterText(shelfSearch, '没有匹配的书名');
+        await tester.pumpAndSettle();
+        expect(find.text('已选择 0 本'), findsOneWidget);
+        await tester.scrollUntilVisible(
+          find.text('没有匹配的书架书籍'),
+          180,
+          scrollable: shelfScroll,
+        );
+        expect(find.text('没有匹配的书架书籍'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+
         await _mount(
           tester,
           const NovelSettings(),

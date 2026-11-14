@@ -550,6 +550,9 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
 
   Future<String> _fetchChapter(Chapter chapter) async {
     final loader = widget.chapterLoader;
+    if (_isImportedBook && loader == null) {
+      throw const ApiException('本地书籍文件不可用，请从原文件重新导入');
+    }
     if (widget.novelOnly &&
         widget.localOnly &&
         !_offlineOnlineEnabled &&
@@ -582,7 +585,8 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
 
   void _startVersionRefresh(Chapter chapter) {
     final id = chapter.itemId;
-    if (widget.localOnly ||
+    if (_isImportedBook ||
+        widget.localOnly ||
         _unverifiedChapterVersions[id] != chapter.version ||
         _attemptedVersionRefreshes[id] == chapter.version) {
       return;
@@ -633,7 +637,7 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
   }
 
   Future<void> _refreshCachedChapter(Chapter chapter) async {
-    if (widget.localOnly) return;
+    if (_isImportedBook || widget.localOnly) return;
     final pending = _chapterRefreshes[chapter.itemId];
     if (pending != null) return pending;
     final request = _upgradeChapter(chapter);
@@ -769,20 +773,24 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
     });
   }
 
-  Future<void> _ensureCatalog() => _catalogFuture ??= _diskCache
-      .saveBook(_cachedBook)
-      .catchError((Object error) {
-        _catalogFuture = null;
-        throw error;
-      });
+  Future<void> _ensureCatalog() {
+    if (_isImportedBook) return Future<void>.value();
+    return _catalogFuture ??= _diskCache.saveBook(_cachedBook).catchError((
+      Object error,
+    ) {
+      _catalogFuture = null;
+      throw error;
+    });
+  }
 
   Future<_LoadedChapter> _loadChapterText(Chapter chapter) async {
     final revision = _chapterCacheRevisions[chapter.itemId] ?? 0;
     bool superseded() =>
         revision != (_chapterCacheRevisions[chapter.itemId] ?? 0);
     String? text;
-    if (!widget.localOnly ||
-        (widget.novelOnly && widget.chapterLoader == null)) {
+    if (!_isImportedBook &&
+        (!widget.localOnly ||
+            (widget.novelOnly && widget.chapterLoader == null))) {
       try {
         final cached = await _diskCache.read(
           bookId: widget.bookId,
@@ -814,12 +822,14 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
         // The captured revision still prevents stale background writes.
         if (mounted) {
           _rememberChapter(chapter.itemId, text);
-          unawaited(_saveFetchedNovelChapter(chapter, text, revision));
+          if (!_isImportedBook) {
+            unawaited(_saveFetchedNovelChapter(chapter, text, revision));
+          }
         }
         return (text: text, fetched: true);
       }
       var chapterSuperseded = false;
-      if (mounted && !widget.localOnly) {
+      if (mounted && !_isImportedBook && !widget.localOnly) {
         try {
           await _ensureCatalog();
           if (superseded()) {
@@ -848,6 +858,7 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
     String text,
     int revision,
   ) async {
+    if (_isImportedBook) return;
     try {
       await _ensureCatalog();
       if (revision != (_chapterCacheRevisions[chapter.itemId] ?? 0) ||

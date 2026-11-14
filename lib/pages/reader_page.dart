@@ -27,6 +27,10 @@ import 'player_page.dart';
 import '../services/api_client.dart';
 import '../services/app_theme.dart';
 import '../services/chapter_cache_store.dart';
+import '../services/imported_book_store.dart';
+import '../services/novel_cached_search.dart';
+import '../services/novel_reader_profiles.dart';
+import '../services/novel_reading_metrics.dart';
 import '../services/chapter_request_tracker.dart';
 import '../services/ai_reading/ai_controller.dart';
 import '../services/ai_reading/ai_coordinator.dart';
@@ -64,6 +68,7 @@ import '../widgets/reader/reader_joined_scroll.dart';
 import '../widgets/reader/cue_index.dart';
 import '../widgets/reader/reader_bookmarks_panel.dart';
 import '../widgets/reader/reader_marks_panel.dart';
+import '../widgets/reader/novel_reader_profiles_page.dart';
 import '../widgets/reader/reader_note_editor_dialog.dart';
 import '../widgets/reader/reader_chrome.dart';
 import '../widgets/reader/reader_find_panel.dart';
@@ -97,6 +102,7 @@ part 'reader/reader_page_ideas.dart';
 part 'reader/reader_page_preferences.dart';
 part 'reader/reader_page_navigation.dart';
 part 'reader/reader_page_progress.dart';
+part 'reader/reader_page_novel_time.dart';
 part 'reader/reader_page_build.dart';
 part 'reader/reader_page_content.dart';
 part 'reader/reader_page_joined_content.dart';
@@ -138,6 +144,11 @@ class ReaderPage extends StatefulWidget {
   final Future<void> Function()? ensureOnline;
   final Future<void> Function()? onRefreshCatalogue;
   final Future<void> Function(BuildContext, List<Chapter>)? onDownload;
+
+  /// Downloads from the chapter currently visible in this reader. The
+  /// original two-argument callback remains available to existing callers.
+  final Future<void> Function(BuildContext, List<Chapter>, int?)?
+  onDownloadAtChapter;
   final ChapterTextLoader? chapterLoader;
   final ReaderStore? readerStore;
   final ReaderBookmarkStore? bookmarkStore;
@@ -176,6 +187,7 @@ class ReaderPage extends StatefulWidget {
     this.ensureOnline,
     this.onRefreshCatalogue,
     this.onDownload,
+    this.onDownloadAtChapter,
     this.chapterLoader,
     this.readerStore,
     this.bookmarkStore,
@@ -208,6 +220,10 @@ class _ReaderPageState extends State<ReaderPage>
   /// does not model that and rejects `setState` inside them as a protected
   /// member use, so they call through here instead.
   void _setState(VoidCallback fn) => setState(fn);
+
+  // An offline online book and an imported file both use localOnly. Only the
+  // latter has no online identity or need for a second chapter cache.
+  bool get _isImportedBook => ImportedBookStore.isLocalBookId(widget.bookId);
 
   Future<void> _onReplacementChanged() async {
     if (!mounted || _loading || _error != null) return;
@@ -396,7 +412,9 @@ class _ReaderPageState extends State<ReaderPage>
         : widget.chapters[_index].itemId;
     EinkRefreshService.instance.flashRequest.addListener(_onEinkFlashRequest);
     _scrollController.addListener(_onScroll);
+    _globalPreferencesFuture = _loadGlobalPreferences();
     _preferencesFuture = _loadPreferences();
+    if (widget.novelOnly) unawaited(_loadNovelRestSetting());
     if (widget.chapters.isEmpty) {
       _loading = false;
       _error = '暂无可阅读章节';
@@ -472,6 +490,7 @@ class _ReaderPageState extends State<ReaderPage>
     final current = ModalRoute.isCurrentOf(context) ?? true;
     if (_routeCurrent == current) return;
     _routeCurrent = current;
+    _syncNovelForeground();
     if (!current) _cancelVideoOpen();
     // The ideas sheet (#57) holds immersive while it is open. Once this
     // route is current again the sheet is gone, so the hold is released
@@ -496,6 +515,8 @@ class _ReaderPageState extends State<ReaderPage>
 
   @override
   void dispose() {
+    _syncNovelForeground(forceInactive: true);
+    _novelTimeTimer?.cancel();
     _ideasRetryTimer?.cancel();
     _chrome.dispose();
     _locationHighlightTimer?.cancel();
@@ -576,6 +597,7 @@ class _ReaderPageState extends State<ReaderPage>
         }
       }
     }
+    _syncNovelForeground();
     // 前台/后台切换不影响原生层音量键拦截（在 Activity 层，与 Flutter 生命周期
     // 无关），故此处无需重挂监听；仅同步一次状态即可。
     _followPoll.sync();

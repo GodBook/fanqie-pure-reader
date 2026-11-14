@@ -270,6 +270,24 @@ class _NovelBookPageState extends State<NovelBookPage> {
               ),
             ],
           ),
+          if (_detail?.tags.isNotEmpty == true) ...[
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final tag in _detail!.tags.map((value) => value.trim()).where((value) => value.isNotEmpty).toSet())
+                  ActionChip(
+                    label: Text(tag),
+                    tooltip: '搜索“$tag”相关小说',
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(builder: (_) => NovelSearch(initialQuery: tag, isTagKeyword: true)),
+                    ),
+                  ),
+              ],
+            ),
+          ],
           const SizedBox(height: 28),
           Row(
             children: [
@@ -440,12 +458,37 @@ class _NovelShelfState extends State<NovelShelf> {
   String? _openingId;
   String _group = ShelfGroupStore.all;
   String _sort = '最近阅读';
+  String _statusFilter = '全部状态';
+  final TextEditingController _shelfSearch = TextEditingController();
   bool _managing = false;
   final Set<String> _selection = {};
   @override
   void initState() {
     super.initState();
     _restoreSort();
+    unawaited(NovelShelfManagement.instance.initialize());
+  }
+
+  Future<void> _checkFollowed({bool manual = false}) async {
+    final downloads = NovelDownloadManager.instance;
+    await downloads.initialize();
+    await NovelShelfManagement.instance.check(
+      books: ShelfStore.instance.records().map((record) => record.item).where(
+        (book) => book.kind == 'book' && book.source == 'fanqie' &&
+            !ImportedBookStore.isLocalBookId(book.id),
+      ),
+      directoryLoader: downloads.directoryLoader,
+      connectivity: downloads.connectivity,
+      wifiOnly: downloads.wifiOnly,
+      manual: manual,
+      isForeground: () => mounted && downloads.isForeground,
+    );
+  }
+
+  @override
+  void dispose() {
+    _shelfSearch.dispose();
+    super.dispose();
   }
 
   Future<void> _restoreSort() async {
@@ -458,16 +501,23 @@ class _NovelShelfState extends State<NovelShelf> {
   Future<void> _open(MediaItem book) async {
     if (_openingId != null) return;
     setState(() => _openingId = book.id);
-    await _readBook(context, book);
-    if (mounted) setState(() => _openingId = null);
+    try {
+      await _readBook(context, book);
+    } finally {
+      if (mounted) setState(() => _openingId = null);
+    }
   }
 
   Future<void> _menu(ShelfRecord record) async {
+    final book = record.item;
+    final local = ImportedBookStore.isLocalBookId(book.id);
+    final metadata = NovelShelfManagement.instance.of(book);
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (context) => SafeArea(
-        child: Column(
+        child: SingleChildScrollView(child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
@@ -477,10 +527,25 @@ class _NovelShelfState extends State<NovelShelf> {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            ListTile(
+            if (!local) ListTile(
               leading: const Icon(Icons.info_outline),
               title: const Text('书籍详情与下载'),
               onTap: () => Navigator.pop(context, 'detail'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.label_outline),
+              title: Text(metadata.readingState.isEmpty ? '设置阅读状态' : '阅读状态：${metadata.readingState}'),
+              onTap: () => Navigator.pop(context, 'state'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.push_pin_outlined),
+              title: Text(metadata.pinned ? '取消置顶' : '置顶书籍'),
+              onTap: () => Navigator.pop(context, 'pin'),
+            ),
+            if (!local && book.source == 'fanqie') ListTile(
+              leading: const Icon(Icons.notifications_none),
+              title: Text(metadata.followed ? '取消追更' : '追更这本书'),
+              onTap: () => Navigator.pop(context, 'follow'),
             ),
             ListTile(
               leading: const Icon(Icons.bookmark_remove_outlined),
@@ -492,13 +557,61 @@ class _NovelShelfState extends State<NovelShelf> {
               title: const Text('移动到分组'),
               onTap: () => Navigator.pop(context, 'move'),
             ),
+            if (local) ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('删除本地文件'),
+              onTap: () => Navigator.pop(context, 'delete-local'),
+            ),
           ],
-        ),
+        )),
       ),
     );
     if (!mounted) return;
-    if (action == 'detail') _openBook(context, record.item);
-    if (action == 'move') await _move([record.item]);
+    if (action == 'detail' && !local) _openBook(context, book);
+    if (action == 'move') {
+      await _move([book]);
+      return;
+    }
+    if (action == 'delete-local') {
+      await _rootDeleteLocalNovel(context, book);
+      return;
+    }
+    if (action == 'state') {
+      final state = await showModalBottomSheet<String>(
+        context: context,
+        showDragHandle: true,
+        builder: (sheet) => SafeArea(child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final value in NovelShelfMetadata.readingStates)
+              ListTile(
+                title: Text(value.isEmpty ? '不设置状态' : value),
+                trailing: metadata.readingState == value ? const Icon(Icons.check) : null,
+                onTap: () => Navigator.pop(sheet, value),
+              ),
+          ],
+        )),
+      );
+      if (state != null) {
+        try {
+          await NovelShelfManagement.instance.setReadingState(book, state);
+        } catch (_) {
+          if (mounted) _notice(context, '阅读状态保存失败');
+        }
+      }
+    }
+    if (action == 'pin' || action == 'follow') {
+      try {
+        if (action == 'pin') {
+          await NovelShelfManagement.instance.setPinned(book, !metadata.pinned);
+        } else {
+          await NovelShelfManagement.instance.setFollowed(book, !metadata.followed);
+          if (!metadata.followed) unawaited(_checkFollowed().catchError((_) {}));
+        }
+      } catch (_) {
+        if (mounted) _notice(context, '书架状态保存失败');
+      }
+    }
     if (!mounted) return;
     if (action == 'remove') {
       try {

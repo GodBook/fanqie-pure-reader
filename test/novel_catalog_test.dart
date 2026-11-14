@@ -82,8 +82,24 @@ void main() {
     expect(find.textContaining('device_register'), findsNothing);
     expect(tester.takeException(), isNull);
     fail = false;
-    await tester.ensureVisible(find.text('重试'));
-    await tester.tap(find.text('重试'));
+    final retry = find.widgetWithText(FilledButton, '重试');
+    await tester.ensureVisible(retry);
+    await tester.pump();
+    // Reveal any still-clipped part of the actual touch target on a small
+    // screen with enlarged system text, then assert that the tap can hit it.
+    if (retry.hitTestable().evaluate().isEmpty) {
+      await tester.drag(
+        find.byType(CustomScrollView).first,
+        const Offset(0, -160),
+      );
+      await tester.pumpAndSettle(
+        const Duration(milliseconds: 50),
+        EnginePhase.sendSemanticsUpdate,
+        const Duration(seconds: 3),
+      );
+    }
+    expect(retry.hitTestable(), findsOneWidget);
+    await tester.tap(retry.hitTestable());
     await tester.pumpAndSettle();
     expect(_row('recovered'), findsOneWidget);
   });

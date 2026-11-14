@@ -212,6 +212,108 @@ void main() {
     expect(bookmarks.records.first.note, '新内容');
   });
 
+  testWidgets('marks can be sorted by chapter and searched by note text', (
+    tester,
+  ) async {
+    final bookmarks = _Bookmarks()
+      ..records.addAll([
+        const ReaderBookmark(
+          bookId: 'book',
+          chapterId: 'b',
+          title: '乙章',
+          text: '乙章摘录',
+          sourceOffset: 3,
+          createdAt: 2,
+          note: '第二条',
+        ),
+        const ReaderBookmark(
+          bookId: 'book',
+          chapterId: 'a',
+          title: '甲章',
+          text: '甲章摘录',
+          sourceOffset: 2,
+          createdAt: 1,
+          note: '目标笔记',
+        ),
+      ]);
+    final underlines = _Underlines();
+    addTearDown(() {
+      bookmarks.changes.dispose();
+      underlines.changes.dispose();
+    });
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReaderMarksPanel(
+            bookId: 'book',
+            chapters: [
+              Chapter(itemId: 'a', title: '甲章', volumeName: ''),
+              Chapter(itemId: 'b', title: '乙章', volumeName: ''),
+            ],
+            preset: ReaderThemePreset.light,
+            bookmarks: bookmarks,
+            underlines: underlines,
+            onAdd: () async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('按章节'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.text('甲章摘录')).dy,
+      lessThan(tester.getTopLeft(find.text('乙章摘录')).dy),
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('reader-marks-search')),
+      '目标笔记',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('甲章摘录'), findsOneWidget);
+    expect(find.text('乙章摘录'), findsNothing);
+  });
+
+  testWidgets('local plain-text search opens another chapter and returns', (
+    tester,
+  ) async {
+    final fixture = _ReaderFixture(
+      importedTexts: {'a': '甲章\n第一章正文', 'b': '乙章\n另一章有独特暗号'},
+    );
+    await fixture.mount(tester);
+    await _openControls(tester);
+    await tester.tap(find.byKey(const ValueKey('reader-find-entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('已缓存章节'));
+    await tester.enterText(
+      find.byKey(const ValueKey('reader-find-field')),
+      '独特暗号',
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reader-find-cached-result-0')));
+    await tester.pumpAndSettle();
+    expect(
+      fixture
+          .paged(tester)
+          .layout
+          .blocks
+          .any((block) => block.text.contains('独特暗号')),
+      isTrue,
+    );
+    await _return(tester);
+    expect(
+      fixture
+          .paged(tester)
+          .layout
+          .blocks
+          .any((block) => block.text.contains('第一章正文')),
+      isTrue,
+    );
+  });
+
   testWidgets('a changed draft is discarded only after confirmation', (
     tester,
   ) async {
@@ -480,7 +582,7 @@ Future<void> _return(WidgetTester tester) async {
 }
 
 class _ReaderFixture {
-  _ReaderFixture({int chapterCount = 2}) {
+  _ReaderFixture({int chapterCount = 2, this.importedTexts}) {
     chapters = [a, b, c, d, e, f, g].take(chapterCount).toList();
     cache.content['book'] = {
       'a': _body('甲章', includeMatch: true),
@@ -493,6 +595,7 @@ class _ReaderFixture {
     };
   }
   final a = Chapter(itemId: 'a', title: '甲章', volumeName: '', version: '1');
+  final Map<String, String>? importedTexts;
   final b = Chapter(itemId: 'b', title: '乙章', volumeName: '', version: '1');
   final c = Chapter(itemId: 'c', title: '丙章', volumeName: '', version: '1');
   final d = Chapter(itemId: 'd', title: '丁章', volumeName: '', version: '1');
@@ -528,6 +631,9 @@ class _ReaderFixture {
               startIndex: 0,
               localOnly: true,
               novelOnly: true,
+              chapterLoader: importedTexts == null
+                  ? null
+                  : (chapter) async => importedTexts![chapter.itemId]!,
               readerStore: history,
               chapterCache: cache,
               bookmarkStore: bookmarks,

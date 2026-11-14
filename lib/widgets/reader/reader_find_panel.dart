@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../services/novel_cached_search.dart';
 import '../../services/reader_preferences.dart';
 import '../wenku/app_search_field.dart';
 import '../wenku/wenku_archive.dart';
@@ -101,10 +102,12 @@ class ReaderFindPanel extends StatefulWidget {
     super.key,
     required this.paragraphs,
     required this.preset,
+    this.cachedSearch,
   });
 
   final List<ReaderFindParagraph> paragraphs;
   final ReaderThemePreset preset;
+  final NovelCachedSearch? cachedSearch;
 
   /// Both debounce and explicit submission must wait for the IME to commit.
   static bool isComposing(TextEditingValue value) =>
@@ -120,6 +123,9 @@ class _ReaderFindPanelState extends State<ReaderFindPanel> {
   int _generation = 0;
   bool _searching = false;
   bool _failed = false;
+  bool _cachedMode = false;
+  bool _cancelled = false;
+  NovelCachedSearchProgress? _cachedProgress;
   ReaderFindResult _result = const ReaderFindResult.empty();
 
   @override
@@ -144,6 +150,8 @@ class _ReaderFindPanelState extends State<ReaderFindPanel> {
         term.length <= 120;
     setState(() {
       _failed = false;
+      _cancelled = false;
+      _cachedProgress = null;
       _result = const ReaderFindResult.empty();
       _searching = ready;
     });
@@ -161,6 +169,21 @@ class _ReaderFindPanelState extends State<ReaderFindPanel> {
       _failed = false;
     });
     try {
+      if (_cachedMode && widget.cachedSearch != null) {
+        final result = await widget.cachedSearch!(_query.text.trim(), (
+          progress,
+        ) {
+          if (mounted && generation == _generation && _cachedMode) {
+            setState(() => _cachedProgress = progress);
+          }
+        }, () => !mounted || generation != _generation || !_cachedMode);
+        if (!mounted || generation != _generation) return;
+        setState(() {
+          _cachedProgress = result;
+          _searching = false;
+        });
+        return;
+      }
       final result = await findInReader(widget.paragraphs, _query.text);
       if (!mounted || generation != _generation) return;
       setState(() {
@@ -179,6 +202,21 @@ class _ReaderFindPanelState extends State<ReaderFindPanel> {
   String get _status {
     if (ReaderFindPanel.isComposing(_query.value)) return '完成输入后查找';
     if (_failed) return '查找失败，请重试';
+    if (_cachedMode) {
+      if (_query.text.trim().isEmpty) return '仅查找本机已有章节的原文，不下载新章节。';
+      if (_query.text.trim().length > 120) return '查找文字请控制在 120 字以内';
+      final progress = _cachedProgress;
+      if (progress == null) return _searching ? '正在读取缓存范围…' : '输入文字开始查找';
+      final status = _cancelled
+          ? '已取消'
+          : _searching
+          ? '正在查找'
+          : '查找完成';
+      return '$status · 已扫 ${progress.scanned}/${progress.cached} 缓存章 · '
+          '目录 ${progress.directory} 章 · ${progress.matches.length} 处匹配'
+          '${progress.failed > 0 ? ' · ${progress.failed} 章读取失败' : ''}'
+          '${progress.truncated ? ' · 结果已截断' : ''}';
+    }
     if (_searching) return '正在查找…';
     if (_query.text.trim().isEmpty) return '仅查找已加载的本章正文，点按结果跳到原文。';
     if (_query.text.trim().length > 120) return '查找文字请控制在 120 字以内';
@@ -210,9 +248,9 @@ class _ReaderFindPanelState extends State<ReaderFindPanel> {
               sliver: SliverToBoxAdapter(
                 child: Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       child: ArchiveSection(
-                        title: '章内查找',
+                        title: _cachedMode ? '缓存章节查找' : '章内查找',
                         code: 'READER / TEXT QUERY',
                       ),
                     ),
@@ -231,10 +269,36 @@ class _ReaderFindPanelState extends State<ReaderFindPanel> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    if (widget.cachedSearch != null) ...[
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('本章'),
+                            selected: !_cachedMode,
+                            onSelected: (_) {
+                              if (!_cachedMode) return;
+                              setState(() => _cachedMode = false);
+                              _edited();
+                            },
+                          ),
+                          ChoiceChip(
+                            label: const Text('已缓存章节'),
+                            selected: _cachedMode,
+                            onSelected: (_) {
+                              if (_cachedMode) return;
+                              setState(() => _cachedMode = true);
+                              _edited();
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     AppSearchField(
                       inputKey: const ValueKey('reader-find-field'),
                       controller: _query,
-                      hint: '查找当前章节文字',
+                      hint: _cachedMode ? '查找缓存章节原文' : '查找当前章节文字',
                       onSubmitted: (_) => _search(),
                     ),
                     const SizedBox(height: 12),
@@ -250,11 +314,43 @@ class _ReaderFindPanelState extends State<ReaderFindPanel> {
                         onPressed: _search,
                         child: const Text('重试'),
                       ),
+                    if (_cachedMode && _searching)
+                      TextButton(
+                        onPressed: () => setState(() {
+                          _generation++;
+                          _searching = false;
+                          _cancelled = true;
+                        }),
+                        child: const Text('取消查找'),
+                      ),
                   ],
                 ),
               ),
             ),
-            if (!_searching && !_failed)
+            if (_cachedMode && _cachedProgress != null)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 24),
+                sliver: SliverList.builder(
+                  itemCount: _cachedProgress!.matches.length,
+                  itemBuilder: (context, index) {
+                    final match = _cachedProgress!.matches[index];
+                    return ListTile(
+                      key: ValueKey('reader-find-cached-result-$index'),
+                      title: Text(match.chapterTitle),
+                      subtitle: Text(
+                        match.excerpt,
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () {
+                        FocusScope.of(context).unfocus();
+                        Navigator.pop(context, match);
+                      },
+                    );
+                  },
+                ),
+              ),
+            if (!_cachedMode && !_searching && !_failed)
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(14, 0, 14, 24),
                 sliver: SliverList.builder(

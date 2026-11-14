@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../models/media_item.dart';
+import '../../services/novel_mark_export.dart';
 import '../../services/reader_bookmark_store.dart';
 import '../../services/reader_underline_store.dart';
 import '../../services/reader_preferences.dart';
@@ -11,6 +12,7 @@ class ReaderMarksPanel extends StatefulWidget {
   const ReaderMarksPanel({
     super.key,
     required this.bookId,
+    this.bookTitle = '',
     required this.chapters,
     required this.preset,
     required this.bookmarks,
@@ -18,6 +20,7 @@ class ReaderMarksPanel extends StatefulWidget {
     required this.onAdd,
   });
   final String bookId;
+  final String bookTitle;
   final List<Chapter> chapters;
   final ReaderThemePreset preset;
   final ReaderBookmarkStore bookmarks;
@@ -32,6 +35,15 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
   String? _error;
   bool _loading = true;
   String _filter = '全部';
+  String _query = '';
+  bool _chapterOrder = false;
+  bool _selecting = false;
+  bool _exporting = false;
+  final Set<String> _selected = {};
+
+  String _itemKey(NovelExportMark item) => item.underlineKey == null
+      ? 'bookmark:${item.mark.key}'
+      : 'underline:${item.underlineKey}';
   @override
   void initState() {
     super.initState();
@@ -140,8 +152,76 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
     }
   }
 
+  Future<void> _export(List<NovelExportMark> items) async {
+    final selected = items
+        .where((item) => _selected.contains(_itemKey(item)))
+        .toList();
+    if (_chapterOrder) {
+      final order = _chapterOrderIndex();
+      selected.sort((a, b) => _compareChapterOrder(a, b, order));
+    }
+    if (selected.isEmpty || _exporting) return;
+    final format = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (sheet) => SafeArea(
+        minimum: const EdgeInsets.only(bottom: 56),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                title: const Text('导出 TXT'),
+                onTap: () => Navigator.pop(sheet, false),
+              ),
+              ListTile(
+                title: const Text('导出 Markdown'),
+                onTap: () => Navigator.pop(sheet, true),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (format == null || !mounted) return;
+    setState(() => _exporting = true);
+    try {
+      final saved = await saveNovelMarks(
+        bookTitle: widget.bookTitle.isEmpty ? widget.bookId : widget.bookTitle,
+        marks: selected,
+        markdown: format,
+      );
+      if (mounted && saved) {
+        ScaffoldMessenger.maybeOf(
+          context,
+        )?.showSnackBar(const SnackBar(content: Text('已保存所选标注')));
+      }
+    } catch (_) {
+      if (mounted) setState(() => _error = '导出失败，请检查存储位置后重试');
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  Map<String, int> _chapterOrderIndex() => {
+    for (var i = 0; i < widget.chapters.length; i++)
+      widget.chapters[i].itemId: i,
+  };
+
+  int _compareChapterOrder(
+    NovelExportMark a,
+    NovelExportMark b,
+    Map<String, int> order,
+  ) {
+    final chapter = (order[a.mark.chapterId] ?? widget.chapters.length)
+        .compareTo(order[b.mark.chapterId] ?? widget.chapters.length);
+    if (chapter != 0) return chapter;
+    final position = a.mark.sourceOffset.compareTo(b.mark.sourceOffset);
+    return position != 0 ? position : _itemKey(a).compareTo(_itemKey(b));
+  }
+
   @override
   Widget build(BuildContext context) {
+    final query = _query.trim().toLowerCase();
     final items = _items
         .where(
           (e) => switch (_filter) {
@@ -151,13 +231,29 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
             _ => true,
           },
         )
+        .where(
+          (e) =>
+              query.isEmpty ||
+              e.mark.title.toLowerCase().contains(query) ||
+              e.mark.text.toLowerCase().contains(query) ||
+              e.mark.note.toLowerCase().contains(query),
+        )
         .toList();
-    final emptyMessage = switch (_filter) {
-      '书签' => '暂无书签 · 可添加当前位置',
-      '笔记' => '暂无笔记 · 长按正文可写笔记',
-      '划线' => '暂无划线 · 长按正文可划线',
-      _ => '暂无标注 · 长按正文可划线或写笔记',
-    };
+    if (_chapterOrder) {
+      final order = _chapterOrderIndex();
+      items.sort((a, b) => _compareChapterOrder(a, b, order));
+    }
+    final hiddenSelection =
+        _selected.length -
+        items.where((item) => _selected.contains(_itemKey(item))).length;
+    final emptyMessage = query.isNotEmpty
+        ? '没有匹配的标注'
+        : switch (_filter) {
+            '书签' => '暂无书签 · 可添加当前位置',
+            '笔记' => '暂无笔记 · 长按正文可写笔记',
+            '划线' => '暂无划线 · 长按正文可划线',
+            _ => '暂无标注 · 长按正文可划线或写笔记',
+          };
     return Theme(
       data: widget.preset.theme(Theme.of(context)),
       child: Material(
@@ -251,6 +347,58 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
                                     ),
                                 ],
                               ),
+                              if (_selecting && hiddenSelection > 0)
+                                Text('另有 $hiddenSelection 条已选标注不在当前筛选中'),
+                              const SizedBox(height: 8),
+                              TextField(
+                                key: const ValueKey('reader-marks-search'),
+                                decoration: const InputDecoration(
+                                  labelText: '搜索摘录、笔记或章节',
+                                  prefixIcon: Icon(Icons.search),
+                                ),
+                                onChanged: (value) =>
+                                    setState(() => _query = value),
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 4,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  ChoiceChip(
+                                    label: const Text('按时间'),
+                                    selected: !_chapterOrder,
+                                    onSelected: (_) =>
+                                        setState(() => _chapterOrder = false),
+                                  ),
+                                  ChoiceChip(
+                                    label: const Text('按章节'),
+                                    selected: _chapterOrder,
+                                    onSelected: (_) =>
+                                        setState(() => _chapterOrder = true),
+                                  ),
+                                  TextButton.icon(
+                                    onPressed: () => setState(() {
+                                      _selecting = !_selecting;
+                                      if (!_selecting) _selected.clear();
+                                    }),
+                                    icon: Icon(
+                                      _selecting
+                                          ? Icons.close
+                                          : Icons.checklist,
+                                    ),
+                                    label: Text(_selecting ? '取消选择' : '选择导出'),
+                                  ),
+                                  if (_selecting)
+                                    TextButton.icon(
+                                      onPressed: _exporting || _selected.isEmpty
+                                          ? null
+                                          : () => _export(_items),
+                                      icon: const Icon(Icons.save_alt),
+                                      label: Text('导出 ${_selected.length} 条'),
+                                    ),
+                                ],
+                              ),
                             ],
                           ),
                         ),
@@ -308,31 +456,52 @@ class _ReaderMarksPanelState extends State<ReaderMarksPanel> {
                                     ),
                                 ],
                               ),
-                              onTap: () => Navigator.pop(context, mark),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (item.underlineKey == null)
-                                    IconButton(
-                                      tooltip: '编辑笔记',
-                                      constraints: const BoxConstraints(
-                                        minWidth: 48,
-                                        minHeight: 48,
-                                      ),
-                                      onPressed: () => _edit(mark),
-                                      icon: const Icon(Icons.edit_outlined),
+                              onTap: _selecting
+                                  ? () => setState(() {
+                                      final key = _itemKey(item);
+                                      if (!_selected.remove(key)) {
+                                        _selected.add(key);
+                                      }
+                                    })
+                                  : () => Navigator.pop(context, mark),
+                              trailing: _selecting
+                                  ? Checkbox(
+                                      value: _selected.contains(_itemKey(item)),
+                                      onChanged: (_) => setState(() {
+                                        final key = _itemKey(item);
+                                        if (!_selected.remove(key)) {
+                                          _selected.add(key);
+                                        }
+                                      }),
+                                    )
+                                  : Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (item.underlineKey == null)
+                                          IconButton(
+                                            tooltip: '编辑笔记',
+                                            constraints: const BoxConstraints(
+                                              minWidth: 48,
+                                              minHeight: 48,
+                                            ),
+                                            onPressed: () => _edit(mark),
+                                            icon: const Icon(
+                                              Icons.edit_outlined,
+                                            ),
+                                          ),
+                                        IconButton(
+                                          tooltip: '删除标注',
+                                          constraints: const BoxConstraints(
+                                            minWidth: 48,
+                                            minHeight: 48,
+                                          ),
+                                          onPressed: () => _delete(item),
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                  IconButton(
-                                    tooltip: '删除标注',
-                                    constraints: const BoxConstraints(
-                                      minWidth: 48,
-                                      minHeight: 48,
-                                    ),
-                                    onPressed: () => _delete(item),
-                                    icon: const Icon(Icons.delete_outline),
-                                  ),
-                                ],
-                              ),
                             );
                           },
                         ),

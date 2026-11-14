@@ -155,6 +155,104 @@ void main() {
   });
 
   group('RankCatalog entries', () {
+    test('retains known media types before dropping raw rank metadata', () {
+      final page = RankCatalog.parsePage({
+        'code': 0,
+        'data': {
+          'has_more': true,
+          'cell_view': {
+            'cell_data': [
+              {
+                'book_data': [
+                  {
+                    'book_id': '1',
+                    'book_name': '漫剧改编原著',
+                    'genre': 0,
+                    'category': '都市',
+                  },
+                ],
+              },
+              {
+                'book_data': [
+                  {'book_id': '2', 'book_name': '有声作品', 'genre': '4'},
+                ],
+              },
+              {
+                'book_data': {
+                  'book_id': '3',
+                  'book_name': '漫画作品',
+                  'genre': 1,
+                  'genre_type': 110,
+                },
+              },
+              {
+                'book_data': [
+                  {'book_id': '4', 'book_name': '短剧作品', 'genre': 203},
+                ],
+              },
+              {
+                'book_data': [
+                  {'book_id': '5', 'book_name': '漫剧作品', 'genre': 205},
+                ],
+              },
+              {
+                'kind': 'audio',
+                'book_data': [
+                  {'book_id': '6', 'book_name': '外层标识'},
+                ],
+              },
+              {
+                'book_data': [
+                  {'book_id': '7', 'book_name': '内层标识', 'kind': 'audio'},
+                ],
+              },
+              {
+                'kind': 'book',
+                'book_data': [
+                  {
+                    'book_id': '8',
+                    'book_name': '类型冲突',
+                    'kind': 'book',
+                    'genre': 4,
+                  },
+                ],
+              },
+              {'book_id': '9', 'book_name': '未知类型保持兼容', 'genre': 999},
+            ],
+          },
+        },
+      }, startAt: 11);
+
+      expect(page.entries.map((entry) => entry.kind), [
+        'book',
+        'audio',
+        'manga',
+        'video',
+        'manju',
+        'audio',
+        'audio',
+        'audio',
+        'book',
+      ]);
+      expect(page.entries.map((entry) => entry.position), [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+      ]);
+      expect(page.entries[3].seriesId, '4');
+      expect(page.entries[1].id, '2');
+      expect(page.hasMore, isTrue);
+      for (final entry in page.entries) {
+        expect(RankEntry.fromJson(entry.toJson()).kind, entry.kind);
+      }
+    });
+
     test('numbers the entries from the requested start', () {
       final page = RankCatalog.parsePage(_entries());
       expect(page.entries.map((e) => e.position), [1, 2]);
@@ -248,6 +346,30 @@ void main() {
       final page = RankCatalog.parsePage(_entries(hasMore: false, count: 1));
       expect(page.hasMore, isFalse);
       expect(page.entries, hasLength(1));
+    });
+
+    test('has_more accepts boolean true and numeric one only', () {
+      const cases = <(Object?, bool)>[
+        (true, true),
+        (false, false),
+        (1, true),
+        (0, false),
+        (null, false),
+        ('1', false),
+        (2, false),
+      ];
+      for (final (value, expected) in cases) {
+        final payload = _entries(count: 1);
+        final data = Map<String, dynamic>.from(payload['data'] as Map);
+        payload['data'] = data;
+        data['has_more'] = value;
+        final page = RankCatalog.parsePage(payload);
+        expect(page.entries, hasLength(1));
+        expect(page.hasMore, expected, reason: 'has_more: $value');
+      }
+      final payload = _entries(count: 1);
+      (payload['data'] as Map<String, dynamic>).remove('has_more');
+      expect(RankCatalog.parsePage(payload).hasMore, isFalse);
     });
 
     test('a business error yields an empty page', () {

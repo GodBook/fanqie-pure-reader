@@ -333,8 +333,8 @@ class RankCatalog {
 
     final entries = <RankEntry>[];
     final seenIds = <String>{};
-    void addBook(Map<String, dynamic> book) {
-      final entry = _entry(book, startAt + entries.length);
+    void addBook(Map<String, dynamic> book, Map<dynamic, dynamic> cell) {
+      final entry = _entry(book, cell, startAt + entries.length);
       if (entry == null) return;
       // A group cell can carry both an inline work and nested cells; keep the
       // first occurrence of every work instead of duplicating it. Some cells
@@ -359,7 +359,7 @@ class RankCatalog {
       // arrive directly under the group, so try both shapes for every cell.
       final book = _firstBook(cell);
       if (book != null) {
-        addBook(book);
+        addBook(book, cell);
       } else {
         // Drama-board entries arrive in video-shaped cells the book path
         // cannot read; the feed's parser knows their field conventions.
@@ -372,7 +372,7 @@ class RankCatalog {
         if (sub is! Map) continue;
         final subBook = _firstBook(sub);
         if (subBook != null) {
-          addBook(subBook);
+          addBook(subBook, sub);
         } else {
           final subVideo = _firstVideo(sub);
           if (subVideo != null) addVideo(subVideo);
@@ -381,7 +381,7 @@ class RankCatalog {
     }
     return RankBoard(
       entries: List.unmodifiable(entries),
-      hasMore: data['has_more'] == true,
+      hasMore: data['has_more'] == true || data['has_more'] == 1,
     );
   }
 
@@ -400,11 +400,16 @@ class RankCatalog {
     return null;
   }
 
-  static RankEntry? _entry(Map<String, dynamic> book, int position) {
+  static RankEntry? _entry(
+    Map<String, dynamic> book,
+    Map<dynamic, dynamic> cell,
+    int position,
+  ) {
     final id = _string(book['book_id']);
     final title = _string(book['book_name']);
     if (id.isEmpty && title.isEmpty) return null;
     final category = _string(book['category']);
+    final media = _bookMediaType(book, cell);
     return RankEntry(
       position: position,
       id: id,
@@ -418,8 +423,31 @@ class RankCatalog {
       creationStatus: _int(book['creation_status'], fallback: -1),
       wordNumber: _int(book['word_number']),
       readCount: _string(book['read_count']),
+      kind: media.kind,
+      seriesId: media.seriesId ?? (isVideoKind(media.kind) ? id : ''),
       tags: parseRankTags(book['secondary_info_list']),
     );
+  }
+
+  /// Classify while the original cell and book metadata are still available.
+  /// Unrecognised metadata keeps the existing MediaItem fallback to `book`.
+  static MediaItem _bookMediaType(
+    Map<String, dynamic> book,
+    Map<dynamic, dynamic> cell,
+  ) {
+    final direct = MediaItem.fromRaw(book);
+    if (direct.kind != 'book') return direct;
+    final wrapper = Map<String, dynamic>.from(cell)..['book_data'] = book;
+    final wrapped = MediaItem.fromRaw(wrapper);
+    if (wrapped.kind != 'book') return wrapped;
+    if (!book.containsKey('kind') && !wrapper.containsKey('kind')) {
+      return wrapped;
+    }
+    // An explicit `book` must not mask conflicting non-novel metadata.
+    final inferredBook = Map<String, dynamic>.from(book)..remove('kind');
+    wrapper.remove('kind');
+    wrapper['book_data'] = inferredBook;
+    return MediaItem.fromRaw(wrapper);
   }
 
   /// A drama-board cell: it carries `video_data`, or the series identifiers

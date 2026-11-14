@@ -17,6 +17,14 @@ class _Cover extends StatelessWidget {
       ),
       child: book.cover.isEmpty
           ? _fallback(context)
+          : ImportedBookStore.isLocalBookId(book.id)
+          ? Image.file(
+              File(book.cover),
+              fit: BoxFit.cover,
+              cacheWidth: (width * MediaQuery.devicePixelRatioOf(context))
+                  .round(),
+              errorBuilder: (_, _, _) => _fallback(context),
+            )
           : CachedNetworkImage(
               imageUrl: book.cover,
               fit: BoxFit.cover,

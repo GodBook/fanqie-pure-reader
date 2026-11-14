@@ -378,11 +378,17 @@ void main() {
   ) async {
     var detailCalls = 0;
     var postCalls = 0;
+    var probeCalls = 0;
     var detailFails = true;
+    final offlineCheck = Completer<bool>();
     await _mount(
       tester,
       NovelTopicPage(
         topic: _topic,
+        offlineCheck: () {
+          probeCalls++;
+          return offlineCheck.future;
+        },
         topicLoader: (_, _) async {
           detailCalls++;
           if (detailFails) throw StateError('详情失败');
@@ -396,12 +402,27 @@ void main() {
     );
     expect(find.text('原始话题'), findsOneWidget);
     expect(find.text('成功的读者荐书'), findsOneWidget);
+    final retry = find.byKey(const ValueKey('topic-detail-retry'));
+    expect(retry, findsOneWidget);
+    expect(retry.hitTestable(), findsOneWidget);
+    expect(probeCalls, 1);
+    expect(offlineCheck.isCompleted, isFalse);
     detailFails = false;
-    await tester.tap(find.byKey(const ValueKey('topic-detail-retry')));
+    await tester.tap(retry.hitTestable());
     await tester.pumpAndSettle();
     expect(find.text('补充后的话题'), findsOneWidget);
+    expect(find.text('成功的读者荐书'), findsOneWidget);
     expect(detailCalls, 2);
     expect(postCalls, 1);
+    // A stale offline response must not overwrite a successful retry.
+    offlineCheck.complete(true);
+    await tester.pumpAndSettle(
+      const Duration(milliseconds: 50),
+      EnginePhase.sendSemanticsUpdate,
+      const Duration(seconds: 3),
+    );
+    expect(find.byKey(const ValueKey('topic-detail-retry')), findsNothing);
+    expect(find.text('补充后的话题'), findsOneWidget);
   });
 
   testWidgets('posts failure preserves detail and retries only posts', (
@@ -432,6 +453,63 @@ void main() {
     expect(find.text('重新取得的荐书'), findsOneWidget);
     expect(detailCalls, 1);
     expect(postCalls, 2);
+  });
+
+  testWidgets('a delayed offline check enriches the visible detail error', (
+    tester,
+  ) async {
+    final offlineCheck = Completer<bool>();
+    var probeCalls = 0;
+    await _mount(
+      tester,
+      NovelTopicPage(
+        topic: _topic,
+        topicLoader: (_, _) async => throw StateError('详情失败'),
+        postsLoader: (_, _, _, _, _) async =>
+            NovelTopicPostsPage(posts: [_post('post', '已有荐书')]),
+        offlineCheck: () {
+          probeCalls++;
+          return offlineCheck.future;
+        },
+      ),
+    );
+    final retry = find.byKey(const ValueKey('topic-detail-retry'));
+    expect(retry.hitTestable(), findsOneWidget);
+    expect(find.text('已有荐书'), findsOneWidget);
+    expect(probeCalls, 1);
+    expect(find.textContaining('当前离线'), findsNothing);
+    offlineCheck.complete(true);
+    await tester.pumpAndSettle(
+      const Duration(milliseconds: 50),
+      EnginePhase.sendSemanticsUpdate,
+      const Duration(seconds: 3),
+    );
+    expect(find.textContaining('当前离线'), findsOneWidget);
+    expect(retry.hitTestable(), findsOneWidget);
+    expect(find.text('已有荐书'), findsOneWidget);
+  });
+
+  testWidgets('a missing topic displays its error without a network check', (
+    tester,
+  ) async {
+    var checks = 0;
+    await _mount(
+      tester,
+      NovelTopicPage(
+        topic: _topic,
+        topicLoader: (_, _) async =>
+            throw const ApiException('未找到', statusCode: 404),
+        postsLoader: (_, _, _, _, _) async =>
+            NovelTopicPostsPage(posts: [_post('post', '已有荐书')]),
+        offlineCheck: () async {
+          checks++;
+          return true;
+        },
+      ),
+    );
+    expect(find.textContaining('话题已失效'), findsOneWidget);
+    expect(find.text('已有荐书'), findsOneWidget);
+    expect(checks, 0);
   });
 
   testWidgets('changing order leaves the pending detail request independent', (
