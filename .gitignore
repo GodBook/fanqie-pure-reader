@@ -92,6 +92,6 @@ _sessionzip/
 /docs/*
 !/docs/project/
 
-# Public releases exclude local recovery records and device evidence.
+# Keep local project records out of the public source snapshot.
 /docs/
 /AGENTS.md

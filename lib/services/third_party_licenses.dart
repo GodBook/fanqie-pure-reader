@@ -4,6 +4,11 @@ import 'package:flutter/services.dart';
 void registerPortedUiLicenses() {
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks(const [
+      'pinyin',
+    ], await rootBundle.loadString('assets/licenses/pinyin/LICENSE'));
+  });
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(const [
       'fqapp — ch6vip / 番茄小说纯净版',
     ], await rootBundle.loadString('LICENSE'));
   });

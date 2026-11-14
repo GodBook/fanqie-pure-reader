@@ -39,6 +39,8 @@ class NovelPortableSettings {
     'novel_rest_interval_minutes_v1': (0, 90),
   };
   static const _booleans = {
+    'novel_personal_recommendations_enabled',
+    'reader_comment_defaults_v2',
     'reader_comment_font_follows_reading',
     'reader_show_reading_info',
     'reader_volume_key_turn',

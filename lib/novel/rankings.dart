@@ -205,6 +205,9 @@ class _NovelRankingsState extends State<NovelRankings> {
       // that ambiguity as retryable instead of claiming a verified empty list.
       if (page.entries.isEmpty) throw StateError('榜单数据暂不可用');
       final selected = _novelEntries(page.entries);
+      if (widget.boardLoader == null) {
+        _rememberNovelBooks(selected.map((entry) => entry.toMediaItem()));
+      }
       final merged = <String, RankEntry>{
         if (!reset)
           for (final entry in _entries) entry.id: entry,

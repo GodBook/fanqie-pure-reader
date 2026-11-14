@@ -104,6 +104,9 @@ class _NovelBookPageState extends State<NovelBookPage> {
         ? _detail!.author.name
         : null,
     intro: _detail?.abstract,
+    badge: _detail?.category.isNotEmpty == true ? _detail!.category : null,
+    categories: _detail?.tags.isNotEmpty == true ? _detail!.tags : null,
+    score: _detail?.scoreValue,
   );
 
   @override
@@ -140,6 +143,7 @@ class _NovelBookPageState extends State<NovelBookPage> {
         _detail = results[0] as BookDetail?;
         _chapters = chapters;
       });
+      _rememberNovelBooks([_book]);
       if (chapters.isNotEmpty) {
         await ChapterCacheStore.instance.saveBook(
           CachedBook(
@@ -276,13 +280,20 @@ class _NovelBookPageState extends State<NovelBookPage> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final tag in _detail!.tags.map((value) => value.trim()).where((value) => value.isNotEmpty).toSet())
+                for (final tag
+                    in _detail!.tags
+                        .map((value) => value.trim())
+                        .where((value) => value.isNotEmpty)
+                        .toSet())
                   ActionChip(
                     label: Text(tag),
                     tooltip: '搜索“$tag”相关小说',
                     onPressed: () => Navigator.push(
                       context,
-                      MaterialPageRoute<void>(builder: (_) => NovelSearch(initialQuery: tag, isTagKeyword: true)),
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            NovelSearch(initialQuery: tag, isTagKeyword: true),
+                      ),
                     ),
                   ),
               ],
@@ -473,10 +484,15 @@ class _NovelShelfState extends State<NovelShelf> {
     final downloads = NovelDownloadManager.instance;
     await downloads.initialize();
     await NovelShelfManagement.instance.check(
-      books: ShelfStore.instance.records().map((record) => record.item).where(
-        (book) => book.kind == 'book' && book.source == 'fanqie' &&
-            !ImportedBookStore.isLocalBookId(book.id),
-      ),
+      books: ShelfStore.instance
+          .records()
+          .map((record) => record.item)
+          .where(
+            (book) =>
+                book.kind == 'book' &&
+                book.source == 'fanqie' &&
+                !ImportedBookStore.isLocalBookId(book.id),
+          ),
       directoryLoader: downloads.directoryLoader,
       connectivity: downloads.connectivity,
       wifiOnly: downloads.wifiOnly,
@@ -517,53 +533,62 @@ class _NovelShelfState extends State<NovelShelf> {
       showDragHandle: true,
       isScrollControlled: true,
       builder: (context) => SafeArea(
-        child: SingleChildScrollView(child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              title: Text(
-                record.item.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                title: Text(
+                  record.item.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-            if (!local) ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: const Text('书籍详情与下载'),
-              onTap: () => Navigator.pop(context, 'detail'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.label_outline),
-              title: Text(metadata.readingState.isEmpty ? '设置阅读状态' : '阅读状态：${metadata.readingState}'),
-              onTap: () => Navigator.pop(context, 'state'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.push_pin_outlined),
-              title: Text(metadata.pinned ? '取消置顶' : '置顶书籍'),
-              onTap: () => Navigator.pop(context, 'pin'),
-            ),
-            if (!local && book.source == 'fanqie') ListTile(
-              leading: const Icon(Icons.notifications_none),
-              title: Text(metadata.followed ? '取消追更' : '追更这本书'),
-              onTap: () => Navigator.pop(context, 'follow'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.bookmark_remove_outlined),
-              title: const Text('移出书架'),
-              onTap: () => Navigator.pop(context, 'remove'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.drive_file_move_outline),
-              title: const Text('移动到分组'),
-              onTap: () => Navigator.pop(context, 'move'),
-            ),
-            if (local) ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text('删除本地文件'),
-              onTap: () => Navigator.pop(context, 'delete-local'),
-            ),
-          ],
-        )),
+              if (!local)
+                ListTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('书籍详情与下载'),
+                  onTap: () => Navigator.pop(context, 'detail'),
+                ),
+              ListTile(
+                leading: const Icon(Icons.label_outline),
+                title: Text(
+                  metadata.readingState.isEmpty
+                      ? '设置阅读状态'
+                      : '阅读状态：${metadata.readingState}',
+                ),
+                onTap: () => Navigator.pop(context, 'state'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.push_pin_outlined),
+                title: Text(metadata.pinned ? '取消置顶' : '置顶书籍'),
+                onTap: () => Navigator.pop(context, 'pin'),
+              ),
+              if (!local && book.source == 'fanqie')
+                ListTile(
+                  leading: const Icon(Icons.notifications_none),
+                  title: Text(metadata.followed ? '取消追更' : '追更这本书'),
+                  onTap: () => Navigator.pop(context, 'follow'),
+                ),
+              ListTile(
+                leading: const Icon(Icons.bookmark_remove_outlined),
+                title: const Text('移出书架'),
+                onTap: () => Navigator.pop(context, 'remove'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.drive_file_move_outline),
+                title: const Text('移动到分组'),
+                onTap: () => Navigator.pop(context, 'move'),
+              ),
+              if (local)
+                ListTile(
+                  leading: const Icon(Icons.delete_outline),
+                  title: const Text('删除本地文件'),
+                  onTap: () => Navigator.pop(context, 'delete-local'),
+                ),
+            ],
+          ),
+        ),
       ),
     );
     if (!mounted) return;
@@ -580,17 +605,21 @@ class _NovelShelfState extends State<NovelShelf> {
       final state = await showModalBottomSheet<String>(
         context: context,
         showDragHandle: true,
-        builder: (sheet) => SafeArea(child: ListView(
-          shrinkWrap: true,
-          children: [
-            for (final value in NovelShelfMetadata.readingStates)
-              ListTile(
-                title: Text(value.isEmpty ? '不设置状态' : value),
-                trailing: metadata.readingState == value ? const Icon(Icons.check) : null,
-                onTap: () => Navigator.pop(sheet, value),
-              ),
-          ],
-        )),
+        builder: (sheet) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final value in NovelShelfMetadata.readingStates)
+                ListTile(
+                  title: Text(value.isEmpty ? '不设置状态' : value),
+                  trailing: metadata.readingState == value
+                      ? const Icon(Icons.check)
+                      : null,
+                  onTap: () => Navigator.pop(sheet, value),
+                ),
+            ],
+          ),
+        ),
       );
       if (state != null) {
         try {
@@ -605,8 +634,13 @@ class _NovelShelfState extends State<NovelShelf> {
         if (action == 'pin') {
           await NovelShelfManagement.instance.setPinned(book, !metadata.pinned);
         } else {
-          await NovelShelfManagement.instance.setFollowed(book, !metadata.followed);
-          if (!metadata.followed) unawaited(_checkFollowed().catchError((_) {}));
+          await NovelShelfManagement.instance.setFollowed(
+            book,
+            !metadata.followed,
+          );
+          if (!metadata.followed) {
+            unawaited(_checkFollowed().catchError((_) {}));
+          }
         }
       } catch (_) {
         if (mounted) _notice(context, '书架状态保存失败');

@@ -471,8 +471,7 @@ extension _NovelShelfLibrary on _NovelShelfState {
             .where(
               (r) =>
                   query.isEmpty ||
-                  r.item.title.toLowerCase().contains(query) ||
-                  r.item.author.toLowerCase().contains(query),
+                  NovelSearchMatcher.instance.matches(query, r.item),
             )
             .where(
               (r) =>

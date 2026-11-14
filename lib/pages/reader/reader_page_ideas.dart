@@ -331,48 +331,53 @@ extension _ReaderPageIdeas on _ReaderPageState {
           borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
         ),
         clipBehavior: Clip.antiAlias,
-        builder: (context) => FractionallySizedBox(
-          // Match the supplied official screenshot, keeping the paragraph visible
-          // above the comments. Note: 2026-09-11-reader-paragraph-bubble.md.
-          heightFactor: 0.69,
-          child: ReaderIdeasSheet(
-            ideas: ideaSnapshot,
-            preset: _effectivePreset,
-            fontSize: _preferences.effectiveCommentFontSize,
-            // Each bubble opens only that paragraph's comments.
-            initialParaIndex: focusParaIndex,
-            scope: focusParaIndex == chapterEnd ? '本章评论' : '本段评论',
-            excerpt: focusParaIndex == chapterEnd
-                ? chapter.title
-                : contentSnapshot?.blocks
-                          .whereType<ChapterParagraph>()
-                          .where((p) => p.paraIndex == focusParaIndex)
-                          .firstOrNull
-                          ?.text ??
-                      '',
-            loadComments: (paragraph, cursor) async {
-              final resolver = widget.commentResolver;
-              if (resolver != null) {
-                return resolver(chapter.itemId, paragraph, cursor);
-              }
-              return _defaultComments(
-                chapter,
-                paragraph,
-                ideaSnapshot.itemVersion,
-                cursor,
-              );
-            },
-            // 回复按需展开（issue #95）。与段评正文同一套「注入即离线」
-            // 约定：调用方自己提供数据时不接网络，也就不给可点的回复入口。
-            replyLoader: _ideasReplyLoader(),
-            replyPageLoader: _ideasReplyLoader() == null
-                ? null
-                : (id, cursor) => ApiClient.instance.commentReplies(
-                    widget.bookId,
-                    id,
-                    groupId: widget.bookId,
-                    cursor: cursor,
-                  ),
+        builder: (context) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          child: FractionallySizedBox(
+            // Match the supplied official screenshot, keeping the paragraph visible
+            // above the comments. Note: 2026-09-11-reader-paragraph-bubble.md.
+            heightFactor: 0.69,
+            child: ReaderIdeasSheet(
+              ideas: ideaSnapshot,
+              preset: _effectivePreset,
+              fontSize: _preferences.effectiveCommentFontSize,
+              // Each bubble opens only that paragraph's comments.
+              initialParaIndex: focusParaIndex,
+              scope: focusParaIndex == chapterEnd ? '本章评论' : '本段评论',
+              excerpt: focusParaIndex == chapterEnd
+                  ? chapter.title
+                  : contentSnapshot?.blocks
+                            .whereType<ChapterParagraph>()
+                            .where((p) => p.paraIndex == focusParaIndex)
+                            .firstOrNull
+                            ?.text ??
+                        '',
+              loadComments: (paragraph, cursor) async {
+                final resolver = widget.commentResolver;
+                if (resolver != null) {
+                  return resolver(chapter.itemId, paragraph, cursor);
+                }
+                return _defaultComments(
+                  chapter,
+                  paragraph,
+                  ideaSnapshot.itemVersion,
+                  cursor,
+                );
+              },
+              // 回复按需展开（issue #95）。与段评正文同一套「注入即离线」
+              // 约定：调用方自己提供数据时不接网络，也就不给可点的回复入口。
+              replyLoader: _ideasReplyLoader(),
+              replyPageLoader: _ideasReplyLoader() == null
+                  ? null
+                  : (id, cursor) => ApiClient.instance.commentReplies(
+                      widget.bookId,
+                      id,
+                      groupId: widget.bookId,
+                      cursor: cursor,
+                    ),
+            ),
           ),
         ),
       );

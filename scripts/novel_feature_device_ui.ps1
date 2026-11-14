@@ -3,6 +3,7 @@
 param(
     [Parameter(Mandatory)][string]$Name,
     [string]$Serial = '',
+    [string]$EvidenceDirectory = 'build/novel-validation/features-16-2026-11-14',
     [string]$TapDescription = '',
     [int]$TapX = -1,
     [int]$TapY = -1,
@@ -17,7 +18,8 @@ if (-not $Serial) {
     $Serial = $featureDevices[0]
 }
 if ($Name -notmatch '^[a-zA-Z0-9_.-]{1,80}$') { throw 'Use a short artifact name.' }
-$featureRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'build/novel-validation/features-16-2026-11-14'
+$featureRoot = Join-Path (Split-Path -Parent $PSScriptRoot) $EvidenceDirectory
+New-Item -ItemType Directory -Path $featureRoot -Force | Out-Null
 $featurePrevious = Join-Path $featureRoot 'latest-ui.xml'
 if ($TapDescription) {
     if (-not (Test-Path -LiteralPath $featurePrevious)) { throw 'Take an initial snapshot first.' }

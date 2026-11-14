@@ -20,6 +20,15 @@ const SERIES_RELATED_PATH: &str = "/reading/bookapi/plan/v";
 pub(crate) fn reading724_params() -> Params {
     Params::from_pairs(crate::endpoints::base::reading724_params())
 }
+
+/// Preserve the upstream default for legacy clients; an explicit opt-out must
+/// replace the common parameter rather than append a duplicate query field.
+pub(crate) fn personal_recommendation_flag(params: &Params) -> &'static str {
+    match params.get_str("personalized").as_str() {
+        "0" | "false" => "0",
+        _ => "1",
+    }
+}
 /// 顶栏选中下标 `(tab_index, last_tab_index)`。
 ///
 /// 上游按 `tab_index` 决定回哪个 tab 的 `cell_data`，只带 `tab_type` 不够：
@@ -44,6 +53,10 @@ fn homepage_recommend<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, Api
         let session_id = params.get_str("session_id");
 
         let mut p = reading724_params();
+        p.set(
+            "need_personal_recommend",
+            personal_recommendation_flag(params),
+        );
         p.set("last_search_query_from_rec", "false");
         p.set("ClickedContent", "");
         p.set("client_template", client_template);
@@ -351,7 +364,7 @@ pub fn register(s: &mut Server) {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_indexes;
+    use super::{personal_recommendation_flag, reading724_params, strip_indexes};
     use crate::endpoints::Params;
 
     fn params(pairs: &[(&str, &str)]) -> Params {
@@ -389,5 +402,28 @@ mod tests {
         let (tab_index, last_tab_index) = strip_indexes(&params(&[("tab_type", "2")]));
         assert_eq!(tab_index, "0");
         assert_eq!(last_tab_index, "0");
+    }
+
+    #[test]
+    fn recommendation_opt_out_replaces_the_upstream_default() {
+        let mut upstream = reading724_params();
+        upstream.set(
+            "need_personal_recommend",
+            personal_recommendation_flag(&params(&[("personalized", "0")])),
+        );
+        let fields = upstream.to_pairs();
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|(key, _)| key == "need_personal_recommend")
+                .count(),
+            1
+        );
+        assert_eq!(upstream.get_str("need_personal_recommend"), "0");
+        assert_eq!(personal_recommendation_flag(&params(&[])), "1");
+        assert_eq!(
+            personal_recommendation_flag(&params(&[("personalized", "1")])),
+            "1"
+        );
     }
 }

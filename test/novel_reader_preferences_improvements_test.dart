@@ -72,10 +72,12 @@ void main() {
     'comment font follows the reader or persists an independent bounded size',
     () async {
       final defaults = await ReaderPreferences.load();
-      expect(defaults.commentFontFollowsReading, isTrue);
-      expect(defaults.effectiveCommentFontSize, 18);
-      expect(defaults.copyWith(fontSize: 14).effectiveCommentFontSize, 16);
-      expect(defaults.copyWith(fontSize: 32).effectiveCommentFontSize, 28);
+      expect(defaults.commentFontFollowsReading, isFalse);
+      expect(defaults.effectiveCommentFontSize, 16);
+      expect(defaults.copyWith(fontSize: 32).effectiveCommentFontSize, 16);
+      final following = defaults.copyWith(commentFontFollowsReading: true);
+      expect(following.copyWith(fontSize: 14).effectiveCommentFontSize, 16);
+      expect(following.copyWith(fontSize: 32).effectiveCommentFontSize, 28);
 
       await defaults
           .copyWith(
@@ -91,7 +93,7 @@ void main() {
       expect(restored.copyWith(commentFontSize: 100).commentFontSize, 28);
       expect(
         restored.copyWith(commentFontSize: double.nan).commentFontSize,
-        18,
+        16,
       );
       expect(
         restored
@@ -227,6 +229,11 @@ void main() {
         await tester.pumpWidget(const NovelApp(home: NovelSettings()));
         await tester.pumpAndSettle();
         await _openGlobalSettings(tester, 'font');
+        final follow = find.byKey(const ValueKey('reader-comment-font-follow'));
+        await tester.ensureVisible(follow);
+        await tester.pumpAndSettle();
+        await tester.tap(follow);
+        await tester.pumpAndSettle();
         final hint = find.text('跟随正文时，评论字号限制为 16–28 pt');
         await tester.ensureVisible(hint);
         await tester.pumpAndSettle();
@@ -342,7 +349,12 @@ void main() {
   testWidgets(
     'saved comment size reaches comments, replies and expandable excerpt',
     (tester) async {
-      SharedPreferences.setMockInitialValues({'reader_font_size': 25.0});
+      SharedPreferences.setMockInitialValues({
+        'reader_font_size': 25.0,
+        'reader_comment_font_follows_reading': true,
+        'reader_comment_font_size': 18.0,
+        'reader_comment_defaults_v2': true,
+      });
       await tester.binding.setSurfaceSize(const Size(390, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       var replyLoads = 0;

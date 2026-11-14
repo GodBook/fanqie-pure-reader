@@ -17,6 +17,7 @@ class _NovelSettingsState extends State<NovelSettings> {
   void initState() {
     super.initState();
     _loadVersion();
+    unawaited(NovelPersonalRecommendationsStore.instance.initialize());
   }
 
   Future<void> _loadVersion() async {
@@ -159,6 +160,36 @@ class _NovelSettingsState extends State<NovelSettings> {
                     builder: (_) => const NovelRestSettingsPage(),
                   ),
                 ),
+              ),
+            ],
+          ),
+          _SettingsSection(
+            title: '找书偏好',
+            children: [
+              ValueListenableBuilder<int>(
+                valueListenable:
+                    NovelPersonalRecommendationsStore.instance.changes,
+                builder: (context, _, _) {
+                  final store = NovelPersonalRecommendationsStore.instance;
+                  return SwitchListTile.adaptive(
+                    key: const ValueKey('novel-personal-recommendations'),
+                    title: const Text('个性化推荐'),
+                    subtitle: Text(
+                      store.enabled
+                          ? '按本机书架与阅读题材调整推荐顺序；阅读记录仅在本机使用'
+                          : '已关闭本机兴趣排序，使用普通推荐；手动筛选和屏蔽仍生效',
+                    ),
+                    value: store.enabled,
+                    onChanged: (value) async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      if (!await store.setEnabled(value) && messenger.mounted) {
+                        messenger.showSnackBar(
+                          const SnackBar(content: Text('推荐设置保存失败，已恢复原选择')),
+                        );
+                      }
+                    },
+                  );
+                },
               ),
             ],
           ),

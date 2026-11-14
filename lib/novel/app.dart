@@ -23,6 +23,9 @@ import '../services/novel_backup_service.dart';
 import '../services/novel_backup_snapshots.dart';
 import '../services/novel_portable_settings.dart';
 import '../services/novel_discovery_store.dart';
+import '../services/novel_personal_recommendations.dart';
+import '../services/novel_search_matcher.dart';
+import '../services/novel_search_catalog.dart';
 import '../services/novel_reader_profiles.dart';
 import '../services/novel_reading_metrics.dart';
 import '../services/rank_cache.dart';
@@ -118,6 +121,7 @@ class NovelRuntime {
         preferences.getString(novelColorThemeKey),
       );
       await AppThemeStyleStore.instance.load();
+      await NovelPersonalRecommendationsStore.instance.initialize();
     } catch (_) {
       _preferences = null;
       rethrow;
@@ -173,6 +177,11 @@ class NovelRuntime {
         'localBooks': NovelLocalTransfer.validateSection,
       });
       localReady.value = true;
+      unawaited(
+        NovelSearchCatalog.instance.initialize().catchError((Object error) {
+          AppLog.w('novel-search', '本机书目暂未恢复 (${error.runtimeType})');
+        }),
+      );
       unawaited(
         NovelBackupSnapshots.instance
             .save(onlyIfEnabled: true, daily: true)

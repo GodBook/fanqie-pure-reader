@@ -32,6 +32,7 @@ class ReaderPreferences {
   static const _commentFontFollowsReadingKey =
       'reader_comment_font_follows_reading';
   static const _commentFontSizeKey = 'reader_comment_font_size';
+  static const _commentDefaultsV2Key = 'reader_comment_defaults_v2';
   static const _fontWeightKey = 'reader_font_weight';
   static const _lineHeightKey = 'reader_line_height';
   static const _paragraphSpacingKey = 'reader_paragraph_spacing';
@@ -81,7 +82,7 @@ class ReaderPreferences {
 
   double get effectiveCommentFontSize {
     final size = commentFontFollowsReading ? fontSize : commentFontSize;
-    return size.isFinite ? size.clamp(16.0, 28.0) : 18.0;
+    return size.isFinite ? size.clamp(16.0, 28.0) : 16.0;
   }
 
   final int fontWeight;
@@ -194,8 +195,8 @@ class ReaderPreferences {
 
   const ReaderPreferences({
     this.fontSize = 18,
-    this.commentFontFollowsReading = true,
-    this.commentFontSize = 18,
+    this.commentFontFollowsReading = false,
+    this.commentFontSize = 16,
     this.fontWeight = 400,
     this.lineHeight = 1.8,
     this.paragraphSpacing = 12,
@@ -351,7 +352,7 @@ class ReaderPreferences {
       commentFontFollowsReading: commentFontFollowsReading,
       commentFontSize: commentFontSize.isFinite
           ? commentFontSize.clamp(16, 28)
-          : 18,
+          : 16,
       fontWeight: normalizedWeight,
       lineHeight: lineHeight.isFinite ? lineHeight.clamp(1.2, 2.4) : 1.8,
       paragraphSpacing: paragraphSpacing.isFinite
@@ -407,11 +408,21 @@ class ReaderPreferences {
       (value) => value.name == rawPreset,
       orElse: () => ReaderThemePreset.light,
     );
+    final savedCommentSize = _number(preferences, _commentFontSizeKey);
+    // Old versions saved their default true/18 with unrelated preferences.
+    // This cannot distinguish an explicit choice, so migrate this one legacy
+    // combination only. The reader can select follow mode again at any time.
+    final migrateCommentDefaults =
+        _boolean(preferences, _commentDefaultsV2Key) != true &&
+        _boolean(preferences, _commentFontFollowsReadingKey) == true &&
+        (savedCommentSize == 18 ||
+            !preferences.containsKey(_commentFontSizeKey));
     return ReaderPreferences(
       fontSize: _number(preferences, _fontSizeKey) ?? 18,
-      commentFontFollowsReading:
-          _boolean(preferences, _commentFontFollowsReadingKey) ?? true,
-      commentFontSize: _number(preferences, _commentFontSizeKey) ?? 18,
+      commentFontFollowsReading: migrateCommentDefaults
+          ? false
+          : _boolean(preferences, _commentFontFollowsReadingKey) ?? false,
+      commentFontSize: migrateCommentDefaults ? 16 : savedCommentSize ?? 16,
       fontWeight: (_number(preferences, _fontWeightKey) ?? 400).round(),
       lineHeight: _number(preferences, _lineHeightKey) ?? 1.8,
       paragraphSpacing: _number(preferences, _paragraphSpacingKey) ?? 12,
@@ -572,5 +583,8 @@ class ReaderPreferences {
       preferences.setBool(_showVideoButtonKey, value.showVideoButton),
       preferences.setBool(_videoChapterSyncKey, value.videoChapterSync),
     ]);
+    // Commit the migration marker after the settings it describes. A later
+    // explicit selection of follow mode must not be migrated on the next load.
+    await preferences.setBool(_commentDefaultsV2Key, true);
   }
 }

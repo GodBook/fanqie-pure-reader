@@ -271,6 +271,7 @@ class _NovelRestorePreviewState extends State<_NovelRestorePreview> {
         restoreSettings: _restoreSettings,
         replaceProgress: _replace,
       );
+      await NovelPersonalRecommendationsStore.instance.reload();
       _recommendationSettingsChanged.value++;
       if (mounted) {
         _notice(context, '阅读数据已恢复，未选择覆盖的本机进度保留');

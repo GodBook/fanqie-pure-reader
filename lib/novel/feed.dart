@@ -1,6 +1,67 @@
 part of 'app.dart';
 
 final _recommendationSettingsChanged = ValueNotifier(0);
+
+Iterable<MediaItem> _novelKnownBooks() sync* {
+  yield* ShelfStore.instance
+      .records()
+      .map((record) => record.item)
+      .where(
+        (book) =>
+            book.kind == 'book' &&
+            book.source == 'fanqie' &&
+            !ImportedBookStore.isLocalBookId(book.id),
+      );
+  yield* NovelSearchCatalog.instance.snapshot().where(
+    (book) => book.source == 'fanqie',
+  );
+  for (var genre = 0; genre < NovelGenre.choices.length; genre++) {
+    yield* HomeFeedCache.instance.load(100 + genre)?.items ??
+        const <MediaItem>[];
+    yield* HomeFeedCache.instance.load(200 + genre)?.items ??
+        const <MediaItem>[];
+  }
+  if (LibraryStore.instance.isInitialized) {
+    final otherSources = {
+      for (final record in ShelfStore.instance.records())
+        if (record.item.source != 'fanqie') record.item.id,
+    };
+    for (final raw in LibraryStore.instance.historySnapshot().take(300)) {
+      final book = novelFanqieHistoryBook(raw, otherSourceIds: otherSources);
+      if (book != null) {
+        yield book;
+      }
+    }
+  }
+  yield* novelStarterBooks;
+}
+
+void _rememberNovelBooks(Iterable<MediaItem> books) {
+  if (!HomeFeedCache.hiveReady || !NovelRuntime.localReady.value) return;
+  unawaited(
+    NovelSearchCatalog.instance.remember(books).catchError((Object error) {
+      AppLog.w('novel-search', '本机书目暂未保存 (${error.runtimeType})');
+    }),
+  );
+}
+
+Iterable<MediaItem> _novelAffinitySources() sync* {
+  final seen = <String>{};
+  for (final record in ShelfStore.instance.records().take(200)) {
+    if (record.item.kind != 'book' || record.item.source != 'fanqie') continue;
+    if (seen.add(record.item.id)) yield record.item;
+  }
+  if (!LibraryStore.instance.isInitialized) return;
+  final otherSources = {
+    for (final record in ShelfStore.instance.records())
+      if (record.item.source != 'fanqie') record.item.id,
+  };
+  for (final raw in LibraryStore.instance.historySnapshot().take(200)) {
+    final book = novelFanqieHistoryBook(raw, otherSourceIds: otherSources);
+    if (book != null && seen.add(book.id)) yield book;
+  }
+}
+
 Future<void>? _pendingFilterSave;
 
 void _saveDiscoveryFilters(
@@ -204,6 +265,7 @@ Future<HomepagePage> _loadNovelFeedPage(
   String? sessionId,
   BackendRequest request,
 ) async {
+  await NovelPersonalRecommendationsStore.instance.initialize();
   await NovelRuntime.ensureOnline();
   return ApiClient.instance.withCancellation(
     request,
@@ -212,6 +274,9 @@ Future<HomepagePage> _loadNovelFeedPage(
       tabIndex: 0,
       offset: offset,
       sessionId: sessionId,
+      personalized:
+          NovelPersonalRecommendationsStore.instance.isReady &&
+          NovelPersonalRecommendationsStore.instance.enabled,
     ),
   );
 }
@@ -268,6 +333,12 @@ class _NovelFeedState extends State<NovelFeed> {
   final _visits = <int, _NovelFeedVisit>{};
   bool get _production =>
       widget.pageLoader == null && widget.categoryLoader == null;
+  int get _snapshotKey =>
+      (NovelPersonalRecommendationsStore.instance.isReady &&
+              !NovelPersonalRecommendationsStore.instance.enabled
+          ? 200
+          : 100) +
+      _filters.genre;
 
   bool _showLocal() {
     final visit = _visits[_filters.genre];
@@ -281,7 +352,7 @@ class _NovelFeedState extends State<NovelFeed> {
       return true;
     }
     final cached = _production
-        ? HomeFeedCache.instance.load(100 + _filters.genre)?.items
+        ? HomeFeedCache.instance.load(_snapshotKey)?.items
         : null;
     _books =
         cached ??
@@ -300,18 +371,15 @@ class _NovelFeedState extends State<NovelFeed> {
     if (!_production || !mounted || !NovelRuntime.localReady.value) {
       return;
     }
+    setState(() => _order = []);
     if (!_localShown) {
       unawaited(
-        HomeFeedCache.instance.save(
-          100 + _filters.genre,
-          _books,
-          hasMore: _hasMore,
-        ),
+        HomeFeedCache.instance.save(_snapshotKey, _books, hasMore: _hasMore),
       );
       return;
     }
     if (!_seedShown || (_scroll.hasClients && _scroll.offset > 20)) return;
-    final cached = HomeFeedCache.instance.load(100 + _filters.genre)?.items;
+    final cached = HomeFeedCache.instance.load(_snapshotKey)?.items;
     if (cached != null) {
       setState(() {
         _books = cached;
@@ -333,6 +401,18 @@ class _NovelFeedState extends State<NovelFeed> {
               !_hiddenAuthors.contains(b.author),
         )
         .toList();
+    final ranked = NovelPersonalRecommendationsStore.instance
+        .rank(
+          selected,
+          affinitySources: _novelAffinitySources,
+          readingStateFor: (book) =>
+              NovelShelfManagement.instance.of(book).readingState,
+          sort: _filters.sort,
+        )
+        .items;
+    selected
+      ..clear()
+      ..addAll(ranked);
     if (_order.isNotEmpty) {
       final positions = {for (var i = 0; i < _order.length; i++) _order[i]: i};
       final newPositions = {
@@ -475,6 +555,10 @@ class _NovelFeedState extends State<NovelFeed> {
     ShelfStore.instance.listenable.addListener(_localChanged);
     _bindHistory();
     _recommendationSettingsChanged.addListener(_restoreHidden);
+    NovelPersonalRecommendationsStore.instance.changes.addListener(
+      _personalChanged,
+    );
+    NovelShelfManagement.instance.addListener(_localChanged);
     _scroll.addListener(() {
       final showTop = _scroll.offset > 500;
       if (showTop != _showScrollTop) {
@@ -497,12 +581,33 @@ class _NovelFeedState extends State<NovelFeed> {
   }
 
   void _localChanged() {
-    if (mounted && (_filters.hideShelf || _filters.hideHistory)) {
+    if (mounted &&
+        (_filters.hideShelf ||
+            _filters.hideHistory ||
+            NovelPersonalRecommendationsStore.instance.enabled)) {
       setState(() => _order = []);
     }
   }
 
+  void _personalChanged() {
+    if (!mounted) return;
+    _request?.cancel();
+    ++_generation;
+    _visits.clear();
+    setState(() {
+      _order = [];
+      _loading = false;
+      _session = null;
+      _offset = 0;
+      _showLocal();
+    });
+    // A new preference uses a fresh upstream session as well as a new local
+    // order. Until it arrives, the unranked original candidates remain usable.
+    if (_preferences != null) unawaited(_load(refresh: true));
+  }
+
   Future<void> _restore() async {
+    await NovelPersonalRecommendationsStore.instance.initialize();
     _preferences = await SharedPreferences.getInstance();
     if (!mounted) return;
     _filters = widget.initialFilters ?? NovelFeedFilters.load(_preferences!);
@@ -532,6 +637,10 @@ class _NovelFeedState extends State<NovelFeed> {
     ShelfStore.instance.listenable.removeListener(_localChanged);
     _historyChanges?.removeListener(_localChanged);
     _recommendationSettingsChanged.removeListener(_restoreHidden);
+    NovelPersonalRecommendationsStore.instance.changes.removeListener(
+      _personalChanged,
+    );
+    NovelShelfManagement.instance.removeListener(_localChanged);
     _request?.cancel();
     _generation++;
     _scroll.dispose();
@@ -688,12 +797,9 @@ class _NovelFeedState extends State<NovelFeed> {
           _visits.remove(filters.genre);
         }
         if (_production) {
+          _rememberNovelBooks(candidates);
           unawaited(
-            HomeFeedCache.instance.save(
-              100 + filters.genre,
-              _books,
-              hasMore: hasMore,
-            ),
+            HomeFeedCache.instance.save(_snapshotKey, _books, hasMore: hasMore),
           );
           if (attempt == 0) {
             AppLog.i(
@@ -1077,13 +1183,32 @@ class _NovelFeedState extends State<NovelFeed> {
                         children: [
                           Text(
                             _filters.genre == 0
-                                ? '为你精选'
+                                ? NovelPersonalRecommendationsStore
+                                          .instance
+                                          .enabled
+                                      ? '为你精选'
+                                      : '普通推荐'
                                 : '${_filters.category.name} · 关键词搜索',
                             style: const TextStyle(
                               fontSize: 20,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                          if (_filters.genre == 0 &&
+                              _filters.sort == NovelSort.recommended &&
+                              NovelPersonalRecommendationsStore
+                                  .instance
+                                  .isReady &&
+                              NovelPersonalRecommendationsStore
+                                  .instance
+                                  .enabled)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 4),
+                              child: Text(
+                                '参考本机书架与阅读题材 · 可在设置关闭',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ),
                           if (_filters.genre != 0)
                             const Padding(
                               padding: EdgeInsets.only(top: 4),
@@ -1265,6 +1390,7 @@ Future<NovelSearchPage> _loadNovelSearchPage(
   int offset,
   BackendRequest request,
 ) async {
+  await NovelPersonalRecommendationsStore.instance.initialize();
   await NovelRuntime.ensureOnline();
   final id = RegExp(r'^\d{15,20}$').hasMatch(query)
       ? query
@@ -1288,7 +1414,14 @@ Future<NovelSearchPage> _loadNovelSearchPage(
   }
   final tabs = await ApiClient.instance.withCancellation(
     request,
-    () => ApiClient.instance.searchTabs(query, tabType: 1, offset: offset),
+    () => ApiClient.instance.searchTabs(
+      query,
+      tabType: 1,
+      offset: offset,
+      personalized:
+          NovelPersonalRecommendationsStore.instance.isReady &&
+          NovelPersonalRecommendationsStore.instance.enabled,
+    ),
   );
   return NovelSearchPage.fromTabs(tabs, offset);
 }
@@ -1302,12 +1435,14 @@ class NovelSearch extends StatefulWidget {
     this.isCategoryKeyword = false,
     this.isTagKeyword = false,
     this.initialFilters,
+    this.localBooks,
   });
   final String initialQuery;
   final bool isCategoryKeyword;
   final bool isTagKeyword;
   final NovelFeedFilters? initialFilters;
   final NovelSearchPageLoader? pageLoader;
+  final Iterable<MediaItem> Function()? localBooks;
   final Future<List<String>> Function(String)? suggestionLoader;
   @override
   State<NovelSearch> createState() => _NovelSearchState();
@@ -1318,6 +1453,7 @@ class _NovelSearchState extends State<NovelSearch> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   List<MediaItem> _books = [];
+  Set<String> _localMatchIds = {};
   List<String> _history = [];
   String _query = '';
   String? _error;
@@ -1333,6 +1469,52 @@ class _NovelSearchState extends State<NovelSearch> {
   NovelFeedFilters _resultFilters = const NovelFeedFilters();
   Listenable? _historyChanges;
 
+  Iterable<MediaItem> get _known =>
+      widget.localBooks?.call() ??
+      (widget.pageLoader == null ? _novelKnownBooks() : const <MediaItem>[]);
+
+  List<MediaItem> _localMatches(String query) {
+    if (novelShareBookId(query) != null) return const [];
+    return NovelSearchMatcher.instance
+        .search(query, _known, limit: 40)
+        .where((book) => book.source == 'fanqie' && book.kind == 'book')
+        .toList();
+  }
+
+  void _refreshCurrentLocalMatches() {
+    if (!mounted || _query.isEmpty) return;
+    final local = _localMatches(_query);
+    setState(() {
+      _localMatchIds = local.map((book) => book.id).toSet();
+      _books = {
+        for (final book in local) book.id: book,
+        for (final book in _books) book.id: book,
+      }.values.toList();
+    });
+  }
+
+  void _localReadyChanged() {
+    _bindHistory();
+    if (NovelRuntime.localReady.value) {
+      _refreshCurrentLocalMatches();
+      unawaited(_warmLocalMatches());
+    }
+  }
+
+  Future<void> _warmLocalMatches() async {
+    if (widget.localBooks != null ||
+        widget.pageLoader != null ||
+        !NovelRuntime.localReady.value) {
+      return;
+    }
+    try {
+      await NovelSearchCatalog.instance.load();
+      _refreshCurrentLocalMatches();
+    } catch (_) {
+      /* Online search and shelf matching remain available. */
+    }
+  }
+
   void _bindHistory() {
     if (_historyChanges != null || !LibraryStore.instance.isInitialized) return;
     _historyChanges = LibraryStore.instance.historyListenable;
@@ -1340,6 +1522,7 @@ class _NovelSearchState extends State<NovelSearch> {
   }
 
   void _localChanged() {
+    _refreshCurrentLocalMatches();
     if (mounted && (_resultFilters.hideShelf || _resultFilters.hideHistory)) {
       setState(() {});
     }
@@ -1390,6 +1573,7 @@ class _NovelSearchState extends State<NovelSearch> {
       setState(() {
         _query = '';
         _books = [];
+        _localMatchIds = {};
         _suggestions = [];
         _loading = false;
         _error = null;
@@ -1398,7 +1582,10 @@ class _NovelSearchState extends State<NovelSearch> {
       });
       return;
     }
-    setState(() => _suggestions = []);
+    final localSuggestions = _localMatches(
+      value.trim(),
+    ).take(5).map((book) => book.title).toList();
+    setState(() => _suggestions = localSuggestions);
     if (novelShareBookId(value) != null) return;
     _suggestTimer = Timer(const Duration(milliseconds: 320), () async {
       try {
@@ -1406,7 +1593,12 @@ class _NovelSearchState extends State<NovelSearch> {
             await (widget.suggestionLoader?.call(value.trim()) ??
                 _realSuggestions(value.trim(), generation));
         if (mounted && generation == _suggestGeneration) {
-          setState(() => _suggestions = values.take(8).toList());
+          setState(
+            () => _suggestions = {
+              ...localSuggestions,
+              ...values,
+            }.take(8).toList(),
+          );
         }
       } catch (_) {
         /* Suggestions are optional; submitted search has its own retry. */
@@ -1460,9 +1652,10 @@ class _NovelSearchState extends State<NovelSearch> {
   void initState() {
     super.initState();
     ShelfStore.instance.listenable.addListener(_localChanged);
-    NovelRuntime.localReady.addListener(_bindHistory);
+    NovelRuntime.localReady.addListener(_localReadyChanged);
     _bindHistory();
     _loadHistory();
+    unawaited(_warmLocalMatches());
     _scroll.addListener(() {
       if (_scroll.position.extentAfter < 500 &&
           _hasMore &&
@@ -1509,7 +1702,9 @@ class _NovelSearchState extends State<NovelSearch> {
       _error = null;
       _retryMore = false;
       if (!more) {
-        _books = [];
+        final local = _localMatches(text);
+        _localMatchIds = local.map((book) => book.id).toSet();
+        _books = local;
         _hasMore = false;
         _offset = 0;
       }
@@ -1523,11 +1718,11 @@ class _NovelSearchState extends State<NovelSearch> {
       );
       if (!mounted || generation != _generation) return;
       final merged = <String, MediaItem>{
-        if (more)
-          for (final item in _books) item.id: item,
+        for (final item in _books) item.id: item,
         for (final item in page.items)
           if (item.kind == 'book' && item.source == 'fanqie') item.id: item,
       };
+      if (widget.pageLoader == null) _rememberNovelBooks(page.items);
       setState(() {
         _hasMore = page.hasMore && page.nextOffset > offset;
         _books = merged.values.toList(growable: false);
@@ -1560,7 +1755,7 @@ class _NovelSearchState extends State<NovelSearch> {
     ++_suggestGeneration;
     _request?.cancel();
     ShelfStore.instance.listenable.removeListener(_localChanged);
-    NovelRuntime.localReady.removeListener(_bindHistory);
+    NovelRuntime.localReady.removeListener(_localReadyChanged);
     _historyChanges?.removeListener(_localChanged);
     _generation++;
     _input.dispose();
@@ -1853,6 +2048,12 @@ class _NovelSearchState extends State<NovelSearch> {
         .toList();
     final related = selected.where((b) => !exact.contains(b)).toList();
     final rows = <Widget>[
+      if (_localMatchIds.isNotEmpty)
+        const ListTile(
+          key: ValueKey('novel-local-search-scope'),
+          title: Text('包含本机模糊 / 拼音匹配'),
+          subtitle: Text('匹配书架、阅读记录及已浏览书目；未浏览的作品仍由在线搜索查询'),
+        ),
       if (exact.isNotEmpty) const ListTile(title: Text('精确匹配')),
       for (final b in exact) _BookRow(b),
       if (related.isNotEmpty)

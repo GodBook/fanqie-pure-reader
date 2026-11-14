@@ -441,6 +441,7 @@ class ApiClient {
     int page = 1,
     int? tabType,
     int? offset,
+    bool personalized = true,
   }) async {
     final searchOffset = offset ?? (page > 1 ? page - 1 : 0) * 10;
     final url = _url('/api/v1/search', {
@@ -448,6 +449,7 @@ class ApiClient {
       if (tabType != null) 'tab_type': '$tabType',
       'offset': '${searchOffset < 0 ? 0 : searchOffset}',
       'count': '10',
+      'personalized': personalized ? '1' : '0',
     });
     final r = await _get(url);
     final statusCode = r.statusCode;
@@ -1506,6 +1508,7 @@ class ApiClient {
     String? sessionId,
     int? tabIndex,
     int? lastTabIndex,
+    bool personalized = true,
   }) async {
     final r = await _get(
       _homepageUrl(
@@ -1514,6 +1517,7 @@ class ApiClient {
         sessionId,
         tabIndex: tabIndex,
         lastTabIndex: lastTabIndex,
+        personalized: personalized,
       ),
     );
     return _decodeAsync(r);
@@ -1533,6 +1537,7 @@ class ApiClient {
     String? sessionId,
     int? tabIndex,
     int? lastTabIndex,
+    bool personalized = true,
   }) async {
     // 翻页时第一段只是用来开 cell 的：它的游标和视频流不是一回事，而且把第二段
     // 的 session 再传给 tab 接口会被上游拒掉（客户端表现为 SERVICE_ERROR）。所以
@@ -1557,6 +1562,7 @@ class ApiClient {
         sessionId,
         tabIndex: tabIndex,
         lastTabIndex: lastTabIndex,
+        personalized: personalized,
       ),
     );
     final statusCode = r.statusCode;
@@ -1754,9 +1760,11 @@ class ApiClient {
     String? sessionId, {
     int? tabIndex,
     int? lastTabIndex,
+    bool personalized = true,
   }) => _url('/api/v1/recommend/homepage', {
     'tab_type': '$tabType',
     'offset': '$offset',
+    'personalized': personalized ? '1' : '0',
     // 上游按 `tab_index` 决定回哪个 tab 的 `cell_data`；只带 `tab_type` 时
     // 后端补 0，等于永远要推荐流的区块（「听书」会显示推荐榜）。官方请求
     // 模型里 `tabIndex`/`lastTabIndex` 都是正式字段

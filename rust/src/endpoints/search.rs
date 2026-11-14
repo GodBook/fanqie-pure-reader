@@ -62,18 +62,7 @@ async fn search_fanqie(ctx: &Ctx, query: &str, offset: &str) -> ApiResult<Value>
 }
 
 async fn search_reading(ctx: &Ctx, query: &str, offset: &str, q: &Params) -> ApiResult<Value> {
-    let count = crate::endpoints::util::default_val(&q.get_str("count"), "0");
-    let tab_type = crate::endpoints::util::default_val(&q.get_str("tab_type"), "1");
-    let passback = crate::endpoints::util::default_val(&q.get_str("passback"), offset);
-    let esc = crate::endpoints::util::go_query_escape;
-    let u = format!(
-        "{READING_SEARCH_URL}bookshelf_search_plan=4&offset={}&user_is_login=1&bookstore_tab=2&passback={}&query={}&count={}&search_source=1&clicked_content=search_history&use_lynx=false&use_correct=true&tab_type={}{READING_SEARCH_QUERY_SUFFIX}",
-        esc(offset),
-        esc(&passback),
-        esc(query),
-        esc(&count),
-        esc(&tab_type),
-    );
+    let u = reading_search_url(query, offset, q);
     Upstream::new(ctx.up.clone())
         .json(&UpstreamRequestSpec {
             mode: UpstreamMode::DeviceSigned,
@@ -82,6 +71,28 @@ async fn search_reading(ctx: &Ctx, query: &str, offset: &str, q: &Params) -> Api
             ..Default::default()
         })
         .await
+}
+
+fn reading_search_url(query: &str, offset: &str, q: &Params) -> String {
+    let count = crate::endpoints::util::default_val(&q.get_str("count"), "0");
+    let tab_type = crate::endpoints::util::default_val(&q.get_str("tab_type"), "1");
+    let passback = crate::endpoints::util::default_val(&q.get_str("passback"), offset);
+    let esc = crate::endpoints::util::go_query_escape;
+    let url = format!(
+        "{READING_SEARCH_URL}bookshelf_search_plan=4&offset={}&user_is_login=1&bookstore_tab=2&passback={}&query={}&count={}&search_source=1&clicked_content=search_history&use_lynx=false&use_correct=true&tab_type={}{READING_SEARCH_QUERY_SUFFIX}",
+        esc(offset),
+        esc(&passback),
+        esc(query),
+        esc(&count),
+        esc(&tab_type),
+    );
+    url.replace(
+        "&need_personal_recommend=1",
+        &format!(
+            "&need_personal_recommend={}",
+            crate::endpoints::home::personal_recommendation_flag(q)
+        ),
+    )
 }
 
 fn handle<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a, ApiResult<Value>> {
@@ -205,4 +216,33 @@ pub fn register(s: &mut Server) {
     s.add_route("search_cue", search_cue);
     s.add_route("hot_search", hot_search);
     s.add_route("category_front", category_front);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reading_search_url;
+    use crate::endpoints::Params;
+
+    #[test]
+    fn search_opt_out_keeps_the_query_and_single_upstream_flag() {
+        let mut request = Params::from_pairs(vec![]);
+        request.set("personalized", "0");
+        request.set("tab_type", "1");
+        let raw = reading_search_url("斩神 + &？", "20", &request);
+        let url = url::Url::parse(&raw).unwrap();
+        let fields = url.query_pairs().collect::<Vec<_>>();
+        let values = |name: &str| {
+            fields
+                .iter()
+                .filter(|(k, _)| k == name)
+                .map(|(_, v)| v.as_ref())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values("query"), vec!["斩神 + &？"]);
+        assert_eq!(values("offset"), vec!["20"]);
+        assert_eq!(values("tab_type"), vec!["1"]);
+        assert_eq!(values("need_personal_recommend"), vec!["0"]);
+        request.set("personalized", "1");
+        assert!(reading_search_url("斩神", "0", &request).contains("&need_personal_recommend=1"));
+    }
 }

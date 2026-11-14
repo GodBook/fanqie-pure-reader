@@ -94,12 +94,12 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
   bool _loading = false;
   bool _failed = false;
   final ScrollController _scroll = ScrollController();
-  double _savedFontSize = 18;
+  double _savedFontSize = 16;
   bool _excerptExpanded = false;
 
   double get _fontSize {
     final size = widget.fontSize ?? _savedFontSize;
-    return size.isFinite ? size.clamp(16.0, 28.0) : 18;
+    return size.isFinite ? size.clamp(16.0, 28.0) : 16;
   }
 
   Color get _textColor => widget.preset.textColor;
@@ -262,47 +262,60 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
         : _paragraph?.count ?? 0;
     return SafeArea(
       top: false,
-      child: Column(
-        children: [
-          SizedBox(
-            height: 56,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 56),
-                  child: Text(
-                    '$total条评论',
-                    key: const Key('reader-ideas-title'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: _textColor,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Cap an expanded excerpt without reserving unused space when the
+          // excerpt is short. The comments must fill the remaining height.
+          final detailsHeight = ((constraints.maxHeight - 56) * .4).clamp(
+            0.0,
+            double.infinity,
+          );
+          return Column(
+            children: [
+              SizedBox(
+                height: 56,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 56),
+                      child: Text(
+                        '$total条评论',
+                        key: const Key('reader-ideas-title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: _textColor,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 4),
-                    child: IconButton(
-                      key: const Key('reader-ideas-close'),
-                      tooltip: '收起评论',
-                      onPressed: () => Navigator.pop(context),
-                      color: _textColor,
-                      iconSize: 26,
-                      icon: const Icon(LucideIcons.chevron_down),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: IconButton(
+                          key: const Key('reader-ideas-close'),
+                          tooltip: '收起评论',
+                          onPressed: () => Navigator.pop(context),
+                          color: _textColor,
+                          iconSize: 26,
+                          icon: const Icon(LucideIcons.chevron_down),
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
-            ),
-          ),
-          Flexible(flex: 2, fit: FlexFit.loose, child: _details()),
-          Expanded(flex: 3, child: _commentArea()),
-        ],
+              ),
+              ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: detailsHeight),
+                child: _details(),
+              ),
+              Expanded(child: _commentArea()),
+            ],
+          );
+        },
       ),
     );
   }
