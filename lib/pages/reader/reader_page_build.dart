@@ -298,6 +298,21 @@ extension _ReaderPageBuild on _ReaderPageState {
                     !_progressPreviewActive)
                   ReaderEdgeBlur(animation: _chrome),
                 _menuEdge(top: true, child: _buildToolbar(preset)),
+                if (widget.novelOnly && _autoTurnTimer != null)
+                  Positioned(
+                    right: 12,
+                    bottom: windowPadding.bottom + 8,
+                    child: Material(
+                      key: const ValueKey('reader-auto-read-active'),
+                      color: preset.panelColor,
+                      borderRadius: BorderRadius.circular(24),
+                      child: TextButton.icon(
+                        onPressed: _stopAutoTurn,
+                        icon: const Icon(Icons.pause_circle_outline),
+                        label: const Text('自动阅读中 · 暂停'),
+                      ),
+                    ),
+                  ),
                 if (widget.novelOnly &&
                     _novelRest.due &&
                     _routeCurrent &&
@@ -504,6 +519,13 @@ extension _ReaderPageBuild on _ReaderPageState {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (widget.novelOnly)
+              GlassMenuItem(
+                key: const ValueKey('reader-auto-read-menu'),
+                icon: CupertinoIcons.play_circle,
+                label: '自动阅读',
+                onPressed: () => Navigator.pop(menu, 'auto-read'),
+              ),
             if (widget.novelOnly && !_isImportedBook)
               GlassMenuItem(
                 key: const ValueKey('reader-ideas-toggle'),
@@ -593,6 +615,8 @@ extension _ReaderPageBuild on _ReaderPageState {
     );
     if (!mounted) return;
     switch (action) {
+      case 'auto-read':
+        await _showAutoReadPanel();
       case 'toggle-ideas':
         await _toggleParagraphIdeas();
       case 'paragraphs':
@@ -675,6 +699,9 @@ extension _ReaderPageBuild on _ReaderPageState {
               ? () => unawaited(_openBookDownloads())
               : null,
           onFind: _loading || !_progressReady ? null : _showFind,
+          onAutoRead: widget.novelOnly
+              ? () => unawaited(_showAutoReadPanel())
+              : null,
           onAi: !widget.novelOnly && _currentAiView?.aiEnabled == true
               ? _showAiPanel
               : null,

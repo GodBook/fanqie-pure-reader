@@ -2,15 +2,36 @@ part of '../reader_page.dart';
 
 /// The scrolling reader body and its overlays.
 extension _ReaderPageContent on _ReaderPageState {
+  Widget _loadingContentGesture(Widget child) => Listener(
+    behavior: HitTestBehavior.translucent,
+    onPointerDown: (_) {
+      _autoReadStoppedByPointer = false;
+      if (widget.novelOnly && _autoTurnTimer != null) {
+        _autoReadStoppedByPointer = true;
+        _stopAutoTurn();
+      }
+    },
+    child: GestureDetector(
+      key: const ValueKey('reader-loading-surface'),
+      behavior: HitTestBehavior.translucent,
+      onTap: () {
+        if (_autoReadStoppedByPointer) {
+          _autoReadStoppedByPointer = false;
+          return;
+        }
+        _toggleControls();
+      },
+      child: child,
+    ),
+  );
+
   Widget _buildContent(ReaderThemePreset preset, EdgeInsets windowPadding) {
     final chapterTurn = _chapterTurnRequest;
     if (_loading && chapterTurn != null) {
       // Keep the outgoing page on screen while the neighbouring chapter loads,
       // so the boundary slides instead of flashing the loading spinner.
-      return GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: _toggleControls,
-        child: ReaderPageContent(
+      return _loadingContentGesture(
+        ReaderPageContent(
           page: chapterTurn.page,
           spec: chapterTurn.spec,
           imageProviderFactory: widget.imageProviderFactory,
@@ -18,10 +39,8 @@ extension _ReaderPageContent on _ReaderPageState {
       );
     }
     if (_loading || _error != null) {
-      return GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: _toggleControls,
-        child: _loading
+      return _loadingContentGesture(
+        _loading
             ? Center(
                 child: CircularProgressIndicator(color: preset.accentColor),
               )
@@ -64,6 +83,13 @@ extension _ReaderPageContent on _ReaderPageState {
         // 仍走下面的双击。
         return Listener(
           onPointerDown: (event) {
+            // Stop before a drag, long-press or paragraph action can race the
+            // timer. The same touch must not also turn the page.
+            _autoReadStoppedByPointer = false;
+            if (widget.novelOnly && _autoTurnTimer != null) {
+              _autoReadStoppedByPointer = true;
+              _stopAutoTurn();
+            }
             if (event.buttons != kMiddleMouseButton) return;
             if (_doubleTapArmed) {
               _seekToTappedSentence(event.position);
@@ -73,6 +99,10 @@ extension _ReaderPageContent on _ReaderPageState {
             key: const ValueKey('reader-page-surface'),
             behavior: HitTestBehavior.translucent,
             onTapUp: (details) {
+              if (_autoReadStoppedByPointer) {
+                _autoReadStoppedByPointer = false;
+                return;
+              }
               _clearLocationHighlight();
               if (_selection != null) {
                 // A tap outside the selection cancels it without turning the

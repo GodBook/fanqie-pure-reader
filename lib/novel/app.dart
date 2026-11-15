@@ -838,6 +838,17 @@ Future<void> _readBook(
     fetchedDirectory = fetchedDirectory || resolved.refreshed;
     final start = resolved.index;
     final directory = resolved.chapters;
+    if (fetchedDirectory) {
+      unawaited(
+        NovelShelfManagement.instance
+            .rememberFatteningCatalogue(
+              book,
+              directory,
+              isCurrent: () => context.mounted,
+            )
+            .catchError((Object _) {}),
+      );
+    }
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => NovelReaderSession(
@@ -857,6 +868,9 @@ Future<void> _readBook(
               )).expand((group) => group).toList(growable: false);
             });
           },
+          onOnlineCatalogueAccepted: (fresh, isCurrent) => NovelShelfManagement
+              .instance
+              .rememberFatteningCatalogue(book, fresh, isCurrent: isCurrent),
           builder: (_, currentChapters, refresh) => ReaderPage(
             bookId: book.id,
             title: book.title,

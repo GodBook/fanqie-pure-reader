@@ -77,6 +77,7 @@ void main() {
     addTearDown(updates.dispose);
     final pending = Completer<List<Chapter>>();
     var cached = [_first];
+    var accepted = 0;
     await tester.pumpWidget(
       MaterialApp(
         home: NovelReaderSession(
@@ -84,6 +85,7 @@ void main() {
           networkChanges: const Stream<void>.empty(),
           connectivityProbe: () async => (online: true, metered: false),
           directoryLoader: (_) => pending.future,
+          onOnlineCatalogueAccepted: (_, _) async => accepted++,
           catalogueChanges: updates,
           cachedDirectoryLoader: () async => cached,
           builder: (_, chapters, _) => Text('${chapters.length}章'),
@@ -98,7 +100,74 @@ void main() {
     pending.complete([_first]);
     await tester.pumpAndSettle();
     expect(find.text('2章'), findsOneWidget);
+    expect(accepted, 0);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('accepted online proof is optional and invalidates with cache', (
+    tester,
+  ) async {
+    final changes = ValueNotifier(0);
+    addTearDown(changes.dispose);
+    final bookkeeping = Completer<void>();
+    bool Function()? stillCurrent;
+    var accepted = <Chapter>[];
+    var cached = [_first];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: NovelReaderSession(
+          chapters: [_first],
+          networkChanges: const Stream<void>.empty(),
+          connectivityProbe: () async => (online: true, metered: false),
+          directoryLoader: (_) async => [_first, _second],
+          catalogueChanges: changes,
+          cachedDirectoryLoader: () async => cached,
+          onOnlineCatalogueAccepted: (chapters, current) {
+            accepted = chapters;
+            stillCurrent = current;
+            return bookkeeping.future;
+          },
+          builder: (_, chapters, _) => Text('${chapters.length}章'),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 510));
+    await tester.pump();
+    expect(find.text('2章'), findsOneWidget);
+    expect(accepted.map((chapter) => chapter.itemId), ['c1', 'c2']);
+    expect(stillCurrent!(), isTrue);
+    cached = [_first];
+    changes.value++;
+    await tester.pump(const Duration(milliseconds: 310));
+    expect(find.text('1章'), findsOneWidget);
+    expect(stillCurrent!(), isFalse);
+    bookkeeping.completeError(StateError('optional local index unavailable'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    expect(stillCurrent!(), isFalse);
+  });
+
+  testWidgets('filtered duplicate responses cannot establish online proof', (
+    tester,
+  ) async {
+    var accepted = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: NovelReaderSession(
+          chapters: [_first],
+          networkChanges: const Stream<void>.empty(),
+          connectivityProbe: () async => (online: true, metered: false),
+          directoryLoader: (_) async => [_first, _first, _second],
+          onOnlineCatalogueAccepted: (_, _) async => accepted++,
+          builder: (_, chapters, _) => Text('${chapters.length}章'),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 510));
+    await tester.pumpAndSettle();
+    expect(find.text('2章'), findsOneWidget);
+    expect(accepted, 0);
   });
 
   test(

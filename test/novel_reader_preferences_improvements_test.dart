@@ -516,66 +516,70 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('opening chapter-end comments stops automatic page turns', (
-    tester,
-  ) async {
-    SharedPreferences.setMockInitialValues({
-      'reader_page_mode': 'paged',
-      'reader_auto_turn_seconds': 3,
-    });
-    await tester.binding.setSurfaceSize(const Size(390, 800));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final requested = <String>[];
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ReaderPage(
-          novelOnly: true,
-          bookId: 'auto-chapter-comment-test',
-          title: '测试小说',
-          chapters: [Chapter(itemId: 'a', title: '第一章', volumeName: '')],
-          startIndex: 0,
-          readerStore: MemoryReaderStore(),
-          chapterCache: MemoryChapterCache(),
-          chapterLoader: (_) async => '这是一章只有一页的短正文。',
-          ideasLoader: (_) async => const ChapterIdeas(
-            paragraphs: [ParagraphIdeas(paraIndex: 10000, count: 3)],
+  testWidgets(
+    'last text page stops auto reading and keeps end comments accessible',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'reader_page_mode': 'paged',
+        'reader_auto_turn_seconds': 3,
+      });
+      await tester.binding.setSurfaceSize(const Size(390, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final requested = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ReaderPage(
+            novelOnly: true,
+            bookId: 'auto-chapter-comment-test',
+            title: '测试小说',
+            chapters: [Chapter(itemId: 'a', title: '第一章', volumeName: '')],
+            startIndex: 0,
+            readerStore: MemoryReaderStore(),
+            chapterCache: MemoryChapterCache(),
+            chapterLoader: (_) async => '这是一章只有一页的短正文。',
+            ideasLoader: (_) async => const ChapterIdeas(
+              paragraphs: [ParagraphIdeas(paraIndex: 10000, count: 3)],
+            ),
+            commentResolver: (id, paragraph, _) async {
+              requested.add('$id:${paragraph.paraIndex}');
+              return const BookCommentPage();
+            },
           ),
-          commentResolver: (id, paragraph, _) async {
-            requested.add('$id:${paragraph.paraIndex}');
-            return const BookCommentPage();
-          },
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    final surface = find.byKey(const ValueKey('reader-page-surface'));
-    final surfaceRect = tester.getRect(surface);
-    await tester.tapAt(Offset(surfaceRect.center.dx, surfaceRect.bottom - 4));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('reader-settings')));
-    await tester.pumpAndSettle();
-    await openReaderSettingsCategory(tester, 'turn');
-    await tester.tap(find.byKey(const ValueKey('reader-auto-turn')));
-    await tester.pumpAndSettle();
-    await tester.pump(const Duration(seconds: 3));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('reader-chapter-comments')));
-    await tester.pumpAndSettle();
-    expect(requested, ['a:10000']);
-    await tester.tap(find.byKey(const Key('reader-ideas-close')));
-    await tester.pumpAndSettle();
-    // If the timer were still active, this first tap would only stop it.
-    final updatedRect = tester.getRect(surface);
-    await tester.tapAt(Offset(updatedRect.center.dx, updatedRect.bottom - 4));
-    await tester.pumpAndSettle();
-    expect(
-      find.byKey(const ValueKey('reader-settings')).hitTestable(),
-      findsOneWidget,
-    );
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pumpAndSettle();
-  });
+      );
+      await tester.pumpAndSettle();
+      final surface = find.byKey(const ValueKey('reader-page-surface'));
+      final surfaceRect = tester.getRect(surface);
+      await tester.tapAt(Offset(surfaceRect.center.dx, surfaceRect.bottom - 4));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('reader-settings')));
+      await tester.pumpAndSettle();
+      await openReaderSettingsCategory(tester, 'turn');
+      await tester.tap(find.byKey(const ValueKey('reader-auto-turn')));
+      await tester.pumpAndSettle();
+      expect(find.text('已读至全书末尾'), findsOneWidget);
+      // The final page remains readable; opening the chapter-end page is an
+      // explicit manual turn rather than an automatic move to an empty footer.
+      await tester.drag(find.byType(ReaderPagedView), const Offset(-320, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('reader-chapter-comments')));
+      await tester.pumpAndSettle();
+      expect(requested, ['a:10000']);
+      await tester.tap(find.byKey(const Key('reader-ideas-close')));
+      await tester.pumpAndSettle();
+      // If the timer were still active, this first tap would only stop it.
+      final updatedRect = tester.getRect(surface);
+      await tester.tapAt(Offset(updatedRect.center.dx, updatedRect.bottom - 4));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('reader-settings')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    },
+  );
 }
 
 double _lastBrightness(List<MethodCall> calls) =>

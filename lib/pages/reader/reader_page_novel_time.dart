@@ -34,6 +34,7 @@ extension _ReaderPageNovelTime on _ReaderPageState {
         // notify the UI after the frame rather than calling setState there.
         _autoTurnTimer?.cancel();
         _autoTurnTimer = null;
+        ++_autoTurnGeneration;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted && _novelRest.due) _stopAutoTurn();
         });

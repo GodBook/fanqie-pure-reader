@@ -50,6 +50,24 @@ abstract interface class ConditionalChapterCatalogue {
   Future<CachedBook> preserveOrCreateCatalogue(CachedBook fallback);
 }
 
+/// Atomically coordinate a verified catalogue with its metadata proof.
+abstract interface class ConditionalChapterCatalogueUpdate {
+  Future<CachedBook?> updateCatalogueIfSafe(
+    CachedBook proposed, {
+    required bool Function() isCurrent,
+    required Future<bool> Function() commit,
+  });
+}
+
+/// A reader may replace only the catalogue snapshot it actually displayed.
+abstract interface class ConditionalChapterCatalogueReplacement {
+  Future<CachedBook> replaceCatalogueIfUnchanged(
+    CachedBook proposed, {
+    required List<Chapter> expectedChapters,
+    required bool Function() isCurrent,
+  });
+}
+
 class CachedBook {
   final String id;
   final String title;
@@ -148,7 +166,12 @@ class CachedBookSummary {
 /// and freeze the UI isolate for about a minute. The chapter body box is only
 /// opened when the reader actually needs a chapter text; list queries are
 /// proportional to the number of books, not the number of chapters.
-class ChapterCacheStore implements ChapterCache, ConditionalChapterCatalogue {
+class ChapterCacheStore
+    implements
+        ChapterCache,
+        ConditionalChapterCatalogue,
+        ConditionalChapterCatalogueUpdate,
+        ConditionalChapterCatalogueReplacement {
   ChapterCacheStore({
     HiveInterface? hive,
     this.keys,
@@ -536,6 +559,120 @@ class ChapterCacheStore implements ChapterCache, ConditionalChapterCatalogue {
         await _sweepCatalogues(box, keepBook: fallback.id);
         return fallback;
       });
+
+  @override
+  Future<CachedBook> replaceCatalogueIfUnchanged(
+    CachedBook proposed, {
+    required List<Chapter> expectedChapters,
+    required bool Function() isCurrent,
+  }) => _serializeCatalog((box) async {
+    final key = 'book:${proposed.id}';
+    final stored = box.get(key);
+    final existing = stored == null ? null : CachedBook.fromMap(stored);
+    if (stored != null && existing == null) throw StateError('本地目录不可用');
+    if (!isCurrent()) return existing ?? proposed;
+    if (existing != null) {
+      final actual = existing.chapters;
+      if (actual.length != expectedChapters.length) return existing;
+      for (var i = 0; i < actual.length; i++) {
+        final a = actual[i], b = expectedChapters[i];
+        if (a.itemId != b.itemId ||
+            a.title != b.title ||
+            a.volumeName != b.volumeName ||
+            a.version != b.version) {
+          return existing;
+        }
+      }
+    }
+    if (proposed.id.isEmpty || proposed.chapters.isEmpty) {
+      return existing ?? proposed;
+    }
+    final record = proposed.toMap();
+    record['cachedAt'] = DateTime.now().millisecondsSinceEpoch;
+    final previous = _catalogRecord(box, key);
+    if (proposed.author.isEmpty && previous?['author'] is String) {
+      record['author'] = previous!['author'];
+    }
+    if (previous != null) await _saveProgress(box, proposed.id, previous);
+    if (!isCurrent()) return existing ?? proposed;
+    await box.put(key, record);
+    await _sweepCatalogues(box, keepBook: proposed.id);
+    return proposed;
+  });
+
+  @override
+  Future<CachedBook?> updateCatalogueIfSafe(
+    CachedBook proposed, {
+    required bool Function() isCurrent,
+    required Future<bool> Function() commit,
+  }) => _serializeCatalog((box) async {
+    final ids = proposed.chapters.map((chapter) => chapter.itemId).toList();
+    if (proposed.id.isEmpty ||
+        ids.isEmpty ||
+        ids.any((id) => id.trim().isEmpty) ||
+        ids.toSet().length != ids.length) {
+      throw ArgumentError('目录无效');
+    }
+    if (!isCurrent()) return null;
+
+    final key = 'book:${proposed.id}';
+    final stored = box.get(key);
+    CachedBook? existing;
+    if (stored != null) {
+      existing = CachedBook.fromMap(stored);
+      final rawChapters = stored is Map ? stored['chapters'] : null;
+      if (existing == null ||
+          existing.id != proposed.id ||
+          rawChapters is! List ||
+          rawChapters.length != existing.chapters.length ||
+          existing.chapters.map((chapter) => chapter.itemId).toSet().length !=
+              existing.chapters.length) {
+        throw StateError('本地目录不可用');
+      }
+      final oldIds = existing.chapters
+          .map((chapter) => chapter.itemId)
+          .toList();
+      var isPrefix = oldIds.length <= ids.length;
+      for (var i = 0; isPrefix && i < oldIds.length; i++) {
+        isPrefix = oldIds[i] == ids[i];
+      }
+      if (!isPrefix) return existing;
+    }
+
+    final replace = existing == null || existing.chapters.length < ids.length;
+    if (replace) {
+      final record = proposed.toMap();
+      record['cachedAt'] = DateTime.now().millisecondsSinceEpoch;
+      final previous = _catalogRecord(box, key);
+      if (proposed.author.isEmpty && previous?['author'] is String) {
+        record['author'] = previous!['author'];
+      }
+      if (previous != null) await _saveProgress(box, proposed.id, previous);
+      if (!isCurrent()) return null;
+      await box.put(key, record);
+    }
+
+    Future<void> restore() async {
+      if (!replace) return;
+      if (stored == null) {
+        await box.delete(key);
+      } else {
+        await box.put(key, stored);
+      }
+    }
+
+    try {
+      if (!isCurrent() || !await commit()) {
+        await restore();
+        return null;
+      }
+    } catch (_) {
+      await restore();
+      rethrow;
+    }
+    if (replace) await _sweepCatalogues(box, keepBook: proposed.id);
+    return proposed;
+  });
 
   Future<void> _updateCatalogueAfterWrite({
     required String bookId,

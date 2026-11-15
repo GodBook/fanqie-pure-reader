@@ -97,6 +97,7 @@ import 'text_replacement_page.dart';
 
 part 'reader/reader_page_fields.dart';
 part 'reader/reader_page_listening.dart';
+part 'reader/reader_page_auto_read.dart';
 part 'reader/reader_page_listening_launch.dart';
 part 'reader/reader_page_selection.dart';
 part 'reader/reader_page_selection_overlay.dart';
@@ -476,7 +477,11 @@ class _ReaderPageState extends State<ReaderPage>
     }
     _index = next < 0 ? oldIndex.clamp(0, widget.chapters.length - 1) : next;
     _catalogFuture = null;
-    if (!widget.localOnly) unawaited(_ensureCatalog().catchError((_) {}));
+    if (!widget.localOnly) {
+      unawaited(
+        _ensureCatalog(expectedPrevious: oldWidget.chapters).catchError((_) {}),
+      );
+    }
     if (next < 0) unawaited(_load());
   }
 
@@ -494,7 +499,23 @@ class _ReaderPageState extends State<ReaderPage>
     if (_routeCurrent == current) return;
     _routeCurrent = current;
     _syncNovelForeground();
-    if (!current) _cancelVideoOpen();
+    if (!current) {
+      _cancelVideoOpen();
+      // Route changes may be reported during build. Cancel immediately and
+      // defer the visual update; returning to the route never resumes it.
+      if (widget.novelOnly && _autoTurnTimer != null) {
+        _autoTurnTimer?.cancel();
+        _autoTurnTimer = null;
+        final stoppedGeneration = ++_autoTurnGeneration;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              _autoTurnTimer == null &&
+              _autoTurnGeneration == stoppedGeneration) {
+            _stopAutoTurn();
+          }
+        });
+      }
+    }
     // The ideas sheet (#57) holds immersive while it is open. Once this
     // route is current again the sheet is gone, so the hold is released
     // here — the sheet's own finally runs before this notification lands

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -7,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/media_item.dart';
 import '../models/shelf_identity.dart';
+import 'chapter_cache_store.dart';
 import 'connectivity_status.dart';
 import 'shelf_store.dart';
 
@@ -25,6 +27,11 @@ class NovelShelfMetadata {
     this.checkedAt = 0,
     this.outcome = 'unchecked',
     this.newCount = 0,
+    this.fattenGoal = 50,
+    this.fattenCatalogueCount = 0,
+    this.fattenCatalogueHash = '',
+    this.fattenCatalogueAt = 0,
+    this.fattenReviewAt = 0,
   });
 
   static const readingStates = {'', '想读', '在读', '已读', '暂搁'};
@@ -47,6 +54,14 @@ class NovelShelfMetadata {
   final int checkedAt;
   final String outcome;
   final int newCount;
+  final int fattenGoal;
+
+  /// Local proof that a saved catalogue was actually received online.
+  /// These fields are deliberately omitted from portable backups.
+  final int fattenCatalogueCount;
+  final String fattenCatalogueHash;
+  final int fattenCatalogueAt;
+  final int fattenReviewAt;
 
   NovelShelfMetadata copyWith({
     String? readingState,
@@ -60,6 +75,11 @@ class NovelShelfMetadata {
     int? checkedAt,
     String? outcome,
     int? newCount,
+    int? fattenGoal,
+    int? fattenCatalogueCount,
+    String? fattenCatalogueHash,
+    int? fattenCatalogueAt,
+    int? fattenReviewAt,
   }) => NovelShelfMetadata(
     readingState: readingState ?? this.readingState,
     pinned: pinned ?? this.pinned,
@@ -72,6 +92,11 @@ class NovelShelfMetadata {
     checkedAt: checkedAt ?? this.checkedAt,
     outcome: outcome ?? this.outcome,
     newCount: newCount ?? this.newCount,
+    fattenGoal: fattenGoal ?? this.fattenGoal,
+    fattenCatalogueCount: fattenCatalogueCount ?? this.fattenCatalogueCount,
+    fattenCatalogueHash: fattenCatalogueHash ?? this.fattenCatalogueHash,
+    fattenCatalogueAt: fattenCatalogueAt ?? this.fattenCatalogueAt,
+    fattenReviewAt: fattenReviewAt ?? this.fattenReviewAt,
   );
 
   Map<String, dynamic> toMap() => {
@@ -86,7 +111,18 @@ class NovelShelfMetadata {
     'checkedAt': checkedAt,
     'outcome': outcome,
     'newCount': newCount,
+    'fattenGoal': fattenGoal,
+    'fattenCatalogueCount': fattenCatalogueCount,
+    'fattenCatalogueHash': fattenCatalogueHash,
+    'fattenCatalogueAt': fattenCatalogueAt,
+    'fattenReviewAt': fattenReviewAt,
   };
+
+  Map<String, dynamic> toPortableMap() => toMap()
+    ..remove('fattenCatalogueCount')
+    ..remove('fattenCatalogueHash')
+    ..remove('fattenCatalogueAt')
+    ..remove('fattenReviewAt');
 
   static NovelShelfMetadata? fromMap(dynamic raw) {
     if (raw is! Map) return null;
@@ -106,6 +142,9 @@ class NovelShelfMetadata {
       'latestCount',
       'checkedAt',
       'newCount',
+      'fattenCatalogueCount',
+      'fattenCatalogueAt',
+      'fattenReviewAt',
     ]) {
       final value = raw[key];
       if (value != null &&
@@ -113,7 +152,7 @@ class NovelShelfMetadata {
         return null;
       }
     }
-    for (final key in ['baselineHash', 'latestHash']) {
+    for (final key in ['baselineHash', 'latestHash', 'fattenCatalogueHash']) {
       final value = raw[key] ?? '';
       if (value is! String ||
           (value.isNotEmpty && !RegExp(r'^[0-9a-f]{64}$').hasMatch(value))) {
@@ -122,6 +161,8 @@ class NovelShelfMetadata {
     }
     final title = raw['latestTitle'] ?? '';
     if (title is! String || title.length > 1000) return null;
+    final fattenGoal = raw['fattenGoal'] ?? 50;
+    if (fattenGoal is! int || fattenGoal < 1 || fattenGoal > 1000) return null;
     return NovelShelfMetadata(
       readingState: state,
       pinned: raw['pinned'] == true,
@@ -134,35 +175,91 @@ class NovelShelfMetadata {
       checkedAt: raw['checkedAt'] ?? 0,
       outcome: outcome,
       newCount: raw['newCount'] ?? 0,
+      fattenGoal: fattenGoal,
+      fattenCatalogueCount: raw['fattenCatalogueCount'] ?? 0,
+      fattenCatalogueHash: raw['fattenCatalogueHash'] ?? '',
+      fattenCatalogueAt: raw['fattenCatalogueAt'] ?? 0,
+      fattenReviewAt: raw['fattenReviewAt'] ?? 0,
     );
   }
 }
 
+enum NovelFatteningStatus {
+  localBook,
+  unread,
+  identityUnknown,
+  chapterUnknown,
+  catalogueBusy,
+  catalogueUnknown,
+  catalogueChanged,
+  available,
+}
+
+@immutable
+class NovelFatteningResult {
+  const NovelFatteningResult({
+    required this.status,
+    required this.goal,
+    this.remaining,
+    this.catalogueAt,
+    this.catalogueCount,
+  });
+
+  final NovelFatteningStatus status;
+  final int goal;
+  final int? remaining;
+  final DateTime? catalogueAt;
+  final int? catalogueCount;
+}
+
+class _FatteningCatalogue {
+  const _FatteningCatalogue(this.ids, this.digest);
+  final List<String> ids;
+  final String digest;
+}
+
+class _FatteningQueueFull implements Exception {
+  const _FatteningQueueFull();
+}
+
 class NovelShelfManagement extends ChangeNotifier {
-  NovelShelfManagement();
+  NovelShelfManagement({ChapterCache? catalogueCache})
+    : _catalogueCache = catalogueCache ?? ChapterCacheStore.instance;
   static final instance = NovelShelfManagement();
   static const _storageKey = 'novel_shelf_metadata_v1';
   final Map<String, NovelShelfMetadata> _entries = {};
   final Map<String, int> _generations = {};
   final Map<String, List<Chapter>> _checkedChapters = {};
+  final ChapterCache _catalogueCache;
+  final LinkedHashMap<String, _FatteningCatalogue> _fatteningCache =
+      LinkedHashMap();
+  final Map<String, Future<_FatteningCatalogue?>> _fatteningLoads = {};
+  final List<Completer<void>> _fatteningWaiting = [];
+  final ValueNotifier<int> _fatteningCapacity = ValueNotifier(0);
+  final Map<String, int> _fatteningGenerations = {};
+  int _activeFatteningLoads = 0;
+  int _cachedFatteningChapters = 0;
   final Set<String> _checking = {};
   final Map<String, ({int revision, Completer<void> finished})> _checkFlights =
       {};
   int _checkRevision = 0;
   Future<void>? _opening;
-  Future<void> _writes = Future.value();
+  Future<void>? _writes;
   SharedPreferences? _preferences;
   bool _disposed = false;
+  bool _initialized = false;
 
   String keyOf(MediaItem book) => ShelfStore.keyOf(book);
   NovelShelfMetadata of(MediaItem book) =>
       _entries[keyOf(book)] ?? const NovelShelfMetadata();
   bool checking(MediaItem book) => _checking.contains(keyOf(book));
+  ValueListenable<int> get fatteningCapacity => _fatteningCapacity;
 
   /// Invalidate requests started before a lifecycle, connectivity or policy change.
   void invalidateChecks() => _checkRevision++;
 
-  Future<void> initialize() => _opening ??= _initialize();
+  Future<void> initialize() =>
+      _initialized ? Future<void>.value() : (_opening ??= _initialize());
 
   Future<void> _initialize() async {
     _preferences = await SharedPreferences.getInstance();
@@ -178,15 +275,17 @@ class NovelShelfManagement extends ChangeNotifier {
     } on FormatException {
       // A corrupt optional index must not make the shelf unavailable.
     }
+    _initialized = true;
     if (!_disposed) notifyListeners();
   }
 
   Future<void> _change(
     void Function(Map<String, NovelShelfMetadata>) change, {
     bool Function()? guard,
+    void Function()? afterCommit,
   }) async {
     await initialize();
-    final operation = _writes.then((_) async {
+    final operation = (_writes ?? Future<void>.value()).then((_) async {
       if (guard != null && !guard()) return;
       final next = Map<String, NovelShelfMetadata>.of(_entries);
       change(next);
@@ -219,10 +318,16 @@ class NovelShelfManagement extends ChangeNotifier {
       _entries
         ..clear()
         ..addAll(next);
+      afterCommit?.call();
       if (!_disposed) notifyListeners();
     });
-    _writes = operation.then<void>((_) {}, onError: (Object _) {});
-    await operation;
+    final settled = operation.then<void>((_) {}, onError: (Object _) {});
+    _writes = settled;
+    try {
+      await operation;
+    } finally {
+      if (identical(_writes, settled)) _writes = null;
+    }
   }
 
   Future<void> setReadingState(MediaItem book, String state) {
@@ -244,6 +349,317 @@ class NovelShelfManagement extends ChangeNotifier {
         pinned: pinned,
       );
     });
+  }
+
+  Future<void> setFattenGoal(MediaItem book, int goal) {
+    if (goal < 1 || goal > 1000) throw RangeError.range(goal, 1, 1000);
+    final key = keyOf(book);
+    return _change((entries) {
+      entries[key] = (entries[key] ?? const NovelShelfMetadata()).copyWith(
+        fattenGoal: goal,
+      );
+    });
+  }
+
+  /// Records only a complete, accepted online response. Callers must perform
+  /// their own cancellation/revision check before accepting that response.
+  /// The optional guard is checked again across asynchronous operations.
+  Future<void> rememberFatteningCatalogue(
+    MediaItem book,
+    List<Chapter> chapters, {
+    bool Function()? isCurrent,
+  }) async {
+    if (book.kind != 'book' ||
+        book.source != 'fanqie' ||
+        ShelfIdentity.localContentIdPattern.hasMatch(book.id)) {
+      return;
+    }
+    final ids = chapters.map((chapter) => chapter.itemId).toList();
+    if (ids.isEmpty ||
+        ids.any((id) => id.trim().isEmpty) ||
+        ids.toSet().length != ids.length) {
+      throw const FormatException('目录不完整');
+    }
+    final key = keyOf(book);
+    final generation = (_fatteningGenerations[key] ?? 0) + 1;
+    _fatteningGenerations[key] = generation;
+    bool current() =>
+        !_disposed &&
+        _fatteningGenerations[key] == generation &&
+        (isCurrent == null || isCurrent());
+    await initialize();
+    if (!current()) return;
+
+    final previousProof = of(book);
+    final digest = _hash(ids);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var committed = false;
+    try {
+      final cache = _catalogueCache;
+      if (cache is! ConditionalChapterCatalogueUpdate) return;
+      final stored = await (cache as ConditionalChapterCatalogueUpdate)
+          .updateCatalogueIfSafe(
+            CachedBook(
+              id: book.id,
+              title: book.title,
+              cover: book.cover,
+              author: book.author,
+              chapters: chapters,
+            ),
+            isCurrent: current,
+            commit: () async {
+              await _change(
+                (entries) {
+                  final previous = entries[key] ?? const NovelShelfMetadata();
+                  final oldCount = previous.fattenCatalogueCount;
+                  final hadProof =
+                      oldCount > 0 && previous.fattenCatalogueHash.isNotEmpty;
+                  final extendsPrevious =
+                      !hadProof ||
+                      (oldCount <= ids.length &&
+                          _hash(ids.take(oldCount)) ==
+                              previous.fattenCatalogueHash);
+                  entries[key] = previous.copyWith(
+                    fattenCatalogueCount: ids.length,
+                    fattenCatalogueHash: digest,
+                    fattenCatalogueAt: now,
+                    fattenReviewAt: extendsPrevious
+                        ? previous.fattenReviewAt
+                        : now,
+                  );
+                },
+                guard: current,
+                afterCommit: () => committed = true,
+              );
+              return committed;
+            },
+          );
+      if (!committed && stored != null && current()) {
+        final storedIds = stored.chapters
+            .map((chapter) => chapter.itemId)
+            .toList();
+        var proposedIsPrefix = ids.length <= storedIds.length;
+        for (var i = 0; proposedIsPrefix && i < ids.length; i++) {
+          proposedIsPrefix = ids[i] == storedIds[i];
+        }
+        // A shorter prefix can be an older response, so it must not invalidate
+        // a newer proof. Other conflicts may have removed or reordered the
+        // reading chapter and cannot keep displaying the old count.
+        if (!proposedIsPrefix && previousProof.fattenCatalogueHash.isNotEmpty) {
+          bool unchangedProof() {
+            final latest = of(book);
+            return current() &&
+                latest.fattenCatalogueHash ==
+                    previousProof.fattenCatalogueHash &&
+                latest.fattenCatalogueCount ==
+                    previousProof.fattenCatalogueCount &&
+                latest.fattenCatalogueAt == previousProof.fattenCatalogueAt &&
+                latest.fattenReviewAt == previousProof.fattenReviewAt;
+          }
+
+          final reviewAt = DateTime.now().millisecondsSinceEpoch;
+          NovelShelfMetadata invalidate(NovelShelfMetadata value) =>
+              value.copyWith(
+                fattenCatalogueCount: 0,
+                fattenCatalogueHash: '',
+                fattenCatalogueAt: 0,
+                fattenReviewAt: reviewAt,
+              );
+          void forgetSnapshot() {
+            final old = _fatteningCache.remove(key);
+            if (old != null) _cachedFatteningChapters -= old.ids.length;
+          }
+
+          try {
+            await _change(
+              (entries) => entries[key] = invalidate(entries[key]!),
+              guard: unchangedProof,
+              afterCommit: forgetSnapshot,
+            );
+          } catch (_) {
+            // If persistent storage fails, do not show the disproved snapshot
+            // during this session; a later successful write can persist it.
+            if (unchangedProof()) {
+              _entries[key] = invalidate(_entries[key]!);
+              forgetSnapshot();
+              if (!_disposed) notifyListeners();
+            }
+          }
+        }
+      }
+    } catch (_) {
+      // Optional evidence must never claim an uncommitted catalogue.
+      if (!committed) return;
+    }
+    if (!committed || !current() || of(book).fattenCatalogueHash != digest) {
+      return;
+    }
+    _putFatteningCache(
+      key,
+      _FatteningCatalogue(List.unmodifiable(ids), digest),
+    );
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Evaluates the reading chapter by stable ID within a verified snapshot.
+  /// This never initiates a network request and must be called for visible rows.
+  Future<NovelFatteningResult> fatteningOf(
+    MediaItem book, {
+    required Map<String, dynamic>? history,
+    required bool historyIdentityMatches,
+  }) async {
+    await initialize();
+    NovelFatteningResult result(NovelFatteningStatus status) =>
+        NovelFatteningResult(status: status, goal: of(book).fattenGoal);
+    if (ShelfIdentity.localContentIdPattern.hasMatch(book.id)) {
+      return result(NovelFatteningStatus.localBook);
+    }
+    if (history == null) return result(NovelFatteningStatus.unread);
+    if (!historyIdentityMatches ||
+        book.kind != 'book' ||
+        book.source != 'fanqie') {
+      return result(NovelFatteningStatus.identityUnknown);
+    }
+    final chapterId = (history['chapterId'] ?? history['itemId'])?.toString();
+    if (chapterId == null || chapterId.trim().isEmpty) {
+      return result(NovelFatteningStatus.chapterUnknown);
+    }
+    final proof = of(book);
+    if (proof.fattenCatalogueCount <= 0 ||
+        proof.fattenCatalogueHash.isEmpty ||
+        proof.fattenCatalogueAt <= 0) {
+      return result(NovelFatteningStatus.catalogueUnknown);
+    }
+    _FatteningCatalogue? catalogue;
+    try {
+      catalogue = await _loadFatteningCatalogue(book, proof);
+    } on _FatteningQueueFull {
+      return result(NovelFatteningStatus.catalogueBusy);
+    }
+    final latest = of(book);
+    if (catalogue == null ||
+        latest.fattenCatalogueHash != proof.fattenCatalogueHash ||
+        latest.fattenCatalogueAt != proof.fattenCatalogueAt) {
+      return result(NovelFatteningStatus.catalogueUnknown);
+    }
+    final index = catalogue.ids.indexOf(chapterId);
+    if (index < 0) return result(NovelFatteningStatus.catalogueChanged);
+    final episode = history['episode'];
+    final validEpisode =
+        episode is num &&
+        episode.isFinite &&
+        episode >= 0 &&
+        episode == episode.toInt();
+    if (validEpisode && episode.toInt() != index) {
+      return result(NovelFatteningStatus.catalogueChanged);
+    }
+    final chapterCount = history['chapterCount'];
+    final validCount =
+        chapterCount is num &&
+        chapterCount.isFinite &&
+        chapterCount > 0 &&
+        chapterCount == chapterCount.toInt();
+    if (validCount && chapterCount.toInt() > catalogue.ids.length) {
+      return result(NovelFatteningStatus.catalogueChanged);
+    }
+    // A rearrangement or removal needs a new reading record against the new
+    // catalogue before a position can be trusted again.
+    if (proof.fattenReviewAt > 0) {
+      final time = history['time'];
+      if (time is! num ||
+          !time.isFinite ||
+          time < proof.fattenReviewAt ||
+          !validEpisode ||
+          !validCount ||
+          chapterCount.toInt() != catalogue.ids.length) {
+        return result(NovelFatteningStatus.catalogueChanged);
+      }
+    }
+    return NovelFatteningResult(
+      status: NovelFatteningStatus.available,
+      goal: latest.fattenGoal,
+      remaining: catalogue.ids.length - index - 1,
+      catalogueAt: DateTime.fromMillisecondsSinceEpoch(proof.fattenCatalogueAt),
+      catalogueCount: catalogue.ids.length,
+    );
+  }
+
+  void _putFatteningCache(String key, _FatteningCatalogue value) {
+    final removed = _fatteningCache.remove(key);
+    if (removed != null) _cachedFatteningChapters -= removed.ids.length;
+    if (value.ids.length > 40000) return;
+    _fatteningCache[key] = value;
+    _cachedFatteningChapters += value.ids.length;
+    while (_fatteningCache.length > 16 || _cachedFatteningChapters > 40000) {
+      final oldest = _fatteningCache.keys.first;
+      _cachedFatteningChapters -= _fatteningCache.remove(oldest)!.ids.length;
+    }
+  }
+
+  Future<_FatteningCatalogue?> _loadFatteningCatalogue(
+    MediaItem book,
+    NovelShelfMetadata proof,
+  ) async {
+    final key = keyOf(book);
+    final cached = _fatteningCache.remove(key);
+    if (cached != null) {
+      _cachedFatteningChapters -= cached.ids.length;
+      if (cached.digest == proof.fattenCatalogueHash) {
+        _putFatteningCache(key, cached);
+        return cached;
+      }
+    }
+    final existing = _fatteningLoads[key];
+    if (existing != null) return existing;
+    if (_activeFatteningLoads >= 2 && _fatteningWaiting.length >= 24) {
+      throw const _FatteningQueueFull();
+    }
+    final future = _readFatteningCatalogue(book, proof);
+    _fatteningLoads[key] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_fatteningLoads[key], future)) _fatteningLoads.remove(key);
+    }
+  }
+
+  Future<_FatteningCatalogue?> _readFatteningCatalogue(
+    MediaItem book,
+    NovelShelfMetadata proof,
+  ) async {
+    if (_activeFatteningLoads >= 2) {
+      final waiting = Completer<void>();
+      _fatteningWaiting.add(waiting);
+      await waiting.future;
+    } else {
+      _activeFatteningLoads++;
+    }
+    try {
+      final stored = await _catalogueCache.savedCatalogue(book.id);
+      if (stored == null || stored.id != book.id) return null;
+      final ids = stored.chapters.map((chapter) => chapter.itemId).toList();
+      if (ids.length != proof.fattenCatalogueCount ||
+          _hash(ids) != proof.fattenCatalogueHash) {
+        return null;
+      }
+      final result = _FatteningCatalogue(
+        List.unmodifiable(ids),
+        proof.fattenCatalogueHash,
+      );
+      if (of(book).fattenCatalogueHash == proof.fattenCatalogueHash) {
+        _putFatteningCache(keyOf(book), result);
+      }
+      return result;
+    } catch (_) {
+      return null;
+    } finally {
+      if (_fatteningWaiting.isNotEmpty) {
+        _fatteningWaiting.removeAt(0).complete();
+      } else {
+        _activeFatteningLoads--;
+      }
+      if (!_disposed) _fatteningCapacity.value++;
+    }
   }
 
   Future<void> setFollowed(MediaItem book, bool followed) {
@@ -347,6 +763,7 @@ class NovelShelfManagement extends ChangeNotifier {
         continue;
       }
       final generation = _generations[key] ?? 0;
+      final fatteningGeneration = _fatteningGenerations[key] ?? 0;
       final finished = Completer<void>();
       _checkFlights[key] = (revision: revision, finished: finished);
       _checking.add(key);
@@ -429,6 +846,23 @@ class NovelShelfManagement extends ChangeNotifier {
             (_generations[key] ?? 0) == generation &&
             of(book).followed) {
           _checkedChapters[key] = List.unmodifiable(chapters);
+          if ((_fatteningGenerations[key] ?? 0) != fatteningGeneration) {
+            continue;
+          }
+          try {
+            await rememberFatteningCatalogue(
+              book,
+              chapters,
+              isCurrent: () =>
+                  current() &&
+                  (_generations[key] ?? 0) == generation &&
+                  (_fatteningGenerations[key] ?? 0) ==
+                      fatteningGeneration + 1 &&
+                  of(book).followed,
+            );
+          } catch (_) {
+            // Fattening evidence is optional and must not fail follow checks.
+          }
         }
       } catch (_) {
         if (current() &&
@@ -459,7 +893,7 @@ class NovelShelfManagement extends ChangeNotifier {
     await _writes;
     return {
       for (final entry in _entries.entries)
-        if (_portableKey(entry.key)) entry.key: entry.value.toMap(),
+        if (_portableKey(entry.key)) entry.key: entry.value.toPortableMap(),
     };
   }
 
@@ -477,7 +911,12 @@ class NovelShelfManagement extends ChangeNotifier {
       if (!_portableKey(entry.key)) throw const FormatException('书架身份无效');
       final metadata = NovelShelfMetadata.fromMap(entry.value);
       if (metadata == null) throw const FormatException('书架状态无效');
-      parsed[entry.key] = metadata;
+      parsed[entry.key] = metadata.copyWith(
+        fattenCatalogueCount: 0,
+        fattenCatalogueHash: '',
+        fattenCatalogueAt: 0,
+        fattenReviewAt: 0,
+      );
     }
     return parsed;
   }
@@ -505,6 +944,7 @@ class NovelShelfManagement extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _fatteningCapacity.dispose();
     super.dispose();
   }
 }

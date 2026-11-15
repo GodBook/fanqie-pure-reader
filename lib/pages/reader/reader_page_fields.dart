@@ -106,6 +106,11 @@ mixin _ReaderPageFields on State<ReaderPage> {
   /// seconds; any tap or drag stops it. See
   /// .agents/notes/implemented/feature/2026-09-11-reader-paragraph-bubble.md
   Timer? _autoTurnTimer;
+  // A stopped session must never complete a delayed automatic chapter switch.
+  int _autoTurnGeneration = 0;
+  int? _autoTurnStepGeneration;
+  bool get _autoTurnStepRunning => _autoTurnStepGeneration != null;
+  bool _autoReadStoppedByPointer = false;
 
   /// 听书跟随翻页: the audio page is narrating this chapter, so land on the
   /// page holding the estimated playback position. Instant jumps — the

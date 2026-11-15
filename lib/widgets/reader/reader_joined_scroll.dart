@@ -67,6 +67,9 @@ class JoinedReaderPosition {
   final double start;
 }
 
+/// Status of the forward edge of the currently loaded chapter window.
+enum ReaderJoinedForwardState { loading, failed, ready, end }
+
 /// A bounded window of measured chapters. Extending either end preserves the
 /// visible text; positions exposed to history always remain chapter-relative.
 class ReaderJoinedScroll extends StatefulWidget {
@@ -126,6 +129,19 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
   List<int> get _indices => _chapters.keys.toList()..sort();
   JoinedReaderChapter? chapterAt(int index) => _chapters[index];
   int get generation => _generation;
+
+  ReaderJoinedForwardState get forwardState {
+    if (_chapters.isEmpty) return ReaderJoinedForwardState.loading;
+    final next = _indices.last + 1;
+    if (next >= widget.chapterCount) return ReaderJoinedForwardState.end;
+    if (_errors.contains(next)) return ReaderJoinedForwardState.failed;
+    if (_pending.contains(next)) return ReaderJoinedForwardState.loading;
+    return ReaderJoinedForwardState.ready;
+  }
+
+  void prepareForward() {
+    if (_chapters.isNotEmpty) unawaited(_load(_indices.last + 1));
+  }
 
   double _height(JoinedReaderChapter chapter) =>
       chapter.layout.contentHeight +

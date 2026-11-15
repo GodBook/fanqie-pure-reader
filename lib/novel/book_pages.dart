@@ -17,6 +17,7 @@ class _NovelBookPageState extends State<NovelBookPage> {
   List<MediaItem>? _authorWorks;
   bool _relatedLoading = false;
   String? _relatedError;
+  int _loadRevision = 0;
 
   Future<void> _related() async {
     if (_relatedLoading) return;
@@ -116,6 +117,8 @@ class _NovelBookPageState extends State<NovelBookPage> {
   }
 
   Future<void> _load() async {
+    final revision = ++_loadRevision;
+    bool current() => mounted && revision == _loadRevision;
     setState(() {
       _loading = true;
       _error = null;
@@ -124,10 +127,12 @@ class _NovelBookPageState extends State<NovelBookPage> {
       final cached = await ChapterCacheStore.instance.savedCatalogue(
         widget.book.id,
       );
-      if (cached != null && mounted) {
+      if (!current()) return;
+      if (cached != null) {
         setState(() => _chapters = cached.chapters);
       }
       await NovelRuntime.ensureOnline();
+      if (!current()) return;
       final results = await Future.wait<Object?>([
         ApiClient.instance
             .bookDetail(widget.book.id)
@@ -135,7 +140,7 @@ class _NovelBookPageState extends State<NovelBookPage> {
             .catchError((_) => null),
         ApiClient.instance.directoryChapters(widget.book.id),
       ]);
-      if (!mounted) return;
+      if (!current()) return;
       final chapters = (results[1] as List<List<Chapter>>)
           .expand((group) => group)
           .toList(growable: false);
@@ -154,24 +159,45 @@ class _NovelBookPageState extends State<NovelBookPage> {
             chapters: chapters,
           ),
         );
+        if (current()) {
+          try {
+            await NovelShelfManagement.instance.rememberFatteningCatalogue(
+              _book,
+              chapters,
+              isCurrent: current,
+            );
+          } catch (_) {
+            // A failed optional index must not prevent reading the book.
+          }
+        }
       }
     } catch (error) {
-      if (mounted) setState(() => _error = _errorText(error));
+      if (current()) setState(() => _error = _errorText(error));
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (current()) setState(() => _loading = false);
     }
   }
 
   Future<void> _read({int? index}) async {
     if (_opening) return;
-    setState(() => _opening = true);
+    final interruptedLoad = _loading;
+    // The cached reader can open before the detail request returns. Retire
+    // that request so it cannot overwrite a newer reader catalogue or proof.
+    ++_loadRevision;
+    setState(() {
+      _opening = true;
+      _loading = false;
+    });
     await _readBook(
       context,
       _book,
       chapters: _chapters.isEmpty ? null : _chapters,
       index: index,
     );
-    if (mounted) setState(() => _opening = false);
+    if (mounted) {
+      setState(() => _opening = false);
+      if (interruptedLoad) unawaited(_load());
+    }
   }
 
   Future<void> _directory() async {
@@ -560,6 +586,12 @@ class _NovelShelfState extends State<NovelShelf> {
                 onTap: () => Navigator.pop(context, 'state'),
               ),
               ListTile(
+                leading: const Icon(Icons.track_changes_outlined),
+                title: Text('养肥目标：${metadata.fattenGoal} 章'),
+                subtitle: const Text('按当前位置之后的章节计算'),
+                onTap: () => Navigator.pop(context, 'fatten-goal'),
+              ),
+              ListTile(
                 leading: const Icon(Icons.push_pin_outlined),
                 title: Text(metadata.pinned ? '取消置顶' : '置顶书籍'),
                 onTap: () => Navigator.pop(context, 'pin'),
@@ -629,6 +661,20 @@ class _NovelShelfState extends State<NovelShelf> {
         }
       }
     }
+    if (action == 'fatten-goal') {
+      if (!mounted) return;
+      final goal = await showDialog<int>(
+        context: context,
+        builder: (_) => _FattenGoalDialog(initialGoal: metadata.fattenGoal),
+      );
+      if (goal != null) {
+        try {
+          await NovelShelfManagement.instance.setFattenGoal(book, goal);
+        } catch (_) {
+          if (mounted) _notice(context, '养肥目标保存失败，已保留原目标');
+        }
+      }
+    }
     if (action == 'pin' || action == 'follow') {
       try {
         if (action == 'pin') {
@@ -659,4 +705,92 @@ class _NovelShelfState extends State<NovelShelf> {
 
   @override
   Widget build(BuildContext context) => _buildLibrary();
+}
+
+class _FattenGoalDialog extends StatefulWidget {
+  const _FattenGoalDialog({required this.initialGoal});
+  final int initialGoal;
+
+  @override
+  State<_FattenGoalDialog> createState() => _FattenGoalDialogState();
+}
+
+class _FattenGoalDialogState extends State<_FattenGoalDialog> {
+  final _form = GlobalKey<FormState>();
+  late final TextEditingController _input = TextEditingController(
+    text: widget.initialGoal.toString(),
+  );
+
+  @override
+  void dispose() {
+    _input.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
+    title: const Text('设置养肥目标'),
+    content: Form(
+      key: _form,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('目标表示当前阅读章节之后，期望积累的章节数。'),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final goal in [20, 50, 100])
+                OutlinedButton(
+                  onPressed: () => setState(() {
+                    _input.text = goal.toString();
+                    _form.currentState?.validate();
+                  }),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(48, 48),
+                  ),
+                  child: Text('$goal 章'),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          TextFormField(
+            key: const ValueKey('fatten-goal-input'),
+            controller: _input,
+            keyboardType: TextInputType.number,
+            inputFormatters: [
+              FilteringTextInputFormatter.digitsOnly,
+              LengthLimitingTextInputFormatter(4),
+            ],
+            decoration: const InputDecoration(
+              labelText: '自定义目标（章）',
+              helperText: '输入 1–1000',
+            ),
+            validator: (value) {
+              final goal = int.tryParse(value ?? '');
+              return goal == null || goal < 1 || goal > 1000
+                  ? '请输入 1–1000 之间的整数'
+                  : null;
+            },
+            onFieldSubmitted: (_) => _save(),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      FilledButton(onPressed: _save, child: const Text('保存')),
+    ],
+  );
+
+  void _save() {
+    if (_form.currentState?.validate() != true) return;
+    Navigator.pop(context, int.parse(_input.text));
+  }
 }

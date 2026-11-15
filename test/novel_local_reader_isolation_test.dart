@@ -20,6 +20,12 @@ class _CountingCache extends MemoryChapterCache {
   }
 
   @override
+  Future<CachedBook> preserveOrCreateCatalogue(CachedBook fallback) async {
+    catalogWrites++;
+    return super.preserveOrCreateCatalogue(fallback);
+  }
+
+  @override
   Future<void> write({
     required String bookId,
     required String chapterId,
@@ -168,6 +174,10 @@ void main() {
     expect(find.textContaining('本机正文'), findsWidgets);
     expect(ideaCalls, 0);
     expect(cache.catalogWrites, greaterThan(0));
+    expect(cache.catalogs[bookId]!.chapters.map((chapter) => chapter.itemId), [
+      '$bookId:chapter:0',
+      '$bookId:chapter:1',
+    ]);
     expect(cache.chapterWrites, greaterThan(0));
     expect(await cache.cachedChapterIds(bookId), contains('$bookId:chapter:0'));
     await _showMenu(tester);

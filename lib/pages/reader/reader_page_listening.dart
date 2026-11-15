@@ -21,6 +21,19 @@ extension _ReaderPageListening on _ReaderPageState {
       _showMessage('请先选择继续阅读或稍后提醒');
       return;
     }
+    if (widget.novelOnly &&
+        (_loading ||
+            !_progressReady ||
+            _error != null ||
+            _chapterLayout == null)) {
+      _showMessage('正文尚未加载完成，暂不能开始自动阅读');
+      return;
+    }
+    if (widget.novelOnly && _novelAutoAtEnd) {
+      _showMessage('已读至全书末尾');
+      return;
+    }
+    ++_autoTurnGeneration;
     _setControlsVisible(false);
     _autoTurnTimer = Timer.periodic(
       Duration(seconds: _preferences.autoTurnSeconds),
@@ -32,6 +45,14 @@ extension _ReaderPageListening on _ReaderPageState {
   void _stopAutoTurn() {
     _autoTurnTimer?.cancel();
     _autoTurnTimer = null;
+    ++_autoTurnGeneration;
+    if (widget.novelOnly &&
+        _autoTurnStepRunning &&
+        !_paged &&
+        _scrollController.hasClients) {
+      // Cancel the automatic scroll animation at its current position.
+      _scrollController.jumpTo(_scrollController.position.pixels);
+    }
     if (mounted) _setState(() {});
   }
 
@@ -212,6 +233,10 @@ extension _ReaderPageListening on _ReaderPageState {
   }
 
   void _autoTurnStep() {
+    if (widget.novelOnly) {
+      unawaited(_novelAutoTurnStep());
+      return;
+    }
     if (!mounted) return _stopAutoTurn();
     if (_loading || !_progressReady || _changingChapter) return;
     if (_index == widget.chapters.length - 1) {

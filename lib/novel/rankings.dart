@@ -124,11 +124,15 @@ class _NovelRankingsState extends State<NovelRankings> {
   List<RankTab> _tabs = [];
   List<RankEntry> _entries = [];
   int _tabIndex = 0, _categoryIndex = 0, _offset = 0, _generation = 0;
+  int _catalogGeneration = 0;
   bool _loading = true, _hasMore = false, _catalogFailed = false;
+  bool _catalogLoading = false;
   bool _retryReset = true;
   String? _error;
   DateTime? _cachedAt;
+  DateTime? _catalogCachedAt;
   BackendRequest? _request;
+  BackendRequest? _catalogRequest;
   BackendRequest? _scoreRequest;
   // Pagination cancels in-flight loads, which must remain eligible to retry.
   final _completedScoreAttempts = <String>{};
@@ -299,53 +303,110 @@ class _NovelRankingsState extends State<NovelRankings> {
   }
 
   Future<void> _bootstrap() async {
-    final generation = ++_generation;
-    _request?.cancel();
-    _scoreRequest?.cancel();
-    _flushScoreSave();
-    final request = _request = BackendRequest();
+    final generation = ++_catalogGeneration;
+    _catalogRequest?.cancel();
+    final request = _catalogRequest = BackendRequest();
     setState(() {
-      _loading = true;
-      _error = null;
+      _catalogLoading = true;
       _catalogFailed = false;
+      if (_tabs.isEmpty) {
+        _loading = true;
+        _error = null;
+      }
     });
     if (widget.cache == null && widget.catalogLoader == null) {
       try {
         await _warmNovelRankCache();
       } catch (_) {}
     }
-    if (!mounted || generation != _generation) return;
-    RankCatalog catalog;
-    var failed = false;
-    try {
-      catalog = await (widget.catalogLoader ?? _novelRankCatalog)(request);
-      if (catalog.rankId.isEmpty || _novelTabs(catalog).isEmpty) {
-        throw StateError('榜单目录不可用');
-      }
-      if (!mounted || generation != _generation || request.isCancelled) return;
-      unawaited(_cache.saveCatalog(catalog));
-    } catch (_) {
-      failed = true;
-      catalog = _cache.loadCatalog()?.catalog ?? RankCatalog.empty;
-    }
-    if (!mounted || generation != _generation) return;
-    final tabs = _novelTabs(catalog);
-    if (catalog.rankId.isEmpty || tabs.isEmpty) {
-      setState(() {
-        _loading = false;
-        _error = '排行榜暂时不可用，请联网重试';
-        _catalogFailed = true;
-      });
+    if (!mounted || generation != _catalogGeneration || request.isCancelled) {
       return;
     }
-    setState(() {
-      _catalog = catalog;
-      _tabs = tabs;
-      _tabIndex = 0;
-      _categoryIndex = 0;
-      _catalogFailed = failed;
-    });
-    await _loadBoard(reset: true);
+
+    // Restore the last usable selection before waiting for the network. The
+    // board and catalogue refreshes have independent cancellation generations.
+    if (_tabs.isEmpty) {
+      final snapshot = _cache.loadCatalog();
+      final catalog = snapshot?.catalog;
+      final tabs = catalog == null ? <RankTab>[] : _novelTabs(catalog);
+      if (snapshot != null &&
+          catalog != null &&
+          catalog.rankId.isNotEmpty &&
+          tabs.isNotEmpty) {
+        setState(() {
+          _catalog = catalog;
+          _tabs = tabs;
+          _tabIndex = 0;
+          _categoryIndex = 0;
+          _catalogCachedAt = snapshot.savedAt;
+        });
+        unawaited(_loadBoard(reset: true));
+      }
+    }
+
+    try {
+      final catalog = await (widget.catalogLoader ?? _novelRankCatalog)(
+        request,
+      );
+      final tabs = _novelTabs(catalog);
+      if (catalog.rankId.isEmpty || tabs.isEmpty) {
+        throw StateError('榜单目录不可用');
+      }
+      if (!mounted || generation != _catalogGeneration || request.isCancelled) {
+        return;
+      }
+
+      final previous = _tabs.isEmpty
+          ? null
+          : (rankId: _catalog.rankId, algo: _tab.algo, categoryId: _categoryId);
+      final categories = catalog.categories.isEmpty
+          ? const [RankCategory(name: '全部', id: 0)]
+          : catalog.categories;
+      var tabIndex = previous == null
+          ? 0
+          : tabs.indexWhere((tab) => tab.algo == previous.algo);
+      var categoryIndex = previous == null
+          ? 0
+          : categories.indexWhere(
+              (category) => category.id == previous.categoryId,
+            );
+      if (tabIndex < 0) tabIndex = 0;
+      if (categoryIndex < 0) categoryIndex = 0;
+      final current = (
+        rankId: catalog.rankId,
+        algo: tabs[tabIndex].algo,
+        categoryId: categories[categoryIndex].id,
+      );
+      setState(() {
+        _catalog = catalog;
+        _tabs = tabs;
+        _tabIndex = tabIndex;
+        _categoryIndex = categoryIndex;
+        _catalogCachedAt = null;
+        _catalogLoading = false;
+        _catalogFailed = false;
+      });
+      unawaited(() async {
+        try {
+          await _cache.saveCatalog(catalog);
+        } catch (_) {}
+      }());
+      if (previous != current) {
+        unawaited(_loadBoard(reset: true));
+      }
+    } catch (_) {
+      if (!mounted || generation != _catalogGeneration || request.isCancelled) {
+        return;
+      }
+      setState(() {
+        _catalogLoading = false;
+        _catalogFailed = true;
+        if (_tabs.isEmpty) {
+          _loading = false;
+          _error = '排行榜暂时不可用，请联网重试';
+        }
+      });
+    }
   }
 
   Future<void> _loadBoard({bool reset = false}) async {
@@ -434,12 +495,39 @@ class _NovelRankingsState extends State<NovelRankings> {
   @override
   void dispose() {
     _request?.cancel();
+    _catalogRequest?.cancel();
     _scoreRequest?.cancel();
     _flushScoreSave();
     ++_generation;
+    ++_catalogGeneration;
     _scroll.dispose();
     super.dispose();
   }
+
+  Widget _cacheNotice() => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_catalogCachedAt != null)
+          Text(
+            '榜单目录来自本地缓存 · 保存于 ${_topicSavedAt(_catalogCachedAt!)}'
+            '${_catalogFailed
+                ? ' · 刷新失败'
+                : _catalogLoading
+                ? ' · 正在刷新'
+                : ''}',
+          ),
+        if (_catalogFailed)
+          TextButton(
+            onPressed: _catalogLoading ? null : _bootstrap,
+            child: const Text('重试目录'),
+          ),
+        if (_cachedAt != null)
+          Text('本地榜单缓存 · 保存于 ${_topicSavedAt(_cachedAt!)}'),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -495,32 +583,33 @@ class _NovelRankingsState extends State<NovelRankings> {
                   ],
                 ),
               ),
-              if (_cachedAt != null || _catalogFailed)
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 4,
-                  ),
-                  child: Text(
-                    _cachedAt != null
-                        ? '本地榜单缓存 · 保存于 ${_topicSavedAt(_cachedAt!)}'
-                        : '榜单目录来自本地缓存',
-                  ),
-                ),
-              if (_entries.isEmpty && _loading)
-                const Expanded(
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else if (_entries.isEmpty)
+              if (_entries.isEmpty)
                 Expanded(
-                  child: _Problem(
-                    message:
-                        _error ??
-                        (_hasMore ? '本页没有可显示的小说，还可以继续寻找。' : '该榜单暂无可显示的小说'),
-                    actionLabel: _error == null && _hasMore ? '继续寻找' : '重试',
-                    onRetry: () => _loadBoard(
-                      reset: _error == null ? !_hasMore : _retryReset,
-                    ),
+                  child: ListView(
+                    children: [
+                      if (_catalogCachedAt != null || _cachedAt != null)
+                        _cacheNotice(),
+                      SizedBox(
+                        height: 240,
+                        child: _loading
+                            ? const Center(child: CircularProgressIndicator())
+                            : _Problem(
+                                message:
+                                    _error ??
+                                    (_hasMore
+                                        ? '本页没有可显示的小说，还可以继续寻找。'
+                                        : '该榜单暂无可显示的小说'),
+                                actionLabel: _error == null && _hasMore
+                                    ? '继续寻找'
+                                    : '重试',
+                                onRetry: () => _loadBoard(
+                                  reset: _error == null
+                                      ? !_hasMore
+                                      : _retryReset,
+                                ),
+                              ),
+                      ),
+                    ],
                   ),
                 )
               else
@@ -530,9 +619,18 @@ class _NovelRankingsState extends State<NovelRankings> {
                     child: ListView.builder(
                       controller: _scroll,
                       physics: const AlwaysScrollableScrollPhysics(),
-                      itemCount: _entries.length + 1,
+                      itemCount:
+                          _entries.length +
+                          1 +
+                          (_catalogCachedAt != null || _cachedAt != null
+                              ? 1
+                              : 0),
                       itemBuilder: (context, index) {
-                        if (index == _entries.length) {
+                        final hasNotice =
+                            _catalogCachedAt != null || _cachedAt != null;
+                        if (hasNotice && index == 0) return _cacheNotice();
+                        final entryIndex = index - (hasNotice ? 1 : 0);
+                        if (entryIndex == _entries.length) {
                           return _BottomLoader(
                             loading: _loading,
                             hasMore: _hasMore,
@@ -540,7 +638,7 @@ class _NovelRankingsState extends State<NovelRankings> {
                             onMore: () => _loadBoard(reset: _cachedAt != null),
                           );
                         }
-                        final entry = _entries[index];
+                        final entry = _entries[entryIndex];
                         final book = entry.toMediaItem();
                         return Row(
                           key: ValueKey('novel-rank-${entry.id}'),

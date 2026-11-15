@@ -171,7 +171,7 @@ String _readingInfo(Map<String, dynamic>? entry) {
   return parts.isEmpty ? '已有阅读记录' : parts.join('\n');
 }
 
-bool _canOfferShelfResume(
+bool _sameShelfHistoryBook(
   MediaItem book,
   Map<String, dynamic>? entry,
   Set<String> sourcesForId,
@@ -189,6 +189,16 @@ bool _canOfferShelfResume(
   } else if (source != book.source) {
     return false;
   }
+  return true;
+}
+
+bool _canOfferShelfResume(
+  MediaItem book,
+  Map<String, dynamic>? entry,
+  Set<String> sourcesForId,
+) {
+  if (!_sameShelfHistoryBook(book, entry, sourcesForId)) return false;
+  if (entry == null) return false;
   final chapterId = (entry['chapterId'] ?? entry['itemId'])?.toString();
   if (chapterId != null && chapterId.isNotEmpty) return true;
   final episode = entry['episode'];
@@ -734,40 +744,222 @@ extension _NovelShelfLibrary on _NovelShelfState {
                 itemCount: records.length,
                 itemBuilder: (_, i) {
                   final r = records[i];
-                  return _BookRow(
-                    r.item,
-                    subtitle: _openingId == r.item.id
-                        ? '正在打开…'
-                        : '${management.of(r.item).pinned ? '已置顶 · ' : ''}'
-                              '${management.of(r.item).readingState.isEmpty ? '' : '${management.of(r.item).readingState} · '}'
-                              '${_readingInfo(history[r.item.id])}',
-                    onTap: _managing
-                        ? () => _update(() {
-                            if (!_selection.add(ShelfStore.keyOf(r.item))) {
-                              _selection.remove(ShelfStore.keyOf(r.item));
-                            }
-                          })
-                        : () => _open(r.item),
-                    trailing: _managing
-                        ? Checkbox(
-                            value: _selection.contains(
-                              ShelfStore.keyOf(r.item),
-                            ),
-                            onChanged: (_) => _update(() {
-                              if (!_selection.add(ShelfStore.keyOf(r.item))) {
-                                _selection.remove(ShelfStore.keyOf(r.item));
-                              }
-                            }),
-                          )
-                        : IconButton(
-                            tooltip: '书籍操作',
-                            icon: const Icon(Icons.more_vert),
-                            onPressed: () => _menu(r),
-                          ),
+                  final entry = history[r.item.id];
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _BookRow(
+                        r.item,
+                        subtitle: _openingId == r.item.id
+                            ? '正在打开…'
+                            : '${management.of(r.item).pinned ? '已置顶 · ' : ''}'
+                                  '${management.of(r.item).readingState.isEmpty ? '' : '${management.of(r.item).readingState} · '}'
+                                  '${_readingInfo(entry)}',
+                        onTap: _managing
+                            ? () => _update(() {
+                                if (!_selection.add(ShelfStore.keyOf(r.item))) {
+                                  _selection.remove(ShelfStore.keyOf(r.item));
+                                }
+                              })
+                            : () => _open(r.item),
+                        trailing: _managing
+                            ? Checkbox(
+                                value: _selection.contains(
+                                  ShelfStore.keyOf(r.item),
+                                ),
+                                onChanged: (_) => _update(() {
+                                  if (!_selection.add(
+                                    ShelfStore.keyOf(r.item),
+                                  )) {
+                                    _selection.remove(ShelfStore.keyOf(r.item));
+                                  }
+                                }),
+                              )
+                            : IconButton(
+                                tooltip: '书籍操作',
+                                icon: const Icon(Icons.more_vert),
+                                onPressed: () => _menu(r),
+                              ),
+                      ),
+                      NovelShelfFatteningIndicator(
+                        management: management,
+                        book: r.item,
+                        metadata: management.of(r.item),
+                        history: entry,
+                        historyIdentityMatches: _sameShelfHistoryBook(
+                          r.item,
+                          entry,
+                          sourcesById[r.item.id] ?? const <String>{},
+                        ),
+                      ),
+                    ],
                   );
                 },
               ),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+class NovelShelfFatteningIndicator extends StatefulWidget {
+  const NovelShelfFatteningIndicator({
+    super.key,
+    required this.management,
+    required this.book,
+    required this.metadata,
+    required this.history,
+    required this.historyIdentityMatches,
+  });
+  final NovelShelfManagement management;
+  final MediaItem book;
+  final NovelShelfMetadata metadata;
+  final Map<String, dynamic>? history;
+  final bool historyIdentityMatches;
+
+  @override
+  State<NovelShelfFatteningIndicator> createState() =>
+      _ShelfFatteningIndicatorState();
+}
+
+class _ShelfFatteningIndicatorState
+    extends State<NovelShelfFatteningIndicator> {
+  late Future<NovelFatteningResult> _result;
+  int _revision = 0;
+  bool _waitingForCapacity = false;
+
+  void _load() {
+    _stopWaiting();
+    final revision = ++_revision;
+    final capacity = widget.management.fatteningCapacity;
+    final before = capacity.value;
+    _result = () async {
+      final result = await widget.management.fatteningOf(
+        widget.book,
+        history: widget.history,
+        historyIdentityMatches: widget.historyIdentityMatches,
+      );
+      if (mounted &&
+          revision == _revision &&
+          result.status == NovelFatteningStatus.catalogueBusy) {
+        _waitingForCapacity = true;
+        capacity.addListener(_retryWhenAvailable);
+        // A slot may have opened before this listener was registered.
+        if (capacity.value != before) scheduleMicrotask(_retryWhenAvailable);
+      }
+      return result;
+    }();
+  }
+
+  void _stopWaiting() {
+    if (!_waitingForCapacity) return;
+    widget.management.fatteningCapacity.removeListener(_retryWhenAvailable);
+    _waitingForCapacity = false;
+  }
+
+  void _retryWhenAvailable() {
+    if (!_waitingForCapacity || !mounted) return;
+    setState(_load);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(NovelShelfFatteningIndicator oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.management != widget.management && _waitingForCapacity) {
+      oldWidget.management.fatteningCapacity.removeListener(
+        _retryWhenAvailable,
+      );
+      _waitingForCapacity = false;
+    }
+    final old = oldWidget.metadata;
+    final next = widget.metadata;
+    if (oldWidget.management != widget.management ||
+        oldWidget.book.id != widget.book.id ||
+        oldWidget.book.source != widget.book.source ||
+        oldWidget.historyIdentityMatches != widget.historyIdentityMatches ||
+        old.fattenGoal != next.fattenGoal ||
+        old.fattenCatalogueHash != next.fattenCatalogueHash ||
+        old.fattenCatalogueAt != next.fattenCatalogueAt ||
+        old.fattenReviewAt != next.fattenReviewAt ||
+        oldWidget.history?['chapterId'] != widget.history?['chapterId'] ||
+        oldWidget.history?['itemId'] != widget.history?['itemId'] ||
+        oldWidget.history?['episode'] != widget.history?['episode'] ||
+        oldWidget.history?['chapterCount'] != widget.history?['chapterCount'] ||
+        oldWidget.history?['time'] != widget.history?['time']) {
+      _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    _revision++;
+    _stopWaiting();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+    child: FutureBuilder<NovelFatteningResult>(
+      future: _result,
+      builder: (context, snapshot) {
+        final result =
+            snapshot.connectionState == ConnectionState.done &&
+                !snapshot.hasError
+            ? snapshot.data
+            : null;
+        final theme = Theme.of(context);
+        final style = theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+        );
+        if (result == null || result.status != NovelFatteningStatus.available) {
+          final label = switch (result?.status) {
+            NovelFatteningStatus.localBook => '本地书暂不计算',
+            NovelFatteningStatus.unread => '尚未阅读',
+            NovelFatteningStatus.identityUnknown => '阅读记录无法核对',
+            NovelFatteningStatus.chapterUnknown => '阅读章节未知',
+            NovelFatteningStatus.catalogueBusy => '正在等待核对缓存目录',
+            NovelFatteningStatus.catalogueUnknown => '目录待核验，可在书籍操作中打开详情刷新',
+            NovelFatteningStatus.catalogueChanged => '目录已变化，请打开书籍核对',
+            _ => snapshot.hasError ? '暂时无法核对' : '正在核对缓存目录',
+          };
+          return Text(
+            '养肥度 · $label',
+            key: ValueKey('fattening-${widget.book.id}'),
+            style: style,
+          );
+        }
+        final at = result.catalogueAt!.toLocal();
+        final stamp =
+            '${at.year}/${at.month.toString().padLeft(2, '0')}/${at.day.toString().padLeft(2, '0')} '
+            '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+        return Column(
+          key: ValueKey('fattening-${widget.book.id}'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '养肥度 · 待看 ${result.remaining} / 目标 ${result.goal} 章',
+              style: style,
+            ),
+            const SizedBox(height: 4),
+            LinearProgressIndicator(
+              value: (result.remaining! / result.goal).clamp(0.0, 1.0),
+              semanticsLabel:
+                  '养肥度，待看 ${result.remaining} 章，目标 ${result.goal} 章',
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '按缓存目录 ${result.catalogueCount} 章计算 · 截至 $stamp',
+              style: style,
+            ),
           ],
         );
       },

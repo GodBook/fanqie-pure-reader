@@ -33,6 +33,7 @@ class ReaderControls extends StatelessWidget {
     required this.onNight,
     this.onAi,
     this.onDownload,
+    this.onAutoRead,
     this.aiLabel = 'AI 校对',
     this.novelOnly = false,
     this.bookProgress,
@@ -57,6 +58,7 @@ class ReaderControls extends StatelessWidget {
   final VoidCallback onNight;
   final VoidCallback? onAi;
   final VoidCallback? onDownload;
+  final VoidCallback? onAutoRead;
   final String aiLabel;
   final bool novelOnly;
   final double? bookProgress;
@@ -68,6 +70,7 @@ class ReaderControls extends StatelessWidget {
       '目录',
       '书签',
       novelOnly ? '阅读设置' : '外观',
+      if (onAutoRead != null) '自动阅读',
       onDownload == null ? '操作' : '下载',
       '查找',
       if (onAi != null) aiLabel,
@@ -157,7 +160,7 @@ class ReaderControls extends StatelessWidget {
                       clip: false,
                       child: ConstrainedBox(
                         constraints: BoxConstraints(
-                          maxWidth: DockLayout.widthFor(onAi == null ? 6 : 7),
+                          maxWidth: DockLayout.widthFor(labels.length),
                         ),
                         child: LiquidGlass(
                           key: const ValueKey('reader-liquid-dock'),
@@ -211,6 +214,15 @@ class ReaderControls extends StatelessWidget {
                                             label: novelOnly ? '阅读设置' : '外观',
                                             onPressed: onAppearance,
                                           ),
+                                          if (onAutoRead != null)
+                                            _DockAction(
+                                              key: const ValueKey(
+                                                'reader-auto-read-entry',
+                                              ),
+                                              icon: CupertinoIcons.play_circle,
+                                              label: '自动阅读',
+                                              onPressed: onAutoRead,
+                                            ),
                                           _DockAction(
                                             key: ValueKey(
                                               onDownload == null

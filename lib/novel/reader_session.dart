@@ -87,6 +87,7 @@ class NovelReaderSession extends StatefulWidget {
     this.networkChanges,
     this.catalogueChanges,
     this.cachedDirectoryLoader,
+    this.onOnlineCatalogueAccepted,
   });
 
   final List<Chapter> chapters;
@@ -98,6 +99,14 @@ class NovelReaderSession extends StatefulWidget {
   final Stream<void>? networkChanges;
   final Listenable? catalogueChanges;
   final Future<List<Chapter>?> Function()? cachedDirectoryLoader;
+
+  /// Optional local bookkeeping after the full response was accepted. The
+  /// guard also invalidates asynchronous work when a newer catalogue wins.
+  final Future<void> Function(
+    List<Chapter> chapters,
+    bool Function() isCurrent,
+  )?
+  onOnlineCatalogueAccepted;
 
   @override
   State<NovelReaderSession> createState() => _NovelReaderSessionState();
@@ -210,6 +219,20 @@ class _NovelReaderSessionState extends State<NovelReaderSession>
         setState(() => _chapters = List.unmodifiable(unique));
       }
       _lastSuccess = DateTime.now();
+      final accepted = widget.onOnlineCatalogueAccepted;
+      if (accepted != null && unique.length == fresh.length) {
+        final acceptedRevision = _revision;
+        bool current() =>
+            mounted &&
+            _foreground &&
+            !request.isCancelled &&
+            acceptedRevision == _revision;
+        unawaited(
+          Future<void>.sync(
+            () => accepted(List.unmodifiable(unique), current),
+          ).catchError((Object _) {}),
+        );
+      }
       return true;
     } catch (_) {
       return false;

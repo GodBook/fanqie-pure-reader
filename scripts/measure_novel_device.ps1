@@ -28,7 +28,9 @@ function Read-Sample {
         throw 'Reading measurements require an awake display.'
     }
     $activities = Read-Device @('shell', 'dumpsys', 'activity', 'activities')
-    if ($activities -notmatch ('(?m)^\s*topResumedActivity=[^\r\n]*' + [regex]::Escape($Package) + '/')) {
+    # Android/MIUI expose the currently resumed activity under either name.
+    # Match the active record and exact package, never a background task entry.
+    if ($activities -notmatch ('(?m)^\s*(?:topResumedActivity=|mResumedActivity:)\s*ActivityRecord\{[^\r\n]*\s' + [regex]::Escape($Package) + '/')) {
         throw 'Reading measurements require the app in the foreground.'
     }
     $appPid = Read-Device @('shell', 'pidof', $Package)

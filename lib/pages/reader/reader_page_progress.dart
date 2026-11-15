@@ -476,7 +476,7 @@ extension _ReaderPageProgress on _ReaderPageState {
     }
   }
 
-  Future<void> _next() async {
+  Future<void> _next({int? autoTurnGeneration}) async {
     ++_readerNavigationGeneration;
     if (_changingChapter || _index < 0) return;
     if (_index >= widget.chapters.length - 1) {
@@ -493,6 +493,10 @@ extension _ReaderPageProgress on _ReaderPageState {
       _settleReadTime();
       await _persistProgress();
       if (!mounted) return;
+      if (autoTurnGeneration != null &&
+          !_autoTurnSessionIsCurrent(autoTurnGeneration)) {
+        return;
+      }
       final target = _resolveChapterTurnTarget(currentId, targetId);
       if (target == null) return;
       final turn = _captureChapterTurn(1);

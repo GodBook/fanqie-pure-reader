@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:hive_ce/hive.dart';
 
 import '../models/media_item.dart';
@@ -102,11 +100,11 @@ class NovelSearchCatalog {
           (book) => !observed.containsKey((book.source, book.id)),
         ),
       ].take(maxEntries).toList(growable: false);
-      final next = merged.map(_encode).toList(growable: false);
-      if (jsonEncode(existing.map(_encode).toList()) == jsonEncode(next)) {
+      if (_sameStoredRecords(existing, merged)) {
         _items = existing;
         return;
       }
+      final next = merged.map(_encode).toList(growable: false);
       await box.put(_recordsKey, next);
       await box.flush();
       _items = merged;
@@ -130,6 +128,35 @@ class NovelSearchCatalog {
     }
     return books;
   }
+}
+
+// Keep this comparison in sync with _encode. Both record and category order
+// matter; signed zero must also match the previous JSON comparison.
+bool _sameStoredRecords(List<MediaItem> left, List<MediaItem> right) {
+  if (left.length != right.length) return false;
+  for (var index = 0; index < left.length; index++) {
+    final a = left[index];
+    final b = right[index];
+    if (a.id != b.id ||
+        a.source != b.source ||
+        a.title != b.title ||
+        a.author != b.author ||
+        a.cover != b.cover ||
+        a.badge != b.badge ||
+        a.ep != b.ep ||
+        a.readCount != b.readCount ||
+        a.creationStatus != b.creationStatus ||
+        a.wordNumber != b.wordNumber ||
+        a.score != b.score ||
+        (a.score == 0 && a.score!.isNegative != b.score!.isNegative) ||
+        a.categories.length != b.categories.length) {
+      return false;
+    }
+    for (var category = 0; category < a.categories.length; category++) {
+      if (a.categories[category] != b.categories[category]) return false;
+    }
+  }
+  return true;
 }
 
 MediaItem _merge(MediaItem book, MediaItem? previous) {

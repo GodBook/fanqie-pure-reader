@@ -773,14 +773,41 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
     });
   }
 
-  Future<void> _ensureCatalog() {
+  Future<void> _ensureCatalog({List<Chapter>? expectedPrevious}) {
     if (_isImportedBook) return Future<void>.value();
-    return _catalogFuture ??= _diskCache.saveBook(_cachedBook).catchError((
-      Object error,
-    ) {
-      _catalogFuture = null;
-      throw error;
-    });
+    final pending = _catalogFuture;
+    if (pending != null) return pending;
+    final proposed = _cachedBook;
+    final chapters = widget.chapters;
+    late Future<void> operation;
+    operation =
+        () async {
+          final cache = _diskCache;
+          if (widget.novelOnly &&
+              expectedPrevious != null &&
+              cache is ConditionalChapterCatalogueReplacement) {
+            await (cache as ConditionalChapterCatalogueReplacement)
+                .replaceCatalogueIfUnchanged(
+                  proposed,
+                  expectedChapters: expectedPrevious,
+                  isCurrent: () =>
+                      mounted && identical(widget.chapters, chapters),
+                );
+          } else if (widget.novelOnly &&
+              expectedPrevious == null &&
+              cache is ConditionalChapterCatalogue) {
+            // A shelf snapshot can be older than a follow check that committed
+            // while the reader was opening. Initial display must not replace it.
+            await (cache as ConditionalChapterCatalogue)
+                .preserveOrCreateCatalogue(proposed);
+          } else {
+            await cache.saveBook(proposed);
+          }
+        }().catchError((Object error) {
+          if (identical(_catalogFuture, operation)) _catalogFuture = null;
+          throw error;
+        });
+    return _catalogFuture = operation;
   }
 
   Future<_LoadedChapter> _loadChapterText(Chapter chapter) async {
