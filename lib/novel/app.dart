@@ -65,6 +65,7 @@ import '../widgets/wenku/src/performance_preferences.dart';
 import 'recommendation_filters.dart';
 import 'starter_books.dart';
 import 'reader_session.dart';
+import 'visible_listenable_builder.dart';
 
 export 'reader_session.dart';
 

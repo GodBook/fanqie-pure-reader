@@ -213,9 +213,19 @@ class NovelFatteningResult {
 }
 
 class _FatteningCatalogue {
-  const _FatteningCatalogue(this.ids, this.digest);
+  _FatteningCatalogue(this.ids, this.digest);
   final List<String> ids;
   final String digest;
+  String? _lastChapterId;
+  int? _lastChapterIndex;
+
+  int indexOf(String chapterId) {
+    if (_lastChapterId == chapterId && _lastChapterIndex != null) {
+      return _lastChapterIndex!;
+    }
+    _lastChapterId = chapterId;
+    return _lastChapterIndex = ids.indexOf(chapterId);
+  }
 }
 
 class _FatteningQueueFull implements Exception {
@@ -542,7 +552,7 @@ class NovelShelfManagement extends ChangeNotifier {
         latest.fattenCatalogueAt != proof.fattenCatalogueAt) {
       return result(NovelFatteningStatus.catalogueUnknown);
     }
-    final index = catalogue.ids.indexOf(chapterId);
+    final index = catalogue.indexOf(chapterId);
     if (index < 0) return result(NovelFatteningStatus.catalogueChanged);
     final episode = history['episode'];
     final validEpisode =

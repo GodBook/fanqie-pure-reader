@@ -99,6 +99,7 @@ class NovelReadingMetricEntry {
   final String bookId;
   final String title;
   final int milliseconds;
+  static final _dayPattern = RegExp(r'^\d{4}-\d{2}-\d{2}$');
   Map<String, dynamic> toJson() => {
     'day': day,
     'bookId': bookId,
@@ -109,8 +110,7 @@ class NovelReadingMetricEntry {
     if (raw is! Map ||
         raw.length != 4 ||
         raw['day'] is! String ||
-        !RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(raw['day'] as String) ||
-        DateTime.tryParse(raw['day'] as String) == null ||
+        !_dayPattern.hasMatch(raw['day'] as String) ||
         raw['bookId'] is! String ||
         (raw['bookId'] as String).isEmpty ||
         (raw['bookId'] as String).length > 256 ||
@@ -124,7 +124,8 @@ class NovelReadingMetricEntry {
       throw const FormatException('阅读统计格式无效');
     }
     final date = DateTime.tryParse(raw['day'] as String);
-    if (date == null || novelReadingDay(date) != raw['day']) {
+    if (date == null) throw const FormatException('阅读统计格式无效');
+    if (novelReadingDay(date) != raw['day']) {
       throw const FormatException('阅读统计日期无效');
     }
     return NovelReadingMetricEntry(
@@ -276,6 +277,8 @@ class NovelReadingMetricsStore {
   static const _key = 'novel_foreground_metrics_v1';
   static const _restKey = 'novel_rest_interval_minutes_v1';
   Future<void>? _writes;
+  String? _parsedSource;
+  List<NovelReadingMetricEntry>? _parsedEntries;
   int generation = 0;
 
   Future<T> _serial<T>(Future<T> Function() operation) {
@@ -316,26 +319,49 @@ class NovelReadingMetricsStore {
   Future<List<NovelReadingMetricEntry>> _read() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_key);
-    return _parse(
+    // SharedPreferences is also used by backups and other store instances.
+    // Only reuse a validated snapshot while its underlying value is unchanged.
+    if (_parsedEntries != null && raw == _parsedSource) {
+      return List.of(_parsedEntries!);
+    }
+    final parsed = _parse(
       raw == null ? {'version': 1, 'entries': []} : jsonDecode(raw),
     );
+    _parsedSource = raw;
+    _parsedEntries = List.unmodifiable(parsed);
+    return parsed;
   }
 
-  Future<void> _write(List<NovelReadingMetricEntry> entries) async {
+  Future<void> _write(
+    List<NovelReadingMetricEntry> entries, {
+    Iterable<NovelReadingMetricEntry> changed = const [],
+  }) async {
     final days = entries.map((e) => e.day).toSet().toList()..sort();
+    Set<String>? keptDays;
     if (days.length > 730) {
       final keep = days.sublist(days.length - 730).toSet();
+      keptDays = keep;
       entries.removeWhere((e) => !keep.contains(e.day));
+    }
+    if (entries.length > 50000) {
+      throw const FormatException('阅读统计格式无效');
+    }
+    // Existing entries and portable imports were validated on read. Only
+    // newly recorded values need revalidation after the retention pass.
+    for (final entry in changed) {
+      if (keptDays == null || keptDays.contains(entry.day)) {
+        NovelReadingMetricEntry.parse(entry.toJson());
+      }
     }
     final data = {
       'version': 1,
       'entries': entries.map((e) => e.toJson()).toList(),
     };
-    _parse(data);
     final prefs = await SharedPreferences.getInstance();
     final previous = prefs.getString(_key);
+    final encoded = jsonEncode(data);
     try {
-      if (!await prefs.setString(_key, jsonEncode(data))) {
+      if (!await prefs.setString(_key, encoded)) {
         throw StateError('阅读统计保存失败');
       }
     } catch (_) {
@@ -348,6 +374,8 @@ class NovelReadingMetricsStore {
       } catch (_) {}
       rethrow;
     }
+    _parsedSource = encoded;
+    _parsedEntries = List.unmodifiable(entries);
   }
 
   Future<List<NovelReadingMetricEntry>> entries() =>
@@ -362,6 +390,7 @@ class NovelReadingMetricsStore {
     if (generation != expectedGeneration || durations.isEmpty) return;
     final entries = await _read();
     if (generation != expectedGeneration) return;
+    final changed = <(String, String), NovelReadingMetricEntry>{};
     for (final duration in durations) {
       if (duration.milliseconds <= 0) continue;
       final index = entries.indexWhere(
@@ -374,13 +403,16 @@ class NovelReadingMetricsStore {
         title: title,
         milliseconds: before + duration.milliseconds,
       );
+      changed[(entry.day, entry.bookId)] = entry;
       if (index < 0) {
         entries.add(entry);
       } else {
         entries[index] = entry;
       }
     }
-    if (generation == expectedGeneration) await _write(entries);
+    if (generation == expectedGeneration) {
+      await _write(entries, changed: changed.values);
+    }
   });
 
   Future<void> clear() {
@@ -398,6 +430,8 @@ class NovelReadingMetricsStore {
         rethrow;
       }
       generation++;
+      _parsedSource = null;
+      _parsedEntries = null;
     });
   }
 
@@ -442,11 +476,15 @@ class NovelReadingMetricsStore {
     final incoming = _parse(input);
     return _serial(() async {
       final current = await _read();
+      final indexes = <(String, String), int>{
+        for (var i = 0; i < current.length; i++)
+          (current[i].day, current[i].bookId): i,
+      };
       for (final entry in incoming) {
-        final index = current.indexWhere(
-          (e) => e.day == entry.day && e.bookId == entry.bookId,
-        );
-        if (index < 0) {
+        final key = (entry.day, entry.bookId);
+        final index = indexes[key];
+        if (index == null) {
+          indexes[key] = current.length;
           current.add(entry);
         } else if (entry.milliseconds > current[index].milliseconds) {
           current[index] = entry;

@@ -384,7 +384,7 @@ extension _NovelShelfLibrary on _NovelShelfState {
 
   Widget _buildLibrary() => Scaffold(
     appBar: AppBar(
-      title: ListenableBuilder(
+      title: NovelVisibleListenableBuilder(
         listenable: Listenable.merge([
           ShelfStore.instance.listenable,
           ShelfGroupStore.instance.listenable,
@@ -456,7 +456,7 @@ extension _NovelShelfLibrary on _NovelShelfState {
         ),
       ],
     ),
-    body: ListenableBuilder(
+    body: NovelVisibleListenableBuilder(
       listenable: Listenable.merge([
         ShelfStore.instance.listenable,
         ShelfGroupStore.instance.listenable,

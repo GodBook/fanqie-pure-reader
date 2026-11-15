@@ -160,7 +160,7 @@ extension _ReaderPageProgress on _ReaderPageState {
       }
     }
     _captureScrollProgress(updateTextOffset: true);
-    unawaited(_maybeAiPrefetch());
+    if (!widget.novelOnly) unawaited(_maybeAiPrefetch());
     _saveTimer = Timer(const Duration(milliseconds: 500), () {
       _settleReadTime();
       unawaited(_persistProgress());
@@ -222,7 +222,7 @@ extension _ReaderPageProgress on _ReaderPageState {
     _keepChapterEndAnchor = false;
     _settleReadTime();
     unawaited(_persistProgress());
-    unawaited(_maybeAiPrefetch());
+    if (!widget.novelOnly) unawaited(_maybeAiPrefetch());
     // 分页模式的实际翻页：累加墨水屏刷新计数（覆盖音量键/自动翻页/点按翻页）。
     _recordEinkPageTurn();
   }

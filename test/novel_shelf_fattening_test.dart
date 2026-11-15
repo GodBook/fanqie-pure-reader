@@ -132,6 +132,16 @@ class _DelayedCatalogue extends _SafeCatalogue {
   }
 }
 
+class _CountingCatalogue extends _SafeCatalogue {
+  int reads = 0;
+
+  @override
+  Future<CachedBook?> savedCatalogue(String bookId) {
+    reads++;
+    return super.savedCatalogue(bookId);
+  }
+}
+
 class _DelayedConflictCatalogue extends _SafeCatalogue {
   final entered = Completer<void>();
   final release = Completer<void>();
@@ -575,6 +585,66 @@ void main() {
     expect(value.status, NovelFatteningStatus.available);
     expect(value.remaining, 1);
     expect(cache.catalogs['one']!.chapters.map((c) => c.itemId), ['a', 'b']);
+  });
+
+  test('重复核对复用目录定位，章节和重排后的阅读时间仍生效', () async {
+    final cache = _CountingCatalogue();
+    final writer = NovelShelfManagement(catalogueCache: cache);
+    final reader = NovelShelfManagement(catalogueCache: cache);
+    addTearDown(writer.dispose);
+    addTearDown(reader.dispose);
+    final book = _book('repeated');
+    await writer.rememberFatteningCatalogue(book, _chapters(['a', 'b', 'c']));
+
+    Future<NovelFatteningResult> value(String chapter, int episode, int time) =>
+        _value(
+          reader,
+          book,
+          _history(
+            book.id,
+            chapterId: chapter,
+            episode: episode,
+            count: 3,
+            time: time,
+          ),
+        );
+
+    expect((await value('b', 1, 1)).remaining, 1);
+    expect((await value('b', 1, 2)).remaining, 1);
+    expect(cache.reads, 1);
+    expect((await value('c', 2, 3)).remaining, 0);
+    expect(
+      (await value('b', 0, 4)).status,
+      NovelFatteningStatus.catalogueChanged,
+    );
+    expect(
+      (await value('missing', 1, 5)).status,
+      NovelFatteningStatus.catalogueChanged,
+    );
+    expect(
+      (await value('missing', 1, 6)).status,
+      NovelFatteningStatus.catalogueChanged,
+    );
+    expect(cache.reads, 1);
+
+    final reordered = _chapters(['b', 'a', 'c']);
+    await cache.saveBook(
+      CachedBook(id: book.id, title: book.title, chapters: reordered),
+    );
+    await reader.rememberFatteningCatalogue(book, reordered);
+    final reviewAt = reader.of(book).fattenReviewAt;
+    expect(reviewAt, greaterThan(0));
+    expect(
+      (await value('b', 0, reviewAt - 1)).status,
+      NovelFatteningStatus.catalogueChanged,
+    );
+    final current = await value('b', 0, reviewAt + 1);
+    expect(current.status, NovelFatteningStatus.available);
+    expect(current.remaining, 2);
+    expect(
+      (await value('b', 1, reviewAt + 1)).status,
+      NovelFatteningStatus.catalogueChanged,
+    );
   });
 
   test('一次最多加载两个可见行目录，结束后继续处理排队项', () async {

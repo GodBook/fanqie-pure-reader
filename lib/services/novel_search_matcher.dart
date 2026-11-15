@@ -285,6 +285,7 @@ bool _oneEditSubstring(String query, String target) {
   var previous = List<int>.filled(text.length + 1, 0);
   for (var i = 1; i <= pattern.length; i++) {
     final current = List<int>.filled(text.length + 1, 0)..[0] = i;
+    var withinOneEdit = i <= 1;
     for (var j = 1; j <= text.length; j++) {
       final substitution =
           previous[j - 1] + (pattern[i - 1] == text[j - 1] ? 0 : 1);
@@ -299,7 +300,10 @@ bool _oneEditSubstring(String query, String target) {
         value = math.min(value, previousPrevious[j - 2] + 1);
       }
       current[j] = value;
+      if (value <= 1) withinOneEdit = true;
     }
+    // Every prefix of a one-edit match also has a substring within one edit.
+    if (!withinOneEdit) return false;
     previousPrevious = previous;
     previous = current;
   }

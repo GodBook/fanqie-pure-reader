@@ -309,6 +309,7 @@ extension _ReaderJoinedContent on _ReaderPageState {
     ReaderChapterLayout layout,
     ReaderSelectionScope scope,
   ) {
+    final activeUnderlines = _displayRangeUnderlines;
     final adjacentScopes = <ReaderChapterLayout, ReaderSelectionScope>{};
     final adjacentUnderlines =
         <ReaderChapterLayout, List<ReaderRangeUnderline>>{};
@@ -354,7 +355,7 @@ extension _ReaderJoinedContent on _ReaderPageState {
             ? null
             : _joinedKey.currentState?.chapterAt(index);
         final marks = active
-            ? _displayRangeUnderlines
+            ? activeUnderlines
             : adjacentUnderlines.putIfAbsent(chapterLayout, () {
                 final result = <ReaderRangeUnderline>[];
                 for (final mark

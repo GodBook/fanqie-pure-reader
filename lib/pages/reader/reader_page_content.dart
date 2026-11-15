@@ -190,6 +190,7 @@ extension _ReaderPageContent on _ReaderPageState {
     ReaderSelectionScope scope,
   ) {
     final spec = layout.spec;
+    final rangeUnderlines = _displayRangeUnderlines;
     // The scroll list re-renders the measured span, so the bubble is already in
     // it. Its size still depends on this list's own constraints, and the
     // painter's placeholder was measured at spec.width — the same width, so the
@@ -267,7 +268,7 @@ extension _ReaderPageContent on _ReaderPageState {
                 imageProviderFactory: widget.imageProviderFactory,
                 selectionScope: scope,
                 selection: _paintedSelection,
-                rangeUnderlines: _displayRangeUnderlines,
+                rangeUnderlines: rangeUnderlines,
                 narrationRange: _narrationRange,
                 onParagraphLongPress: (block, position) =>
                     unawaited(_onParagraphLongPress(block, position)),

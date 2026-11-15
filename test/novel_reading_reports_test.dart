@@ -231,6 +231,150 @@ void main() {
     );
   }
 
+  test(
+    'cached metrics notice other writers and reject changed invalid data',
+    () async {
+      final first = NovelReadingMetricsStore();
+      final second = NovelReadingMetricsStore();
+      await first.record(
+        bookId: 'first',
+        title: 'First',
+        durations: [(day: '2024-02-29', milliseconds: 100)],
+        expectedGeneration: first.generation,
+      );
+      final previous = await first.entries();
+      await second.record(
+        bookId: 'second',
+        title: 'Second',
+        durations: [(day: '2024-02-29', milliseconds: 200)],
+        expectedGeneration: second.generation,
+      );
+      expect((await first.entries()).map((e) => e.bookId), ['first', 'second']);
+      expect(previous, hasLength(1));
+      expect(() => previous.clear(), throwsUnsupportedError);
+
+      await first.record(
+        bookId: 'first',
+        title: 'Updated',
+        durations: [(day: '2024-02-29', milliseconds: 50)],
+        expectedGeneration: first.generation,
+      );
+      expect((await second.entries()).first.milliseconds, 150);
+      final prefs = await SharedPreferences.getInstance();
+      final valid = prefs.getString('novel_foreground_metrics_v1')!;
+      await prefs.setString('novel_foreground_metrics_v1', '{invalid');
+      await expectLater(first.entries(), throwsFormatException);
+      await prefs.setString('novel_foreground_metrics_v1', valid);
+      expect((await first.entries()).map((e) => e.milliseconds), [150, 200]);
+
+      await expectLater(
+        first.record(
+          bookId: 'invalid/path',
+          title: 'Invalid',
+          durations: [(day: '2024-02-29', milliseconds: 1)],
+          expectedGeneration: first.generation,
+        ),
+        throwsFormatException,
+      );
+      expect(prefs.getString('novel_foreground_metrics_v1'), valid);
+      expect((await first.entries()).map((e) => e.milliseconds), [150, 200]);
+    },
+  );
+
+  for (final throwsOnWrite in [false, true]) {
+    test(
+      'failed metrics write restores cache and allows retry (throws=$throwsOnWrite)',
+      () async {
+        final original = SharedPreferencesStorePlatform.instance;
+        final platform = _FailingMetricsWrite(throwsOnWrite);
+        SharedPreferences.resetStatic();
+        SharedPreferencesStorePlatform.instance = platform;
+        addTearDown(() {
+          SharedPreferences.resetStatic();
+          SharedPreferencesStorePlatform.instance = original;
+        });
+        final store = NovelReadingMetricsStore();
+        Future<void> record(int ms) => store.record(
+          bookId: 'book',
+          title: 'Book',
+          durations: [(day: '2024-02-29', milliseconds: ms)],
+          expectedGeneration: store.generation,
+        );
+        await record(100);
+        final before = jsonEncode(await store.exportPortable());
+        platform.failNext = true;
+        await expectLater(record(50), throwsStateError);
+        expect(jsonEncode(await store.exportPortable()), before);
+        SharedPreferences.resetStatic();
+        expect(jsonEncode(await store.exportPortable()), before);
+        await record(50);
+        SharedPreferences.resetStatic();
+        expect((await store.entries()).single.milliseconds, 150);
+      },
+    );
+  }
+
+  test(
+    'metrics retention validates only entries that survive pruning',
+    () async {
+      final store = NovelReadingMetricsStore();
+      final start = DateTime(2020, 1, 1);
+      String day(int index) =>
+          novelReadingDay(start.add(Duration(days: index)));
+      await store.mergePortable({
+        'version': 1,
+        'entries': [
+          for (var i = 0; i < 731; i++)
+            _entry(day(i), 'book', 'Book', 1).toJson(),
+        ],
+      });
+      expect(await store.entries(), hasLength(730));
+      await store.record(
+        bookId: 'invalid/path',
+        title: 'Pruned',
+        durations: [(day: day(0), milliseconds: 1)],
+        expectedGeneration: store.generation,
+      );
+      final before = jsonEncode(await store.exportPortable());
+      expect((await store.entries()).first.day, day(1));
+      await expectLater(
+        store.record(
+          bookId: 'invalid/path',
+          title: 'Retained',
+          durations: [(day: day(730), milliseconds: 1)],
+          expectedGeneration: store.generation,
+        ),
+        throwsFormatException,
+      );
+      expect(jsonEncode(await store.exportPortable()), before);
+    },
+  );
+
+  test(
+    'large metrics merge preserves order, maxima and equal-value titles',
+    () async {
+      final store = NovelReadingMetricsStore();
+      Map<String, dynamic> backup(int start, int end, String title, int ms) => {
+        'version': 1,
+        'entries': [
+          for (var i = start; i < end; i++)
+            _entry('2024-02-29', 'book-$i', title, ms).toJson(),
+        ],
+      };
+      await store.mergePortable(backup(0, 1000, 'Original', 100));
+      await store.mergePortable(backup(500, 1500, 'Larger', 200));
+      await store.mergePortable(backup(750, 1250, 'Equal', 200));
+      final entries = await store.entries();
+      expect(entries, hasLength(1500));
+      expect(entries.first.bookId, 'book-0');
+      expect(entries.last.bookId, 'book-1499');
+      expect(entries[499].title, 'Original');
+      expect(entries[500].title, 'Larger');
+      expect(entries[750].title, 'Larger');
+      expect(entries[750].milliseconds, 200);
+    },
+  );
+
   for (final size in const [Size(320, 740), Size(800, 375)]) {
     for (final dark in [false, true]) {
       testWidgets(
@@ -324,6 +468,24 @@ class _FailingMetricsRemove extends InMemorySharedPreferencesStore {
     if (!fail) return super.remove(key);
     await super.remove(key);
     if (throwsOnRemove) throw StateError('simulated remove failure');
+    return false;
+  }
+}
+
+class _FailingMetricsWrite extends InMemorySharedPreferencesStore {
+  _FailingMetricsWrite(this.throwsOnWrite) : super.empty();
+
+  final bool throwsOnWrite;
+  bool failNext = false;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (!failNext || !key.endsWith('novel_foreground_metrics_v1')) {
+      return super.setValue(valueType, key, value);
+    }
+    failNext = false;
+    await super.setValue(valueType, key, value);
+    if (throwsOnWrite) throw StateError('simulated write failure');
     return false;
   }
 }

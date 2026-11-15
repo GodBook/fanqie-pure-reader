@@ -5,26 +5,26 @@ extension _ReaderPageSelection on _ReaderPageState {
   List<ReaderRangeUnderline> get _displayRangeUnderlines {
     final layout = _chapterLayout;
     if (layout == null) return _rangeUnderlines;
-    final marks = <ReaderRangeUnderline>[
-      for (final mark in _rangeUnderlines)
-        if (layout.displayOffsetForSource(
-              mark.end,
-              bias: TextBoundaryBias.end,
-            ) >
-            layout.displayOffsetForSource(mark.start))
-          ReaderRangeUnderline(
-            bookId: mark.bookId,
-            chapterId: mark.chapterId,
-            start: layout.displayOffsetForSource(mark.start),
-            end: layout.displayOffsetForSource(
-              mark.end,
-              bias: TextBoundaryBias.end,
-            ),
-            text: mark.text,
-            createdAt: mark.createdAt,
-            dashed: mark.dashed,
-          ),
-    ];
+    final marks = <ReaderRangeUnderline>[];
+    for (final mark in _rangeUnderlines) {
+      final start = layout.displayOffsetForSource(mark.start);
+      final end = layout.displayOffsetForSource(
+        mark.end,
+        bias: TextBoundaryBias.end,
+      );
+      if (end <= start) continue;
+      marks.add(
+        ReaderRangeUnderline(
+          bookId: mark.bookId,
+          chapterId: mark.chapterId,
+          start: start,
+          end: end,
+          text: mark.text,
+          createdAt: mark.createdAt,
+          dashed: mark.dashed,
+        ),
+      );
+    }
     // AI changes are display-only marks, not user underlines. They live in
     // final display coordinates and never enter the underline store.
     final markStyle = AiReadingController.instance.settings

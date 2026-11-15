@@ -125,8 +125,12 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
   double _pendingCorrection = 0;
   bool _refreshing = false;
   bool _refreshRequested = false;
+  List<int>? _orderedIndices;
 
-  List<int> get _indices => _chapters.keys.toList()..sort();
+  // The chapter window changes only when a neighbour is added or evicted;
+  // position queries can happen several times for every scroll frame.
+  List<int> get _indices =>
+      _orderedIndices ??= (_chapters.keys.toList()..sort());
   JoinedReaderChapter? chapterAt(int index) => _chapters[index];
   int get generation => _generation;
 
@@ -217,12 +221,14 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
     final catalogueChanged =
         !listEquals(oldCatalogue, widget.catalogueIds) ||
         !listEquals(_catalogueVersionSnapshot, widget.catalogueVersions);
-    _catalogueSnapshot = widget.catalogueIds == null
-        ? null
-        : List.of(widget.catalogueIds!);
-    _catalogueVersionSnapshot = widget.catalogueVersions == null
-        ? null
-        : List.of(widget.catalogueVersions!);
+    if (catalogueChanged) {
+      _catalogueSnapshot = widget.catalogueIds == null
+          ? null
+          : List.of(widget.catalogueIds!);
+      _catalogueVersionSnapshot = widget.catalogueVersions == null
+          ? null
+          : List.of(widget.catalogueVersions!);
+    }
     if (oldWidget.chapter.layout.spec != spec ||
         oldWidget.showParagraphBubbles != widget.showParagraphBubbles ||
         catalogueChanged ||
@@ -235,6 +241,7 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
       _errors.clear();
       _pendingCorrection = 0;
       _chapters.clear();
+      _orderedIndices = null;
       _chapters[widget.index] = widget.chapter;
       final beforeWasCurrent =
           before != null &&
@@ -263,6 +270,7 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
       // or applying an AI result to only that chapter must not change the
       // geometry of neighbors already on screen.
       final oldCurrent = _chapters[widget.index];
+      if (oldCurrent == null) _orderedIndices = null;
       _chapters[widget.index] = widget.chapter;
       if (before != null && _chapters.containsKey(before.index)) {
         final layoutChanged =
@@ -455,17 +463,19 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
   }
 
   Future<void> _load(int index) async {
-    final active = position?.index ?? widget.index;
-    final needsMoreText =
-        widget.controller.hasClients &&
-        widget.controller.position.extentAfter <
-            widget.controller.position.viewportDimension * 2;
     if (index < 0 ||
         index >= widget.chapterCount ||
-        (index < active - 2 || index > active + 2 && !needsMoreText) ||
         _chapters.containsKey(index) ||
         _pending.contains(index) ||
         _errors.contains(index)) {
+      return;
+    }
+    final active = position?.index ?? widget.index;
+    if (index < active - 2 ||
+        (index > active + 2 &&
+            !(widget.controller.hasClients &&
+                widget.controller.position.extentAfter <
+                    widget.controller.position.viewportDimension * 2))) {
       return;
     }
     final generation = _generation;
@@ -479,6 +489,7 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
       setState(() {
         _pending.remove(index);
         _chapters[index] = chapter;
+        _orderedIndices = null;
         // Keep two neighbours plus enough short chapters to fill the viewport.
         if (before != null) {
           final end =
@@ -495,6 +506,7 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
           for (final i in remove) {
             _chapters.remove(i);
           }
+          if (remove.isNotEmpty) _orderedIndices = null;
         }
       });
       final delta = before == null ? 0 : chapterStart(before.index) - oldStart;

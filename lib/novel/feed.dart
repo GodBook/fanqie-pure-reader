@@ -330,6 +330,7 @@ class _NovelFeedState extends State<NovelFeed> {
   bool _firstFrameReported = false;
   bool _showScrollTop = false;
   Listenable? _historyChanges;
+  final _localChanges = ValueNotifier<int>(0);
   final _visits = <int, _NovelFeedVisit>{};
   bool get _production =>
       widget.pageLoader == null && widget.categoryLoader == null;
@@ -585,7 +586,8 @@ class _NovelFeedState extends State<NovelFeed> {
         (_filters.hideShelf ||
             _filters.hideHistory ||
             NovelPersonalRecommendationsStore.instance.enabled)) {
-      setState(() => _order = []);
+      _order = [];
+      _localChanges.value++;
     }
   }
 
@@ -644,6 +646,7 @@ class _NovelFeedState extends State<NovelFeed> {
     _request?.cancel();
     _generation++;
     _scroll.dispose();
+    _localChanges.dispose();
     super.dispose();
   }
 
@@ -885,7 +888,12 @@ class _NovelFeedState extends State<NovelFeed> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => NovelVisibleListenableBuilder(
+    listenable: _localChanges,
+    builder: (context, _) => _buildFeed(context),
+  );
+
+  Widget _buildFeed(BuildContext context) {
     final visible = _visible;
     if (!_firstFrameReported && visible.isNotEmpty) {
       _firstFrameReported = true;
@@ -2038,44 +2046,68 @@ class _NovelSearchState extends State<NovelSearch> {
       shelfIds: _resultFilters.hideShelf ? _novelShelfIds() : const {},
       historyIds: _resultFilters.hideHistory ? _novelHistoryIds() : const {},
     );
-    final exact = selected
-        .where(
-          (b) =>
-              b.title.trim() == _query ||
-              b.author.trim() == _query ||
-              b.id == (novelShareBookId(_query) ?? _query),
-        )
-        .toList();
-    final related = selected.where((b) => !exact.contains(b)).toList();
-    final rows = <Widget>[
-      if (_localMatchIds.isNotEmpty)
-        const ListTile(
-          key: ValueKey('novel-local-search-scope'),
-          title: Text('包含本机模糊 / 拼音匹配'),
-          subtitle: Text('匹配书架、阅读记录及已浏览书目；未浏览的作品仍由在线搜索查询'),
-        ),
-      if (exact.isNotEmpty) const ListTile(title: Text('精确匹配')),
-      for (final b in exact) _BookRow(b),
-      if (related.isNotEmpty)
-        ListTile(title: Text(exact.isEmpty ? '相近结果 · 暂无完全匹配' : '相近结果')),
-      for (final b in related) _BookRow(b),
-      if (selected.isEmpty)
-        const Padding(
-          padding: EdgeInsets.all(24),
-          child: Text('已加载结果不符合筛选，可放宽条件或加载更多。'),
-        ),
-      _BottomLoader(
-        loading: _loading,
-        hasMore: _hasMore,
-        error: _error,
-        onMore: () => _search(more: true),
-      ),
-    ];
+    final exact = <MediaItem>[];
+    final related = <MediaItem>[];
+    final queryId = novelShareBookId(_query) ?? _query;
+    for (final book in selected) {
+      if (book.title.trim() == _query ||
+          book.author.trim() == _query ||
+          book.id == queryId) {
+        exact.add(book);
+      } else {
+        related.add(book);
+      }
+    }
+    final showLocalNotice = _localMatchIds.isNotEmpty;
     return ListView.builder(
       controller: _scroll,
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      itemCount: rows.length,
-      itemBuilder: (_, index) => rows[index],
+      itemCount:
+          (showLocalNotice ? 1 : 0) +
+          (exact.isEmpty ? 0 : exact.length + 1) +
+          (related.isEmpty ? 0 : related.length + 1) +
+          (selected.isEmpty ? 1 : 0) +
+          1,
+      itemBuilder: (_, index) {
+        if (showLocalNotice) {
+          if (index == 0) {
+            return const ListTile(
+              key: ValueKey('novel-local-search-scope'),
+              title: Text('包含本机模糊 / 拼音匹配'),
+              subtitle: Text('匹配书架、阅读记录及已浏览书目；未浏览的作品仍由在线搜索查询'),
+            );
+          }
+          index--;
+        }
+        if (exact.isNotEmpty) {
+          if (index == 0) return const ListTile(title: Text('精确匹配'));
+          index--;
+          if (index < exact.length) return _BookRow(exact[index]);
+          index -= exact.length;
+        }
+        if (related.isNotEmpty) {
+          if (index == 0) {
+            return ListTile(
+              title: Text(exact.isEmpty ? '相近结果 · 暂无完全匹配' : '相近结果'),
+            );
+          }
+          index--;
+          if (index < related.length) return _BookRow(related[index]);
+          index -= related.length;
+        }
+        if (selected.isEmpty && index == 0) {
+          return const Padding(
+            padding: EdgeInsets.all(24),
+            child: Text('已加载结果不符合筛选，可放宽条件或加载更多。'),
+          );
+        }
+        return _BottomLoader(
+          loading: _loading,
+          hasMore: _hasMore,
+          error: _error,
+          onMore: () => _search(more: true),
+        );
+      },
     );
   }
 }

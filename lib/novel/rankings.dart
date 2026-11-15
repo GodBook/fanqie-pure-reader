@@ -248,19 +248,21 @@ class _NovelRankingsState extends State<NovelRankings> {
               fetchedAt: fetchedAt,
             );
             _rememberRankScore(updated, fallbackTime: fetchedAt);
+            final firstPage = _firstPage;
+            final matchingFirstPage = firstPage == null
+                ? const <RankEntry>{}
+                : _novelEntries(
+                    firstPage.entries.where((entry) => entry.id == id),
+                  ).toSet();
             var firstPageChanged = false;
             setState(() {
-              _entries = List.of(_entries)..[index] = updated;
-              final firstPage = _firstPage;
-              if (firstPage != null &&
-                  _novelEntries(
-                    firstPage.entries,
-                  ).any((entry) => entry.id == id)) {
+              _entries[index] = updated;
+              if (firstPage != null && matchingFirstPage.isNotEmpty) {
                 firstPageChanged = true;
                 _firstPage = RankBoard(
                   entries: [
                     for (final entry in firstPage.entries)
-                      if (entry.id == id && _novelEntries([entry]).isNotEmpty)
+                      if (matchingFirstPage.contains(entry))
                         entry.withScore(score, fetchedAt: fetchedAt)
                       else
                         entry,
