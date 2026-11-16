@@ -49,13 +49,20 @@ extension _ReaderPageNovelTime on _ReaderPageState {
       unawaited(_flushNovelMetrics());
     }
     if (active) {
+      if (_novelTimeTimer == null) _scheduleNovelAiVisibleCapture();
       _novelTimeTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
         _syncNovelForeground();
+        // Retry a failed encrypted write even while the same page stays open.
+        // flush coalesces concurrent writes and does no I/O without pending data.
+        unawaited(_novelAiReadScope.flush());
         unawaited(_flushNovelMetrics());
       });
     } else {
       _novelTimeTimer?.cancel();
       _novelTimeTimer = null;
+      _novelAiVisibleTimer?.cancel();
+      _novelAiVisibleTimer = null;
+      unawaited(_novelAiReadScope.flush());
     }
   }
 

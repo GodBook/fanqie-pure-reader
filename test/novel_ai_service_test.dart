@@ -263,9 +263,9 @@ void main() {
     );
     var sent = captured.single;
     expect(sent['stream'], isFalse);
-    expect(sent['max_tokens'], 1024);
+    expect(sent['max_tokens'], 3072);
     var messages = sent['messages'] as List;
-    expect(messages.first['content'], contains('不知道'));
+    expect(messages.first['content'], contains('未读内容'));
     expect(messages.last['content'], contains('测试小说'));
     expect(messages.last['content'], contains('连载中'));
     expect(messages.last['content'], contains('"当前章序号":1'));
@@ -295,9 +295,22 @@ void main() {
     expect(messages.length, lessThanOrEqualTo(8));
     expect(messages.where((m) => m['role'] == 'system'), hasLength(1));
     expect(messages.last['content'], contains('前一章'));
-    expect(messages.last['content'], contains('[已截断]'));
+    final evidenceData =
+        jsonDecode((messages.last['content'] as String).split('\n')[1])
+            as Map<String, dynamic>;
+    expect((evidenceData['当前章节已读片段'] as String).length, 3500);
+    expect(
+      ((evidenceData['已读原文证据'] as List).single as Map)['正文片段'],
+      '摘' * 1800,
+    );
     expect(messages.last['content'], isNot(contains('当前章序号')));
-    expect((messages.last['content'] as String).length, lessThan(6000));
+    final sentText = messages.last['content'] as String;
+    final clueLine = sentText.split('不是原文证据：\n')[1].split('\n').first;
+    final clues = (jsonDecode(clueLine) as List).cast<String>();
+    expect(clues.join().runes.length, 1200);
+    // The existing 5,300-rune body budget plus separately bounded question
+    // clues and metadata remain bounded together.
+    expect(sentText.length, lessThan(7600));
   });
 
   test(
@@ -371,6 +384,176 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(leaked, isFalse);
   });
+
+  test(
+    'prepared evidence matches the sent excerpts and omits future chapters',
+    () async {
+      const book = NovelAiBookContext(
+        bookId: 'same-title-a',
+        title: '同名小说',
+        description: '简介包含之后才发生的结局',
+        chapterIndex: 4,
+        chapterCount: 80,
+        currentText: '读过的当前段落',
+        scopeDescription: '仅第1章、当前已显示的片段',
+        readChapterCount: 2,
+        availableChapterCount: 2,
+        excerpts: [
+          NovelAiExcerpt(
+            chapterId: 'first',
+            chapterIndex: 0,
+            chapterTitle: '第一章',
+            sourceStart: 12,
+            text: '陈舟把铜钥匙交给沈宁，让她打开旧水塔。',
+          ),
+          NovelAiExcerpt(
+            chapterId: 'unread',
+            chapterIndex: 20,
+            chapterTitle: '未读章',
+            text: 'FUTURE_PLOT_SENTINEL',
+          ),
+        ],
+      );
+      const settings = NovelAiSettings(enabled: true, includeChapter: true);
+      final client = NovelAiClient();
+      final prepared = client.prepareBook(
+        book: book,
+        settings: settings,
+        question: '陈舟把钥匙交给了谁？',
+      );
+      expect(prepared.description, isEmpty);
+      expect(prepared.excerpts.single.chapterId, 'first');
+      expect(prepared.excerpts.single.sourceStart, 12);
+      expect(
+        prepared.excerpts.single.sourceEnd,
+        12 + prepared.excerpts.single.text.length,
+      );
+      expect(
+        client
+            .prepareBook(
+              book: prepared,
+              settings: settings,
+              question: '陈舟把钥匙交给了谁？',
+            )
+            .excerpts
+            .single
+            .text,
+        prepared.excerpts.single.text,
+      );
+      final about = client.prepareBook(
+        book: book,
+        settings: settings,
+        question: '这本书讲什么？',
+      );
+      expect(about.description, contains('简介'));
+      final noBody = client.prepareBook(
+        book: book,
+        settings: settings.copyWith(includeChapter: false),
+        question: '陈舟是谁？',
+      );
+      expect(noBody.currentText, isEmpty);
+      expect(noBody.excerpts, isEmpty);
+
+      Map<String, dynamic>? captured;
+      final server = await _server((request) async {
+        captured =
+            jsonDecode(await utf8.decoder.bind(request).join())
+                as Map<String, dynamic>;
+        request.response.write(_response('陈舟把钥匙交给沈宁。[第1章]'));
+        await request.response.close();
+      });
+      await client.ask(
+        settings: settings.copyWith(baseUrl: 'http://127.0.0.1:${server.port}'),
+        apiKey: _key,
+        book: prepared,
+        question: '陈舟把钥匙交给了谁？',
+      );
+      final payload = (captured!['messages'] as List).last['content'] as String;
+      expect(payload, contains(prepared.excerpts.single.text));
+      expect(payload, isNot(contains('FUTURE_PLOT_SENTINEL')));
+      expect(payload, isNot(contains(book.description)));
+      expect(payload, contains('仅第1章、当前已显示的片段'));
+    },
+  );
+
+  test('invalid entries do not crowd out valid bounded evidence', () {
+    final book = NovelAiBookContext(
+      bookId: 'book',
+      title: '书名',
+      chapterIndex: 2,
+      excerpts: [
+        for (var i = 0; i < 10; i++)
+          NovelAiExcerpt(chapterTitle: '后章', chapterIndex: 10 + i, text: '未读'),
+        const NovelAiExcerpt(chapterTitle: '空白', text: '  '),
+        const NovelAiExcerpt(
+          chapterTitle: '合法',
+          sourceStart: 8,
+          sourceEnd: 10,
+          text: '已读未读秘密',
+        ),
+        const NovelAiExcerpt(
+          chapterTitle: '边界',
+          sourceStart: 0,
+          sourceEnd: 2,
+          text: '甲😀未读',
+        ),
+        const NovelAiExcerpt(chapterTitle: '无效', sourceStart: -1, text: '错误'),
+      ],
+    );
+    const settings = NovelAiSettings(enabled: true, includeChapter: true);
+    final client = NovelAiClient();
+    final prepared = client.prepareBook(
+      book: book,
+      settings: settings,
+      question: '谁拿了钥匙？',
+    );
+    expect(prepared.excerpts.map((e) => e.text), ['已读', '甲']);
+    expect(prepared.excerpts.map((e) => e.sourceEnd), [10, 1]);
+    final again = client.prepareBook(
+      book: prepared,
+      settings: settings,
+      question: '谁拿了钥匙？',
+    );
+    expect(again.excerpts.map((e) => e.text), ['已读', '甲']);
+  });
+
+  test(
+    'long answers do not crowd the named question out of follow-up clues',
+    () async {
+      String? captured;
+      final server = await _server((request) async {
+        final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+        captured = (body['messages'] as List).last['content'] as String;
+        request.response.write(_response('为了让行人避潮。[第3章]'));
+        await request.response.close();
+      });
+      await NovelAiClient().ask(
+        settings: NovelAiSettings(
+          enabled: true,
+          includeChapter: true,
+          baseUrl: 'http://127.0.0.1:${server.port}',
+        ),
+        apiKey: _key,
+        book: _book,
+        question: '他为什么这么做？',
+        history: [
+          const NovelAiMessage(role: 'user', content: '沈檐拿到青铜钥匙后做了什么？'),
+          NovelAiMessage(role: 'assistant', content: '长回答' * 1500),
+          const NovelAiMessage(role: 'user', content: '然后呢？'),
+          NovelAiMessage(role: 'assistant', content: '更长回答' * 1500),
+          const NovelAiMessage(role: 'user', content: '为什么呢？'),
+          NovelAiMessage(role: 'assistant', content: '最近回答' * 1500),
+        ],
+      );
+      expect(captured, contains('沈檐拿到青铜钥匙后做了什么？'));
+      expect(captured, contains('不是原文证据'));
+      expect(captured, endsWith('读者问题：\n他为什么这么做？'));
+      final clueLine = captured!.split('不是原文证据：\n')[1].split('\n').first;
+      final clues = (jsonDecode(clueLine) as List).cast<String>();
+      expect(clues.join(), isNot(contains('长回答')));
+      expect(clues.join().runes.length, lessThanOrEqualTo(1200));
+    },
+  );
 
   test('errors never include provider body, secret, or URL', () async {
     for (final status in [400, 401, 402, 403, 429, 500]) {

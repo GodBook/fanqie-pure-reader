@@ -8,6 +8,9 @@ mixin _ReaderPageFields on State<ReaderPage> {
   bool _novelAiHidden = false;
   bool _openingNovelAi = false;
   int _novelAiSession = 0;
+  Timer? _novelAiVisibleTimer;
+  ReaderChapterLayout? _novelAiRevisionLayout;
+  String? _novelAiDisplayRevision;
   bool _offlineOnlineEnabled = false;
   final _joinedKey = GlobalKey<ReaderJoinedScrollState>();
   late int _index;

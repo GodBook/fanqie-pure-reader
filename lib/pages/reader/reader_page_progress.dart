@@ -132,6 +132,7 @@ extension _ReaderPageProgress on _ReaderPageState {
         _jumpScroll(restored.scroll);
       }
       _setState(() => _progressReady = true);
+      _scheduleNovelAiVisibleCapture();
       if (_appActive && !_sessionActive) {
         _sessionActive = true;
         _readStart = DateTime.now();
@@ -160,6 +161,7 @@ extension _ReaderPageProgress on _ReaderPageState {
       }
     }
     _captureScrollProgress(updateTextOffset: true);
+    _scheduleNovelAiVisibleCapture();
     if (!widget.novelOnly) unawaited(_maybeAiPrefetch());
     _saveTimer = Timer(const Duration(milliseconds: 500), () {
       _settleReadTime();
@@ -219,6 +221,7 @@ extension _ReaderPageProgress on _ReaderPageState {
       _setState(() => _pageIndex = page);
     }
     if (_progressPreviewActive || _settingsPreviewActive) return;
+    _scheduleNovelAiVisibleCapture();
     _keepChapterEndAnchor = false;
     _settleReadTime();
     unawaited(_persistProgress());
@@ -464,6 +467,7 @@ extension _ReaderPageProgress on _ReaderPageState {
     _changingChapter = true;
     try {
       _settleReadTime();
+      if (widget.novelOnly) unawaited(_novelAiReadScope.flush());
       await _persistProgress();
       if (!mounted) return;
       final target = _resolveChapterTurnTarget(currentId, targetId);
@@ -491,6 +495,7 @@ extension _ReaderPageProgress on _ReaderPageState {
     _changingChapter = true;
     try {
       _settleReadTime();
+      if (widget.novelOnly) unawaited(_novelAiReadScope.flush());
       await _persistProgress();
       if (!mounted) return;
       if (autoTurnGeneration != null &&
@@ -547,6 +552,7 @@ extension _ReaderPageProgress on _ReaderPageState {
         return;
       }
       _settleReadTime();
+      if (widget.novelOnly) unawaited(_novelAiReadScope.flush());
       await _persistProgress();
       if (!mounted || requestGeneration != _readerNavigationGeneration) return;
       final target = _resolveChapterTurnTarget(currentId, targetId);

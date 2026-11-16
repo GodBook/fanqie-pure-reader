@@ -32,6 +32,8 @@ import '../services/chapter_cache_store.dart';
 import '../services/imported_book_store.dart';
 import '../services/novel_cached_search.dart';
 import '../services/novel_ai.dart';
+import '../services/novel_ai_read_scope.dart';
+import '../services/novel_ai_retrieval.dart';
 import '../services/novel_reader_profiles.dart';
 import '../services/novel_reading_metrics.dart';
 import '../services/chapter_request_tracker.dart';
@@ -193,6 +195,7 @@ class ReaderPage extends StatefulWidget {
 
   /// Optional dependencies for isolating the novel AI entry in widget tests.
   final NovelAiStore? novelAiStore;
+  final NovelAiReadScopeStore? novelAiReadScopeStore;
   final Future<BookDetail> Function(String bookId)? novelAiDetailLoader;
   final NovelAiReaderSheetOpener? novelAiSheetOpener;
 
@@ -220,6 +223,7 @@ class ReaderPage extends StatefulWidget {
     this.commentResolver,
     this.shelfItem,
     this.novelAiStore,
+    this.novelAiReadScopeStore,
     this.novelAiDetailLoader,
     this.novelAiSheetOpener,
     this.underlineStore,

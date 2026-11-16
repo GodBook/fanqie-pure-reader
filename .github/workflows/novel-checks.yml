@@ -23,7 +23,7 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter analyze --no-pub
-      - run: flutter test --no-pub test/novel_ai_service_test.dart test/novel_ai_ui_test.dart test/novel_ai_reader_test.dart
+      - run: flutter test --no-pub test/novel_ai_service_test.dart test/novel_ai_read_scope_test.dart test/novel_ai_retrieval_test.dart test/novel_ai_ui_test.dart test/novel_ai_reader_test.dart
       - run: flutter test --no-pub test/novel_user_guide_test.dart
       - run: flutter test --no-pub test/novel_visible_listenable_test.dart test/novel_reader_render_performance_test.dart test/novel_discovery_performance_test.dart test/reader_joined_scroll_anchor_test.dart
       - run: flutter test --no-pub test/novel_rank_cache_first_test.dart test/novel_auto_read_test.dart test/novel_shelf_fattening_test.dart test/novel_shelf_fattening_ui_test.dart test/novel_search_catalog_comparison_test.dart test/novel_reader_initial_catalogue_test.dart

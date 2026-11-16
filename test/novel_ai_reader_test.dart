@@ -10,6 +10,7 @@ import 'package:fqapp/models/chapter_ideas.dart';
 import 'package:fqapp/models/media_item.dart';
 import 'package:fqapp/pages/reader_page.dart';
 import 'package:fqapp/services/novel_ai.dart';
+import 'package:fqapp/services/novel_ai_read_scope.dart';
 import 'package:fqapp/services/secure_key_provider.dart';
 import 'package:fqapp/widgets/reader/reader_paged_view.dart';
 
@@ -51,6 +52,7 @@ void main() {
   const reader = MethodChannel('fqapp/reader');
   const events = MethodChannel('fqapp/reader/events');
   late NovelAiStore store;
+  late NovelAiReadScopeStore readScope;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({
@@ -60,6 +62,9 @@ void main() {
       'reader_show_paragraph_bubbles': false,
     });
     store = NovelAiStore(storage: InMemorySecureKeyStorage());
+    readScope = NovelAiReadScopeStore(
+      keys: SecureKeyProvider(storage: InMemorySecureKeyStorage()),
+    );
     await store.initialize();
     binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     binding.defaultBinaryMessenger.setMockMethodCallHandler(reader, (
@@ -77,7 +82,8 @@ void main() {
     );
   });
 
-  tearDown(() {
+  tearDown(() async {
+    await readScope.flush();
     binding.defaultBinaryMessenger.setMockMethodCallHandler(reader, null);
     binding.defaultBinaryMessenger.setMockMethodCallHandler(events, null);
     store.dispose();
@@ -104,6 +110,7 @@ void main() {
     MemoryChapterCache? cache,
     Future<BookDetail> Function(String)? detail,
     NovelAiReaderSheetOpener? opener,
+    String? chapterText,
     Key? key,
   }) => MaterialApp(
     home: ReaderPage(
@@ -117,9 +124,10 @@ void main() {
       shelfItem: _shelfItem(bookId, status: status),
       readerStore: MemoryReaderStore(),
       chapterCache: cache ?? MemoryChapterCache(),
-      chapterLoader: (chapter) async => _longText(chapter.title),
+      chapterLoader: (chapter) async => chapterText ?? _longText(chapter.title),
       ideasLoader: (_) async => ChapterIdeas.empty,
       novelAiStore: store,
+      novelAiReadScopeStore: readScope,
       novelAiDetailLoader: detail,
       novelAiSheetOpener: opener,
     ),
@@ -244,7 +252,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('打开时暂停自动阅读并携带本书真实资料和之前的匹配摘录', (tester) async {
+  testWidgets('打开时暂停自动阅读，仅使用实际已读片段', (tester) async {
     await enable();
     final cache = MemoryChapterCache();
     cache.content['book-a'] = {
@@ -295,10 +303,19 @@ void main() {
     expect(opened?.chapterTitle, '第二章');
     expect(opened?.chapterIndex, 1);
     expect(opened?.chapterCount, 3);
-    expect(opened?.currentText, _longText(_chapters[1].title));
+    expect(opened?.currentText, contains('林远'));
+    expect(opened?.currentText, isNot(contains('第 79 段')));
     expect(
       resolved?.excerpts.map((value) => value.text).join(),
-      contains('救下小云'),
+      isNot(contains('救下小云')),
+    );
+    expect(
+      resolved?.excerpts.map((value) => value.text).join(),
+      contains('林远'),
+    );
+    expect(
+      resolved?.excerpts.map((value) => value.text).join(),
+      isNot(contains('第 79 段')),
     );
     expect(
       resolved?.excerpts.map((value) => value.text).join(),
@@ -308,6 +325,26 @@ void main() {
       resolved?.excerpts.map((value) => value.text).join(),
       isNot(contains('另一本书')),
     );
+  });
+
+  testWidgets('检索保留相邻已显示段落中的代词身份线索', (tester) async {
+    await enable();
+    NovelAiBookContext? resolved;
+    await mount(
+      tester,
+      readerPage(
+        localOnly: true,
+        chapterText: '羲昭来到渡口。\n\n他原来是渡船修理匠。\n\n${_longText('后续内容')}',
+        opener: (_, _, resolve) async {
+          resolved = await resolve('请介绍羲昭的身份');
+        },
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('reader-novel-ai-float')));
+    await tester.pumpAndSettle();
+    final evidence = resolved!.excerpts.map((e) => e.text).join();
+    expect(evidence, contains('羲昭来到渡口。\n他原来是渡船修理匠。'));
+    expect(evidence, isNot(contains('第 79 段')));
   });
 
   for (final index in [0, 2]) {
@@ -426,20 +463,21 @@ void main() {
       ),
     );
     await tester.tap(find.byKey(const ValueKey('reader-novel-ai-float')));
-    await tester.pump();
-    expect(opened?.currentText, contains('第二章'));
+    await tester.pumpAndSettle();
+    expect(opened?.currentText, contains('林远'));
     await store.save(store.settings.copyWith(includeChapter: true));
     NovelAiBookContext? result;
     resolve!('请介绍一下林远').then((value) => result = value);
     for (var i = 0; i < 20 && result == null; i++) {
       await tester.pump(const Duration(milliseconds: 10));
     }
-    expect(result?.currentText, contains('第二章'));
+    expect(result?.currentText, contains('林远'));
+    expect(result?.excerpts.map((item) => item.text).join(), contains('林远'));
     closed.complete();
     await tester.pumpAndSettle();
   });
 
-  testWidgets('检索最多读取最近二十个已缓存历史章节', (tester) async {
+  testWidgets('未确认的历史缓存不会被检索或读取', (tester) async {
     await enable();
     final cache = _CountingChapterCache();
     final chapters = List.generate(
@@ -466,11 +504,32 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('reader-novel-ai-float')));
     await tester.pumpAndSettle();
     expect(resolved?.excerpts, isNotEmpty);
-    expect(cache.reads.length, lessThanOrEqualTo(20));
-    for (var i = 0; i < 5; i++) {
-      expect(cache.reads, isNot(contains('chapter-$i')));
-    }
-    expect(cache.reads, isNot(contains('chapter-25')));
+    expect(cache.reads, isEmpty);
+    expect(
+      resolved?.excerpts.every((item) => item.chapterId == 'chapter-25'),
+      isTrue,
+    );
+  });
+
+  testWidgets('同一目录列表原地变化后不会打开旧范围问答', (tester) async {
+    await enable();
+    final chapters = List<Chapter>.of(_chapters);
+    final delayed = Completer<BookDetail>();
+    var opened = 0;
+    await mount(
+      tester,
+      readerPage(
+        chapters: chapters,
+        detail: (_) => delayed.future,
+        opener: (_, _, _) async => opened++,
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('reader-novel-ai-float')));
+    await tester.pump();
+    chapters[0] = Chapter(itemId: 'replaced', title: '替换章节', volumeName: '');
+    delayed.complete(const BookDetail(bookId: 'book-a'));
+    await tester.pumpAndSettle();
+    expect(opened, 0);
   });
 
   testWidgets('切换书籍后迟到的详情不能打开旧书问答', (tester) async {

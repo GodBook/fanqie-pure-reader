@@ -274,7 +274,7 @@ class _NovelAiSettingsPageState extends State<NovelAiSettingsPage>
                   Text('使用自己的 AI 服务', style: theme.textTheme.titleLarge),
                   const SizedBox(height: 12),
                   const Text(
-                    '默认关闭。发送问题时，书名、作者、简介、连载状态、当前章节及目录进度等本书资料会发送给你填写的服务，后续问题还会携带本次面板中的近期问答。勾选正文后，会发送当前章节正文片段，并从当前位置之前最近的 20 个已缓存章节（本地书为本地章节）中检索相关内容，最多发送 3 段摘录；检索最多等待 5 秒，不会自动下载。请求由该服务按其规则计费，回答可能不准确。',
+                    '默认关闭。发送问题时，书名、作者、连载状态、当前章节及目录进度等本书资料会发送给你填写的服务，询问作品介绍时才附带简介，后续问题还会携带本次面板中的近期问答。允许正文后，会根据问题检索已确认读过的章节及当前已显示的正文，并向服务发送相关片段；未读章节不参与检索。已读片段在本机加密保存，不进入阅读备份。已读范围或本机正文不完整时，回答可能缺少依据。请求由该服务按其规则计费，回答可能不准确。',
                   ),
                   const SizedBox(height: 16),
                   SwitchListTile.adaptive(
@@ -366,7 +366,7 @@ class _NovelAiSettingsPageState extends State<NovelAiSettingsPage>
                     key: const ValueKey('novel-ai-include-chapter'),
                     contentPadding: EdgeInsets.zero,
                     controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('发送当前正文和相关缓存摘录'),
+                    title: const Text('发送已读正文和相关摘录'),
                     subtitle: const Text('关闭后仍会发送本书资料和问题'),
                     value: _includeChapter,
                     onChanged: active

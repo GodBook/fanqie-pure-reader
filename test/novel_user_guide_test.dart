@@ -88,8 +88,9 @@ void main() {
     await _toggleSection(tester, 'ai');
     expect(_detail('ai', '小说 AI 默认关闭'), findsOneWidget);
     expect(_detail('ai', '正文默认不发送'), findsOneWidget);
-    expect(_detail('ai', '最近的 20 个已缓存章节'), findsOneWidget);
-    expect(_detail('ai', '最多发送 3 段摘录'), findsOneWidget);
+    expect(_detail('ai', '未读章节不会参与检索'), findsOneWidget);
+    expect(_detail('ai', '只有确认全部读过'), findsOneWidget);
+    expect(_detail('ai', '本次发送的章节与片段'), findsOneWidget);
     expect(_detail('ai', '连接测试也可能产生费用'), findsOneWidget);
     await _reach(tester, _detail('ai', '连接测试也可能产生费用'));
     expect(_detail('ai', '连接测试也可能产生费用').hitTestable(), findsOneWidget);
