@@ -88,6 +88,7 @@ void main() {
             '离线下载',
             '备份与恢复阅读数据',
             '管理推荐屏蔽',
+            '使用说明',
             '软件更新',
             '开源许可',
             '关于与问题反馈',
@@ -99,6 +100,13 @@ void main() {
             );
             await tester.pumpAndSettle();
             expect(tester.takeException(), isNull);
+            if (title == '使用说明') {
+              await tester.tap(find.text(title));
+              await tester.pumpAndSettle();
+              expect(find.text('快速开始'), findsOneWidget);
+              await tester.binding.handlePopRoute();
+              await tester.pumpAndSettle();
+            }
           }
           await tester.tap(find.text('关于与问题反馈'));
           await tester.pumpAndSettle();

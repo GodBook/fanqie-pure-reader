@@ -7,10 +7,12 @@ if (Test-Path -LiteralPath $targetRoot) { throw 'Choose a new, empty destination
 if ($targetRoot.StartsWith($sourceRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or $targetRoot -eq $sourceRoot) { throw 'Destination must be separate from the source checkout.' }
 $allowedRoots = @('lib', 'android', 'assets', 'rust', 'native', 'third_party', 'test', 'integration_test', 'test_driver', 'scripts', 'linux', 'windows', 'ios', 'macos', 'web', '.cargo')
 $allowedFiles = @('.gitattributes', '.gitignore', '.metadata', 'LICENSE', 'README.md', 'UPSTREAM_README.md', 'RELEASING.md', 'CHANGELOG.md', 'analysis_options.yaml', 'pubspec.yaml', 'pubspec.lock', 'flutter_rust_bridge.yaml')
+$blockedPathPattern = '(?i)(^docs/|^AGENTS[.]md$|(^|/)([.]git|build|target|[.]dart_tool|[.]gradle|[.]cxx)(/|$)|(^|/)(device_pool[.]json|local[.]properties|keystore[.]properties|key[.]properties|[.]env(?:[.][^/]*)?|cookies?[.](json|txt))$|[.](pem|key|pfx|p12|p8|der|jks|keystore|pepk|hive|db|apk|aab|so|log)$)'
+$privateTextPattern = '(?i)(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|C:\\Users\\(?!Public\b|Default\b)[A-Za-z0-9_-]+\\|adb\s+-s\s+[A-Za-z0-9]{8,})'
 $files = @(& git -C $sourceRoot -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique | Where-Object {
     $root = ($_ -split '/')[0]
     ($root -in $allowedRoots -or $_ -in $allowedFiles -or $_ -eq '.github/workflows/novel-checks.yml') -and
-    $_ -notmatch '(?i)(device_pool\.json$|keystore\.properties$|local\.properties$|\.(p12|jks|keystore|pepk|hive|db|apk|aab|so|log)$|(^|/)(build|target|\.dart_tool|\.gradle|\.cxx)/)'
+    $_ -notmatch $blockedPathPattern
 })
 if ($LASTEXITCODE -ne 0 -or $files.Count -lt 500) { throw 'Source inventory failed.' }
 $blocked = @()
@@ -18,11 +20,12 @@ foreach ($relative in $files) {
     $source = [IO.Path]::GetFullPath((Join-Path $sourceRoot $relative))
     if (-not $source.StartsWith($sourceRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid source path.' }
     $item = Get-Item -LiteralPath $source
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Unexpected source link: $relative" }
     if ($item.Length -gt 50MB) { throw "Oversized source asset: $relative" }
-    if ($item.Extension -in @('.dart', '.kt', '.kts', '.ps1', '.sh', '.json', '.yaml', '.yml', '.toml', '.md', '.xml')) {
-        $content = Get-Content -LiteralPath $source -Raw
-        if ($content -match '(?i)(gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|C:\\Users\\(?!Public\b|Default\b)[A-Za-z0-9_-]+\\|adb\s+-s\s+[A-Za-z0-9]{8,})') { $blocked += $relative }
-    }
+    # Scan every file as bytes mapped one-to-one to characters, including
+    # extensionless files and binary assets that might contain ASCII secrets.
+    $content = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($source))
+    if ($content -match $privateTextPattern) { $blocked += $relative }
 }
 if ($blocked.Count) { throw "Private material found; inspect: $($blocked -join ', ')" }
 New-Item -ItemType Directory -Path $targetRoot | Out-Null

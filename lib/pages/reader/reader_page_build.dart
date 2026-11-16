@@ -113,6 +113,7 @@ extension _ReaderPageBuild on _ReaderPageState {
         child: Theme(
           data: preset.theme(Theme.of(context)),
           child: Scaffold(
+            key: _novelAiAnchorKey,
             resizeToAvoidBottomInset: false,
             backgroundColor: preset.backgroundColor,
             body: Stack(
@@ -375,6 +376,8 @@ extension _ReaderPageBuild on _ReaderPageState {
                     ),
                   ),
                 ),
+                if (widget.novelOnly)
+                  Positioned.fill(child: _buildNovelAiOverlay(windowPadding)),
                 // 墨水屏软件白闪：盖全屏白帧，迫使 EPD 控制器全量刷新。
                 if (_einkFlashVisible)
                   const Positioned.fill(child: ColoredBox(color: Colors.white)),
@@ -519,6 +522,33 @@ extension _ReaderPageBuild on _ReaderPageState {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (widget.novelOnly && _novelAiEnabled)
+              GlassMenuItem(
+                key: const ValueKey('reader-novel-ai-menu'),
+                icon: CupertinoIcons.chat_bubble_text,
+                label: '小说 AI 问答',
+                onPressed: () => Navigator.pop(menu, 'novel-ai'),
+              ),
+            if (widget.novelOnly && _novelAiEnabled)
+              GlassMenuItem(
+                key: const ValueKey('reader-novel-ai-visibility'),
+                icon: _novelAiHidden
+                    ? CupertinoIcons.eye
+                    : CupertinoIcons.eye_slash,
+                label: _novelAiHidden ? '显示 AI 悬浮球' : '隐藏 AI 悬浮球',
+                onPressed: () => Navigator.pop(menu, 'novel-ai-visibility'),
+              ),
+            if (widget.novelOnly && _novelAiEnabled && !_novelAiHidden)
+              GlassMenuItem(
+                key: const ValueKey('reader-novel-ai-move'),
+                icon: CupertinoIcons.arrow_left_right,
+                label:
+                    (_novelAiOffset?.dx ?? double.infinity) <
+                        MediaQuery.sizeOf(context).width / 2
+                    ? 'AI 悬浮球移到右侧'
+                    : 'AI 悬浮球移到左侧',
+                onPressed: () => Navigator.pop(menu, 'novel-ai-move'),
+              ),
             if (widget.novelOnly)
               GlassMenuItem(
                 key: const ValueKey('reader-auto-read-menu'),
@@ -615,6 +645,20 @@ extension _ReaderPageBuild on _ReaderPageState {
     );
     if (!mounted) return;
     switch (action) {
+      case 'novel-ai':
+        await _openNovelAi();
+      case 'novel-ai-visibility':
+        _setState(() => _novelAiHidden = !_novelAiHidden);
+      case 'novel-ai-move':
+        final moveRight =
+            (_novelAiOffset?.dx ?? double.infinity) <
+            MediaQuery.sizeOf(context).width / 2;
+        _setState(() {
+          _novelAiOffset = Offset(
+            moveRight ? double.infinity : 0,
+            _novelAiOffset?.dy ?? MediaQuery.sizeOf(context).height * .55,
+          );
+        });
       case 'auto-read':
         await _showAutoReadPanel();
       case 'toggle-ideas':

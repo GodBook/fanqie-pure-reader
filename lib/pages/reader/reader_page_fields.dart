@@ -3,6 +3,11 @@ part of '../reader_page.dart';
 /// State storage for [ReaderPage]: chapter text, paging layout, selection,
 /// listening and device state.
 mixin _ReaderPageFields on State<ReaderPage> {
+  final _novelAiAnchorKey = GlobalKey();
+  Offset? _novelAiOffset;
+  bool _novelAiHidden = false;
+  bool _openingNovelAi = false;
+  int _novelAiSession = 0;
   bool _offlineOnlineEnabled = false;
   final _joinedKey = GlobalKey<ReaderJoinedScrollState>();
   late int _index;

@@ -34,6 +34,9 @@ import '../services/home_feed_cache.dart';
 import '../services/novel_app_update.dart';
 import '../services/novel_release.dart';
 import '../services/novel_color_theme.dart';
+import '../services/novel_ai.dart';
+import 'ai_settings_page.dart';
+import 'user_guide_page.dart';
 import '../widgets/reader/reader_appearance_sheet.dart';
 import '../widgets/reader/novel_reader_profiles_page.dart';
 import '../widgets/reader/novel_reading_metrics_page.dart';
@@ -125,6 +128,7 @@ class NovelRuntime {
       );
       await AppThemeStyleStore.instance.load();
       await NovelPersonalRecommendationsStore.instance.initialize();
+      await NovelAiStore.instance.initialize();
     } catch (_) {
       _preferences = null;
       rethrow;

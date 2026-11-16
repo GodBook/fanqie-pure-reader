@@ -161,6 +161,23 @@ class _NovelSettingsState extends State<NovelSettings> {
                   ),
                 ),
               ),
+              const _SettingsDivider(),
+              ListenableBuilder(
+                listenable: NovelAiStore.instance,
+                builder: (context, _) => _SettingsLink(
+                  icon: Icons.chat_bubble_outline,
+                  title: 'AI 小说问答',
+                  subtitle: NovelAiStore.instance.settings.enabled
+                      ? '已启用 · 阅读中通过 AI 悬浮球提问'
+                      : '默认关闭 · 自行配置 URL、API Key 与模型',
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => const NovelAiSettingsPage(),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
           _SettingsSection(
@@ -262,6 +279,18 @@ class _NovelSettingsState extends State<NovelSettings> {
           _SettingsSection(
             title: '应用信息',
             children: [
+              _SettingsLink(
+                icon: Icons.menu_book_outlined,
+                title: '使用说明',
+                subtitle: '找书、阅读、下载、备份与 AI 问答指南',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => const NovelUserGuidePage(),
+                  ),
+                ),
+              ),
+              const _SettingsDivider(),
               _SettingsLink(
                 icon: Icons.system_update_outlined,
                 title: '软件更新',

@@ -9,9 +9,11 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../models/book_comment.dart';
+import '../models/book_detail.dart';
 import '../models/chapter_ideas.dart';
 import '../models/audio_extra.dart';
 import '../models/comment_reply.dart';
@@ -29,6 +31,7 @@ import '../services/app_theme.dart';
 import '../services/chapter_cache_store.dart';
 import '../services/imported_book_store.dart';
 import '../services/novel_cached_search.dart';
+import '../services/novel_ai.dart';
 import '../services/novel_reader_profiles.dart';
 import '../services/novel_reading_metrics.dart';
 import '../services/chapter_request_tracker.dart';
@@ -72,6 +75,7 @@ import '../widgets/reader/reader_bookmarks_panel.dart';
 import '../widgets/reader/reader_marks_panel.dart';
 import '../widgets/reader/novel_reader_profiles_page.dart';
 import '../widgets/reader/reader_note_editor_dialog.dart';
+import '../widgets/reader/novel_ai_sheet.dart';
 import '../widgets/reader/reader_chrome.dart';
 import '../widgets/reader/reader_find_panel.dart';
 import '../widgets/reader/reader_controls.dart';
@@ -107,6 +111,7 @@ part 'reader/reader_page_preferences.dart';
 part 'reader/reader_page_navigation.dart';
 part 'reader/reader_page_progress.dart';
 part 'reader/reader_page_novel_time.dart';
+part 'reader/reader_page_novel_ai.dart';
 part 'reader/reader_page_build.dart';
 part 'reader/reader_page_content.dart';
 part 'reader/reader_page_joined_content.dart';
@@ -115,6 +120,13 @@ part 'reader/reader_page_menu_players.dart';
 
 typedef ChapterTextLoader = Future<String> Function(Chapter chapter);
 typedef _LoadedChapter = ({String text, bool fetched});
+
+typedef NovelAiReaderSheetOpener =
+    Future<void> Function(
+      BuildContext context,
+      NovelAiBookContext book,
+      Future<NovelAiBookContext> Function(String question) resolveBook,
+    );
 
 /// Loads a chapter's paragraph ideas (段评).
 typedef ChapterIdeasLoader = Future<ChapterIdeas> Function(String itemId);
@@ -143,7 +155,7 @@ class ReaderPage extends StatefulWidget {
   final int startIndex;
   final bool localOnly;
 
-  /// The dedicated novel app disables media and AI integrations entirely.
+  /// The dedicated novel app disables the legacy media and proofreading UI.
   final bool novelOnly;
   final Future<void> Function()? ensureOnline;
   final Future<void> Function()? onRefreshCatalogue;
@@ -179,6 +191,11 @@ class ReaderPage extends StatefulWidget {
   /// 保留作者/徽标等字段；其他入口省略，按 [bookId]/[title]/[cover] 兜底成小说。
   final MediaItem? shelfItem;
 
+  /// Optional dependencies for isolating the novel AI entry in widget tests.
+  final NovelAiStore? novelAiStore;
+  final Future<BookDetail> Function(String bookId)? novelAiDetailLoader;
+  final NovelAiReaderSheetOpener? novelAiSheetOpener;
+
   const ReaderPage({
     super.key,
     required this.bookId,
@@ -202,6 +219,9 @@ class ReaderPage extends StatefulWidget {
     this.ideasStore,
     this.commentResolver,
     this.shelfItem,
+    this.novelAiStore,
+    this.novelAiDetailLoader,
+    this.novelAiSheetOpener,
     this.underlineStore,
     this.replacementStore,
     this.replacementEngine,
