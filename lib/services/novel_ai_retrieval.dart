@@ -211,11 +211,37 @@ Future<NovelAiRetrievalResult> retrieveNovelAiContext({
   );
   final terms = _queryTerms(question);
   final summaryMode = terms.isEmpty && _summaryQuestion.hasMatch(question);
+  final requestedChapter = _requestedChapterIndex(question);
   final selected = <_Window>[];
   var scannedChapterCount = 0;
   var matchedChapterCount = 0;
 
-  if (summaryMode) {
+  if (requestedChapter != null) {
+    // A named chapter is an explicit location cue. Never substitute another
+    // chapter when that location has no authorized text (including the future).
+    final located = prepared
+        .where((chapter) => chapter.source.index == requestedChapter)
+        .toList(growable: false);
+    final windows = <_Window>[];
+    for (final chapter in located) {
+      for (var start = chapter.start; start < chapter.end; start += 1400) {
+        checkCancelled();
+        final end = math.min(start + 1400, chapter.end);
+        windows.add(_Window(chapter, start, end, 0, (start + end) ~/ 2));
+        if (windows.length % 32 == 0) {
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+    }
+    final count = math.min(windows.length, maxExcerpts);
+    for (var i = 0; i < count; i++) {
+      final index = count == 1
+          ? (RegExp(r'最后|结尾|末尾').hasMatch(question) ? windows.length - 1 : 0)
+          : (i * (windows.length - 1) / (count - 1)).round();
+      selected.add(windows[index]);
+    }
+    scannedChapterCount = located.isEmpty ? 0 : 1;
+  } else if (summaryMode) {
     // Distribute the sample over the complete allowed range rather than the
     // most recent chapters. The result marks unsent text as partial.
     final count = math.min(prepared.length, maxExcerpts);
@@ -505,6 +531,55 @@ int _safeStart(String text, int start) {
 int _lowerAscii(int unit) => unit >= 65 && unit <= 90 ? unit + 32 : unit;
 
 final _summaryQuestion = RegExp(r'总结|梳理|回顾|概括|发生了什么|讲了什么|主要内容|故事脉络|之前经历');
+
+int? _requestedChapterIndex(String question) {
+  final matches = RegExp(
+    r'第\s*([0-9]{1,6}|[零〇一二两三四五六七八九十百千万]{1,12})\s*章',
+  ).allMatches(question).toList();
+  if (matches.length != 1 ||
+      RegExp(r'章\s*(?:至|到|—|–|-|~|～)').hasMatch(question)) {
+    return null;
+  }
+  final raw = matches.single.group(1)!;
+  final decimal = int.tryParse(raw);
+  if (decimal != null) return decimal > 0 ? decimal - 1 : null;
+  const digits = {
+    '零': 0,
+    '〇': 0,
+    '一': 1,
+    '二': 2,
+    '两': 2,
+    '三': 3,
+    '四': 4,
+    '五': 5,
+    '六': 6,
+    '七': 7,
+    '八': 8,
+    '九': 9,
+  };
+  const units = {'十': 10, '百': 100, '千': 1000, '万': 10000};
+  var total = 0;
+  var section = 0;
+  var digit = 0;
+  for (final rune in raw.runes) {
+    final character = String.fromCharCode(rune);
+    if (digits.containsKey(character)) {
+      digit = digits[character]!;
+    } else {
+      final unit = units[character]!;
+      if (unit == 10000) {
+        total += (section + digit) * unit;
+        section = 0;
+      } else {
+        section += (digit == 0 ? 1 : digit) * unit;
+      }
+      digit = 0;
+    }
+  }
+  final number = total + section + digit;
+  return number > 0 ? number - 1 : null;
+}
+
 final _queryNoise = RegExp(
   r'请问|请帮我|帮我|告诉我|说一说|介绍一下|解释一下|分析一下|回答一下|'
   r'已经读过|我看过|看到过|读过的|此前|以前|之前|前面|前文|已读|后来|当前|'

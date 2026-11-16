@@ -274,7 +274,7 @@ class _NovelAiSettingsPageState extends State<NovelAiSettingsPage>
                   Text('使用自己的 AI 服务', style: theme.textTheme.titleLarge),
                   const SizedBox(height: 12),
                   const Text(
-                    '默认关闭。发送问题时，书名、作者、连载状态、当前章节及目录进度等本书资料会发送给你填写的服务，询问作品介绍时才附带简介，后续问题还会携带本次面板中的近期问答。允许正文后，会根据问题检索已确认读过的章节及当前已显示的正文，并向服务发送相关片段；未读章节不参与检索。已读片段在本机加密保存，不进入阅读备份。已读范围或本机正文不完整时，回答可能缺少依据。请求由该服务按其规则计费，回答可能不准确。',
+                    '默认关闭。发送问题时，书名、作者、连载状态、当前章节及目录进度等本书资料会发送给你填写的服务，询问作品介绍时才附带简介，后续问题还会携带本次面板中的近期问答。正文默认不发送；允许正文后，会检索实际显示过的片段，以及你明确补录授权的章节，向服务发送相关片段，范围不超过当前章。单独确认补录后会使用当前网络下载当前章及此前缺失正文，当前章包括尚未显示的部分，可能产生流量费用。已读片段在本机加密保存，不进入阅读备份。范围或本机正文不完整时，回答可能缺少依据。请求由该服务按其规则计费，回答可能不准确。',
                   ),
                   const SizedBox(height: 16),
                   SwitchListTile.adaptive(
@@ -366,8 +366,8 @@ class _NovelAiSettingsPageState extends State<NovelAiSettingsPage>
                     key: const ValueKey('novel-ai-include-chapter'),
                     contentPadding: EdgeInsets.zero,
                     controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('发送已读正文和相关摘录'),
-                    subtitle: const Text('关闭后仍会发送本书资料和问题'),
+                    title: const Text('发送已授权正文和相关摘录'),
+                    subtitle: const Text('补录整章需另行确认；关闭后仍会发送本书资料和问题'),
                     value: _includeChapter,
                     onChanged: active
                         ? (value) =>

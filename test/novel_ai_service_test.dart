@@ -398,6 +398,12 @@ void main() {
         scopeDescription: '仅第1章、当前已显示的片段',
         readChapterCount: 2,
         availableChapterCount: 2,
+        backfillCoverage: NovelAiBackfillCoverage(
+          throughChapterIndex: 4,
+          targetChapterCount: 5,
+          completeChapterCount: 2,
+          incompleteChapterNumbers: [2, 3, 4],
+        ),
         excerpts: [
           NovelAiExcerpt(
             chapterId: 'first',
@@ -473,6 +479,9 @@ void main() {
       expect(payload, isNot(contains('FUTURE_PLOT_SENTINEL')));
       expect(payload, isNot(contains(book.description)));
       expect(payload, contains('仅第1章、当前已显示的片段'));
+      expect(prepared.backfillCoverage?.completeChapterCount, 2);
+      expect(payload, contains('明确补录范围'));
+      expect(payload, contains('"未完成章数":3'));
     },
   );
 

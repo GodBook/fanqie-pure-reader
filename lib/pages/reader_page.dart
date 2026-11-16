@@ -34,6 +34,7 @@ import '../services/novel_cached_search.dart';
 import '../services/novel_ai.dart';
 import '../services/novel_ai_read_scope.dart';
 import '../services/novel_ai_retrieval.dart';
+import '../widgets/reader/novel_ai_glass_ball.dart';
 import '../services/novel_reader_profiles.dart';
 import '../services/novel_reading_metrics.dart';
 import '../services/chapter_request_tracker.dart';

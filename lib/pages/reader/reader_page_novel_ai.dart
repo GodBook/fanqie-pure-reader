@@ -223,20 +223,13 @@ extension _ReaderPageNovelAi on _ReaderPageState {
                       ),
                       child: SizedBox.square(
                         dimension: size,
-                        child: IconButton.filled(
+                        child: NovelAiGlassBall(
                           key: const ValueKey('reader-novel-ai-float'),
-                          tooltip: '小说 AI 问答',
+                          eink: _effectivePreset.isEink,
+                          busy: _openingNovelAi,
                           onPressed: _openingNovelAi
                               ? null
                               : () => unawaited(_openNovelAi()),
-                          icon: _openingNovelAi
-                              ? const SizedBox.square(
-                                  dimension: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(Icons.auto_awesome_outlined),
                         ),
                       ),
                     ),
@@ -278,7 +271,11 @@ extension _ReaderPageNovelAi on _ReaderPageState {
     final inMemoryChapters = Map<String, String>.of(_chapterCache);
     final shelfItem = widget.shelfItem?.id == bookId ? widget.shelfItem : null;
     final cache = _diskCache;
-    final localLoader = widget.localOnly ? widget.chapterLoader : null;
+    final chapterLoader = widget.chapterLoader;
+    final replacementSnapshot = _replacementStore.snapshot;
+    final replacementRevision = NovelAiReadScopeStore.replacementRevision(
+      replacementSnapshot,
+    );
     _setState(() => _openingNovelAi = true);
 
     bool valid() =>
@@ -295,6 +292,7 @@ extension _ReaderPageNovelAi on _ReaderPageState {
         _chapter.version == chapter.version &&
         _index == chapterIndex &&
         _loadGeneration == loadGeneration &&
+        identical(_replacementStore.snapshot, replacementSnapshot) &&
         identical(widget.chapters, catalogue) &&
         widget.chapters.length == chapters.length;
 
@@ -378,23 +376,15 @@ extension _ReaderPageNovelAi on _ReaderPageState {
                   ? detailStatus
                   : shelfItem?.creationStatus ?? -1,
             );
-      final initialScope = await _novelAiReadScope
-          .snapshot(
-            bookId: bookId,
-            catalogue: chapters,
-            currentChapterId: chapter.itemId,
-            currentRevision: visible.revision,
-            currentVisibleEnd: visible.visibleEnd,
-            cancelled: () => !valid(),
-          )
-          .timeout(
-            const Duration(seconds: 4),
-            onTimeout: () => NovelAiReadScopeSnapshot(
-              bookId: bookId,
-              chapters: const [],
-              persistentStorageAvailable: false,
-            ),
-          );
+      final initialScope = await _novelAiReadScope.snapshot(
+        bookId: bookId,
+        catalogue: chapters,
+        currentChapterId: chapter.itemId,
+        currentRevision: visible.revision,
+        currentVisibleEnd: visible.visibleEnd,
+        replacementRevision: replacementRevision,
+        cancelled: () => !valid(),
+      );
       if (!sameCatalogue() || !_routeCurrent) return;
       var visibleText = '';
       for (final item in initialScope.chapters) {
@@ -416,6 +406,23 @@ extension _ReaderPageNovelAi on _ReaderPageState {
           }
         }
       }
+      String describeScope(NovelAiReadScopeSnapshot scope) {
+        final coverage = scope.backfillCoverage;
+        final storage = scope.persistentStorageAvailable
+            ? ''
+            : '加密保存暂不可用，本次资料仅在内存中保留。';
+        if (coverage != null) {
+          return '已确认第 1 章至第 ${coverage.throughChapterIndex + 1} 章整章范围；'
+              '完整正文 ${coverage.completeChapterCount}/${coverage.targetChapterCount} 章，'
+              '未完成 ${coverage.incompleteChapterNumbers.length} 章。'
+              '按问题检索全部可用正文或抽样，每次发送有限的已授权片段及当前已显示正文；不检索当前章之后。'
+              '$storage';
+        }
+        return '已收录 ${scope.chapters.length} 章的已读片段；'
+            '${scope.confirmedMissingChapterIds.length} 章确认已读但缺少完整正文。'
+            '可确认补录，自动取得当前整章及前文。$storage';
+      }
+
       final base = NovelAiBookContext(
         bookId: bookId,
         title: widget.title,
@@ -429,14 +436,39 @@ extension _ReaderPageNovelAi on _ReaderPageState {
         readChapterCount: initialScope.chapters.length,
         availableChapterCount: initialScope.chapters.length,
         missingChapterCount: initialScope.confirmedMissingChapterIds.length,
-        scopeDescription: initialScope.persistentStorageAvailable
-            ? '已收录 ${initialScope.chapters.length} 章的已读片段；'
-                  '${initialScope.confirmedMissingChapterIds.length} 章确认已读但本地缺失。'
-            : '仅使用实际显示过或明确补录的正文；加密记录暂时不可用。',
-        coverageIncomplete: true,
+        scopeDescription: describeScope(initialScope),
+        coverageIncomplete: initialScope.backfillCoverage?.complete != true,
+        backfillCoverage: initialScope.backfillCoverage,
       );
       var queryGeneration = 0;
-      var confirmedMissing = <String>{};
+      Future<NovelAiBookContext> refreshReadScope(
+        NovelAiCancellation cancellation,
+        void Function(String) onProgress,
+      ) async {
+        onProgress('正在读取已保存的补录范围…');
+        final scope = await _novelAiReadScope.snapshot(
+          bookId: bookId,
+          catalogue: chapters,
+          currentChapterId: chapter.itemId,
+          currentRevision: visible.revision,
+          currentVisibleEnd: visible.visibleEnd,
+          replacementRevision: replacementRevision,
+          cancelled: () => !valid() || cancellation.isCancelled,
+        );
+        if (cancellation.isCancelled || !sameCatalogue()) {
+          throw const NovelAiException('阅读状态已变化，请重新打开小说 AI');
+        }
+        return base.copyWith(
+          excerpts: const [],
+          readChapterCount: scope.chapters.length,
+          availableChapterCount: scope.chapters.length,
+          missingChapterCount: scope.confirmedMissingChapterIds.length,
+          coverageIncomplete: scope.backfillCoverage?.complete != true,
+          backfillCoverage: scope.backfillCoverage,
+          scopeDescription: describeScope(scope),
+        );
+      }
+
       Future<NovelAiBookContext> resolveContext(
         String question,
         NovelAiCancellation cancellation,
@@ -451,13 +483,14 @@ extension _ReaderPageNovelAi on _ReaderPageState {
         if (cancelled() || !sameCatalogue()) {
           throw const NovelAiException('阅读状态已变化，请重新打开小说 AI');
         }
-        onProgress('正在读取已授权的本地片段…');
+        onProgress('正在读取本书已授权的全部正文范围…');
         final scope = await _novelAiReadScope.snapshot(
           bookId: bookId,
           catalogue: chapters,
           currentChapterId: chapter.itemId,
           currentRevision: visible.revision,
           currentVisibleEnd: visible.visibleEnd,
+          replacementRevision: replacementRevision,
           cancelled: cancelled,
         );
         if (cancelled()) throw const NovelAiException('请求已取消');
@@ -479,7 +512,7 @@ extension _ReaderPageNovelAi on _ReaderPageState {
             );
           }
         }
-        onProgress('正在检索已读片段…');
+        onProgress('正在检索 ${scope.chapters.length} 章的已授权正文…');
         final retrieved = await retrieveNovelAiContext(
           bookId: bookId,
           allowedChapterIds: sources.map((source) => source.id).toSet(),
@@ -502,26 +535,6 @@ extension _ReaderPageNovelAi on _ReaderPageState {
               text: excerpt.text,
             ),
         ];
-        if (excerpts.isEmpty) {
-          // Pronouns and general questions may have no literal query match.
-          // Send independently delimited authorized fragments as fallback.
-          for (final item in scope.chapters.reversed) {
-            for (final segment in item.segments.reversed) {
-              if (excerpts.length >= 10) break;
-              excerpts.add(
-                NovelAiExcerpt(
-                  chapterId: item.chapterId,
-                  chapterIndex: item.index,
-                  chapterTitle: item.title,
-                  sourceStart: segment.start,
-                  sourceEnd: segment.end,
-                  text: segment.text,
-                ),
-              );
-            }
-            if (excerpts.length >= 10) break;
-          }
-        }
         if (cancelled() || !sameCatalogue()) {
           throw const NovelAiException('阅读状态已变化，请重新打开小说 AI');
         }
@@ -530,10 +543,9 @@ extension _ReaderPageNovelAi on _ReaderPageState {
           readChapterCount: scope.chapters.length,
           availableChapterCount: retrieved.availableChapterCount,
           missingChapterCount: scope.confirmedMissingChapterIds.length,
-          coverageIncomplete: true,
-          scopeDescription: scope.persistentStorageAvailable
-              ? '已收录 ${scope.chapters.length} 章的已读片段；范围可能不完整。'
-              : '已读记录暂不能安全持久化，本次仅使用可取得的本机片段。',
+          coverageIncomplete: scope.backfillCoverage?.complete != true,
+          backfillCoverage: scope.backfillCoverage,
+          scopeDescription: describeScope(scope),
         );
       }
 
@@ -551,50 +563,140 @@ extension _ReaderPageNovelAi on _ReaderPageState {
         if (cancelled() || !sameCatalogue()) {
           throw const NovelAiException('请求已取消');
         }
-        Set<String> cachedIds = const {};
-        if (localLoader == null) {
-          try {
-            cachedIds = await cache
-                .cachedChapterIds(bookId)
-                .timeout(const Duration(seconds: 2));
-          } catch (_) {
-            cachedIds = const {};
-          }
+        final book = CachedBook(
+          id: bookId,
+          title: widget.title,
+          author: author,
+          cover: shelfItem?.cover ?? '',
+          chapters: chapters,
+        );
+        onProgress('正在准备第 1 章至第 ${chapterIndex + 1} 章的正文…');
+        if (cache is ConditionalChapterCatalogue) {
+          await (cache as ConditionalChapterCatalogue)
+              .preserveOrCreateCatalogue(book);
+        } else if (await cache.savedCatalogue(bookId) == null) {
+          await cache.saveBook(book);
         }
-        var checked = 0;
-        final result = await _novelAiReadScope.confirmBefore(
+        if (cancelled() || !sameCatalogue()) {
+          throw const NovelAiException('请求已取消');
+        }
+        final observedCacheText = <String, String?>{};
+        final result = await _novelAiReadScope.confirmThrough(
           bookId: bookId,
           catalogue: chapters,
           currentChapterId: chapter.itemId,
+          cancellation: cancellation,
           cancelled: cancelled,
+          replacementRevision: replacementRevision,
+          onProgress: (processed, total) =>
+              onProgress('正在补录当前章及前文 $processed/$total 章；缺失正文会自动下载…'),
           loadLocal: (item) async {
-            checked++;
-            onProgress('正在检查已确认的前文 $checked/$chapterIndex…');
-            final existing = inMemoryChapters[item.itemId];
-            if (existing != null) return existing;
-            if (localLoader != null) {
-              return localLoader(item).timeout(const Duration(seconds: 2));
-            }
-            if (!cachedIds.contains(item.itemId)) return null;
             final read = cache is ChapterCacheStore
                 ? cache.peek(bookId: bookId, chapterId: item.itemId)
                 : cache.read(bookId: bookId, chapterId: item.itemId);
-            return read.timeout(const Duration(seconds: 2));
+            final saved = await read;
+            observedCacheText[item.itemId] = saved;
+            if (_unverifiedChapterVersions.containsKey(item.itemId)) {
+              return null;
+            }
+            return saved ?? inMemoryChapters[item.itemId];
+          },
+          download: (item, token) async {
+            if (cancelled()) throw const NovelAiException('请求已取消');
+            if (_isImportedBook && chapterLoader == null) {
+              throw const NovelAiException('本地书籍文件不可用，请从原文件重新导入');
+            }
+            final request = BackendRequest();
+            token.addCancelListener(request.cancel);
+            try {
+              Future<String> load() async {
+                if (chapterLoader != null) return chapterLoader(item);
+                await widget.ensureOnline?.call();
+                if (cancelled()) throw const NovelAiException('请求已取消');
+                return (await ApiClient.instance.withCancellation(
+                  request,
+                  () => ApiClient.instance.chapterContent(item.itemId),
+                )).toCacheText();
+              }
+
+              return await Future.any<String>([
+                load(),
+                request.whenCancelled.then<String>(
+                  (_) => throw const NovelAiException('请求已取消'),
+                ),
+              ]).timeout(
+                const Duration(seconds: 35),
+                onTimeout: () {
+                  request.cancel();
+                  throw const NovelAiException('本章读取超时，可再次补录');
+                },
+              );
+            } finally {
+              token.removeCancelListener(request.cancel);
+              request.cancel();
+            }
+          },
+          saveLocal: (item, text) async {
+            try {
+              if (cache is ChapterCacheStore) {
+                await cache.retainForNovelAi(
+                  bookId: bookId,
+                  chapterId: item.itemId,
+                  title: item.title,
+                  text: text,
+                  expectedText: observedCacheText[item.itemId],
+                );
+              } else {
+                await cache.write(
+                  bookId: bookId,
+                  chapterId: item.itemId,
+                  title: item.title,
+                  text: text,
+                  pinned: true,
+                );
+              }
+            } finally {
+              observedCacheText.remove(item.itemId);
+            }
+          },
+          displayBodyBlocks: (item, source) async {
+            final transformCancellation = TextReplacementCancellation();
+            cancellation.addCancelListener(transformCancellation.cancel);
+            try {
+              final replaced =
+                  await (widget.replacementEngine ??
+                          TextReplacementEngine.instance)
+                      .transform(
+                        source: source,
+                        chapterTitle: item.title,
+                        snapshot: replacementSnapshot,
+                        cancellation: transformCancellation,
+                      );
+              if (replaced.error != null) {
+                throw const NovelAiException('本章正文替换未完成，可重试补录');
+              }
+              final indices = {
+                for (var i = 0; i < source.blocks.length; i++)
+                  source.blocks[i]: i,
+              };
+              return [
+                for (final block
+                    in source.withoutLeadingTitle(item.title).blocks)
+                  replaced.content.blocks[indices[block]!],
+              ];
+            } finally {
+              cancellation.removeCancelListener(transformCancellation.cancel);
+            }
           },
         );
         if (cancelled() || result.cancelled || !sameCatalogue()) {
           throw const NovelAiException('已取消，已完成的补录会保留');
         }
-        confirmedMissing = Set.of(result.missingChapterIds);
-        final context = await resolveContext('', cancellation, onProgress);
-        return context.copyWith(
-          missingChapterCount: confirmedMissing.length,
-          scopeDescription:
-              '已补录 ${result.recordedCount} 章；'
-              '${confirmedMissing.length} 章本地正文缺失。'
-              '${result.persisted ? '' : '加密保存失败，本次仅在内存中保留。'}',
-          coverageIncomplete: true,
-        );
+        final updated = await refreshReadScope(cancellation, onProgress);
+        if (!result.persisted) {
+          throw const NovelAiException('补录因加密保存失败而停止，已保存的章节会保留，可检查空间后重试');
+        }
+        return updated;
       }
 
       final anchorContext = _novelAiAnchorKey.currentContext;
@@ -610,6 +712,7 @@ extension _ReaderPageNovelAi on _ReaderPageState {
           store: store,
           resolveContext: resolveContext,
           confirmReadBefore: confirmReadBefore,
+          refreshReadScope: refreshReadScope,
         );
       }
     } catch (_) {

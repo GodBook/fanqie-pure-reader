@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../novel/ai_settings_page.dart';
 import '../../services/novel_ai.dart';
 
+/// [refreshReadScope] reads the saved scope without downloading or querying AI.
 Future<void> showNovelAiSheet(
   BuildContext context, {
   required NovelAiBookContext book,
@@ -13,6 +16,7 @@ Future<void> showNovelAiSheet(
   Future<NovelAiBookContext> Function(String question)? resolveBook,
   NovelAiContextResolver? resolveContext,
   NovelAiReadConfirmation? confirmReadBefore,
+  NovelAiReadConfirmation? refreshReadScope,
 }) {
   final effectiveReaderTheme = readerTheme ?? Theme.of(context);
   return showModalBottomSheet<void>(
@@ -42,6 +46,7 @@ Future<void> showNovelAiSheet(
                 resolveBook: resolveBook,
                 resolveContext: resolveContext,
                 confirmReadBefore: confirmReadBefore,
+                refreshReadScope: refreshReadScope,
               ),
             ),
           ),
@@ -59,6 +64,7 @@ class _NovelAiSheet extends StatefulWidget {
     required this.resolveBook,
     required this.resolveContext,
     required this.confirmReadBefore,
+    required this.refreshReadScope,
   });
 
   final NovelAiBookContext book;
@@ -67,6 +73,7 @@ class _NovelAiSheet extends StatefulWidget {
   final Future<NovelAiBookContext> Function(String question)? resolveBook;
   final NovelAiContextResolver? resolveContext;
   final NovelAiReadConfirmation? confirmReadBefore;
+  final NovelAiReadConfirmation? refreshReadScope;
 
   @override
   State<_NovelAiSheet> createState() => _NovelAiSheetState();
@@ -87,6 +94,8 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
   bool _sending = false;
   bool _enablingChapter = false;
   bool _updatingScope = false;
+  bool _refreshingScope = false;
+  bool _scopeNeedsRefresh = false;
   String? _pendingQuestion;
   String? _error;
   String? _progress;
@@ -94,10 +103,16 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
   NovelAiCancellation? _cancellation;
   int _requestRevision = 0;
   int _settingsRevision = 0;
+  int _lifecycleRevision = 0;
+  bool _appResumed = true;
+  NovelAiBackfillCoverage? _formattedCoverage;
+  String _formattedRanges = '';
 
   @override
   void initState() {
     super.initState();
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _appResumed = lifecycle == null || lifecycle == AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
     widget.store.addListener(_settingsChanged);
     _readSettings();
@@ -156,7 +171,9 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
         _progress = null;
         _error = message;
         if (wasUpdatingScope) {
-          _notice = '已完成的补录会保留；当前范围待刷新，下次提问将重新读取。';
+          _scopeNeedsRefresh = true;
+          _refreshingScope = true;
+          _notice = '已完成的补录会保留，正在等待补录停止并刷新范围。';
         }
       });
     }
@@ -164,7 +181,29 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed) _stop('应用已离开前台，请手动重试');
+    _lifecycleRevision++;
+    _appResumed = state == AppLifecycleState.resumed;
+    if (!_appResumed) {
+      _stop('应用已离开前台，请手动重试');
+    } else {
+      _retryScopeIfPossible();
+    }
+  }
+
+  void _retryScopeIfPossible() {
+    if (!mounted ||
+        !_appResumed ||
+        !_scopeNeedsRefresh ||
+        _updatingScope ||
+        _refreshingScope ||
+        _sending ||
+        _enablingChapter ||
+        !widget.store.settings.includeChapter ||
+        widget.refreshReadScope == null) {
+      return;
+    }
+    setState(() => _refreshingScope = true);
+    unawaited(_refreshScopeAfterChange());
   }
 
   Future<void> _openSettings() async {
@@ -181,6 +220,7 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
   Future<void> _enableChapter() async {
     if (_sending ||
         _updatingScope ||
+        _refreshingScope ||
         _enablingChapter ||
         widget.store.settings.includeChapter) {
       return;
@@ -191,7 +231,7 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
         scrollable: true,
         title: const Text('启用已读原文检索？'),
         content: const Text(
-          '发送问题时，可将当前已显示的正文片段和相关已读章节摘录发送给你配置的 AI 服务，不检索未读章节。服务可能收费。设置改变会清空本次会话，你可以随时在服务设置中关闭。',
+          '发送问题时，可将实际显示过的正文及明确补录授权章节的相关摘录发送给你配置的 AI 服务，未授权的章节不参与检索。服务可能收费。设置改变会清空本次会话，你可以随时在服务设置中关闭。',
         ),
         actions: [
           TextButton(
@@ -226,6 +266,7 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
     if (confirmReadBefore == null ||
         _sending ||
         _updatingScope ||
+        _refreshingScope ||
         _enablingChapter) {
       return;
     }
@@ -233,9 +274,9 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
       context: context,
       builder: (dialog) => AlertDialog(
         scrollable: true,
-        title: const Text('补录已读前文？'),
+        title: const Text('补录当前章及前文？'),
         content: const Text(
-          '这会将当前章节之前的章节标记为已读。之后提问时，它们的可用正文可能被检索并发送给 AI 服务。请仅在你确实读过这些章节时确认；缺失正文不会因此自动补齐。',
+          '确认后会自动下载第 1 章至当前章缺失的正文，并将成功取得的整章加入可检索范围。当前章包括尚未显示的部分；当前章之后的章节不会纳入。下载会使用当前网络，可能产生流量费用。后续提问时，相关片段可能发送给所选 AI 服务，服务可能收费。停止后已完成的内容会保留，未完成部分可再次补录。请确认你愿意授权上述范围。',
         ),
         actions: [
           TextButton(
@@ -247,17 +288,26 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
             key: const ValueKey('novel-ai-confirm-read-before'),
             onPressed: () => Navigator.pop(dialog, true),
             style: FilledButton.styleFrom(minimumSize: const Size(48, 48)),
-            child: const Text('确认已读'),
+            child: const Text('确认补录'),
           ),
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true ||
+        !mounted ||
+        !widget.store.settings.includeChapter ||
+        _sending ||
+        _updatingScope ||
+        _refreshingScope ||
+        _enablingChapter) {
+      return;
+    }
     final revision = ++_requestRevision;
     final cancellation = NovelAiCancellation();
     _cancellation = cancellation;
     setState(() {
       _updatingScope = true;
+      _scopeNeedsRefresh = true;
       _progress = '正在补录已读范围…';
       _error = null;
       _notice = null;
@@ -284,14 +334,18 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
       setState(() {
         _book = updated;
         _updatingScope = false;
+        _scopeNeedsRefresh = false;
         _progress = null;
         _cancellation = null;
-        _notice = '已补录已读前文，可继续提问。';
+        _notice = updated.backfillCoverage?.complete == true
+            ? '当前章及前文已补录，可继续提问。'
+            : '补录范围已更新，未完成的章节可再次补录。';
       });
     } on NovelAiException catch (error) {
       if (!mounted || revision != _requestRevision) return;
       setState(() {
         _updatingScope = false;
+        _refreshingScope = true;
         _progress = null;
         _cancellation = null;
         _error = error.message;
@@ -300,10 +354,68 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
       if (!mounted || revision != _requestRevision) return;
       setState(() {
         _updatingScope = false;
+        _refreshingScope = true;
         _progress = null;
         _cancellation = null;
         _error = '补录未完成，请重试；现有阅读记录会保留';
       });
+    } finally {
+      // Wait for the cancelled operation to finish before reading the saved
+      // scope, so an in-flight write cannot make the refreshed result stale.
+      if (mounted && _refreshingScope) await _refreshScopeAfterChange();
+    }
+  }
+
+  Future<void> _refreshScopeAfterChange() async {
+    if (!_appResumed) {
+      if (mounted) {
+        setState(() {
+          _refreshingScope = false;
+          _notice = '已完成的补录会保留，回到前台后会刷新范围。';
+        });
+      }
+      return;
+    }
+    final refresh = widget.refreshReadScope;
+    if (refresh == null) {
+      if (mounted) {
+        setState(() {
+          _refreshingScope = false;
+          _notice = '已完成的补录会保留；范围暂未刷新。';
+        });
+      }
+      return;
+    }
+    final lifecycleRevision = _lifecycleRevision;
+    try {
+      final updated = await refresh(NovelAiCancellation(), (_) {});
+      if (!mounted || !_refreshingScope) return;
+      // The reader may abort its snapshot when it leaves the foreground. Do
+      // not accept that result after a rapid background/foreground change.
+      if (lifecycleRevision != _lifecycleRevision || !_appResumed) {
+        setState(() => _refreshingScope = false);
+        _retryScopeIfPossible();
+        return;
+      }
+      if (updated.bookId != widget.book.bookId) {
+        throw const NovelAiException('当前书籍已变化，请关闭后重新打开');
+      }
+      setState(() {
+        _book = updated;
+        _scopeNeedsRefresh = false;
+        _refreshingScope = false;
+        _notice = '已刷新补录范围；未完成的章节可再次补录。';
+      });
+    } catch (_) {
+      if (mounted && _refreshingScope) {
+        setState(() {
+          _refreshingScope = false;
+          _notice = '已完成的补录会保留；范围暂未刷新。';
+        });
+        if (lifecycleRevision != _lifecycleRevision) {
+          _retryScopeIfPossible();
+        }
+      }
     }
   }
 
@@ -415,6 +527,7 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
   Future<void> _send(String raw, {bool retry = false}) async {
     if (_sending ||
         _updatingScope ||
+        _refreshingScope ||
         _enablingChapter ||
         _loadingSettings ||
         _settingsFailed ||
@@ -486,6 +599,10 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
       );
       setState(() {
         _book = book;
+        if (settings.includeChapter &&
+            (widget.resolveContext != null || widget.resolveBook != null)) {
+          _scopeNeedsRefresh = false;
+        }
         _progress = '正在等待 AI 回答…';
       });
       final answer = await widget.client.ask(
@@ -581,11 +698,52 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
     super.dispose();
   }
 
+  String _formatChapterRanges(List<int> numbers) {
+    final sorted = numbers.where((number) => number > 0).toSet().toList()
+      ..sort();
+    if (sorted.isEmpty) return '';
+    final ranges = <String>[];
+    var start = sorted.first;
+    var end = start;
+    for (final number in sorted.skip(1)) {
+      if (number == end + 1) {
+        end = number;
+      } else {
+        ranges.add(start == end ? '$start' : '$start—$end');
+        start = number;
+        end = number;
+      }
+    }
+    ranges.add(start == end ? '$start' : '$start—$end');
+    final shown = ranges.take(12).join('、');
+    return ranges.length > 12 ? '第 $shown 等章（仅显示前 12 段）' : '第 $shown 章';
+  }
+
+  String _rangesFor(NovelAiBackfillCoverage coverage) {
+    if (!identical(_formattedCoverage, coverage)) {
+      _formattedCoverage = coverage;
+      _formattedRanges = _formatChapterRanges(
+        coverage.incompleteChapterNumbers,
+      );
+    }
+    return _formattedRanges;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final configured = widget.store.settings.enabled && _hasKey;
     final chapter = _book.chapterTitle.trim();
+    // Avoid sorting a large old missing list for every download-progress event.
+    final coverage = !_scopeNeedsRefresh && widget.store.settings.includeChapter
+        ? _book.backfillCoverage
+        : null;
+    final incompleteCount = coverage == null
+        ? 0
+        : coverage.targetChapterCount > coverage.completeChapterCount
+        ? coverage.targetChapterCount - coverage.completeChapterCount
+        : coverage.incompleteChapterNumbers.length;
+    final incompleteRanges = coverage == null ? '' : _rangesFor(coverage);
     return PopScope(
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) _stop('面板已关闭', update: false);
@@ -630,22 +788,50 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
               Text(
                 !widget.store.settings.includeChapter
                     ? '发送范围：本书资料和问题；不发送正文或章节摘录。'
-                    : '发送范围：本书资料、当前已显示正文和已确认读过章节的相关摘录；未读章节不参与检索。',
+                    : '发送范围：本书资料、实际显示过的正文及明确补录授权章节的相关摘录；检索不超过当前章节。',
               ),
               if (widget.store.settings.includeChapter &&
+                  _scopeNeedsRefresh) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _updatingScope
+                      ? '正在更新补录范围，原有统计暂不显示。'
+                      : '补录范围待刷新；已完成的内容会保留。可重新补录或关闭后重新打开。',
+                  key: const ValueKey('novel-ai-scope-stale'),
+                ),
+              ],
+              if (widget.store.settings.includeChapter &&
+                  !_scopeNeedsRefresh &&
                   _book.scopeDescription.trim().isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Text(_book.scopeDescription),
               ],
               if (widget.store.settings.includeChapter &&
+                  !_scopeNeedsRefresh &&
+                  coverage != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  '已确认补录第 1 章至第 ${coverage.throughChapterIndex + 1} 章：目标 ${coverage.targetChapterCount} 章，完整正文 ${coverage.completeChapterCount} 章，未完成 $incompleteCount 章。',
+                  key: const ValueKey('novel-ai-backfill-coverage'),
+                ),
+                if (incompleteRanges.isNotEmpty)
+                  Text('未完成章节：$incompleteRanges。'),
+                if (!coverage.complete) const Text('可再次点“补录当前章及前文”重试未完成的章节。'),
+                if (!coverage.persisted) const Text('补录范围未能持久保存，关闭后可能需要重新补录。'),
+              ] else if (widget.store.settings.includeChapter &&
+                  !_scopeNeedsRefresh &&
+                  widget.confirmReadBefore != null) ...[
+                const SizedBox(height: 8),
+                const Text('尚未确认整章补录范围；已显示过的片段仍可参与检索。'),
+              ],
+              if (widget.store.settings.includeChapter &&
+                  !_scopeNeedsRefresh &&
                   _book.coverageIncomplete) ...[
                 const SizedBox(height: 8),
                 Text(
-                  '已读范围或本机正文不完整：已收录 ${_book.readChapterCount} 章的已读片段，可检索 ${_book.availableChapterCount} 章，另有 ${_book.missingChapterCount} 章确认已读但缺少完整正文。回答可能缺少依据。',
+                  '已读范围或本机资料可能不完整：已收录 ${_book.readChapterCount} 章的已读片段，可检索 ${_book.availableChapterCount} 章。回答可能缺少依据。',
                   key: const ValueKey('novel-ai-coverage-warning'),
                 ),
-                if (_book.missingChapterCount > 0)
-                  const Text('可回看对应章节补充已显示片段，或下载缺失正文后再次点“补录已读前文”。'),
               ],
               if (widget.store.settings.includeChapter &&
                   widget.confirmReadBefore != null)
@@ -653,14 +839,18 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
                   alignment: Alignment.centerLeft,
                   child: TextButton.icon(
                     key: const ValueKey('novel-ai-read-before'),
-                    onPressed: _sending || _updatingScope || _enablingChapter
+                    onPressed:
+                        _sending ||
+                            _updatingScope ||
+                            _refreshingScope ||
+                            _enablingChapter
                         ? null
                         : _confirmReadBefore,
                     style: TextButton.styleFrom(
                       minimumSize: const Size(48, 48),
                     ),
                     icon: const Icon(Icons.library_add_check_outlined),
-                    label: const Text('补录已读前文'),
+                    label: const Text('补录当前章及前文'),
                   ),
                 ),
               const SizedBox(height: 4),
@@ -699,7 +889,11 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
                     alignment: Alignment.centerLeft,
                     child: OutlinedButton.icon(
                       key: const ValueKey('novel-ai-enable-chapter'),
-                      onPressed: _sending || _updatingScope || _enablingChapter
+                      onPressed:
+                          _sending ||
+                              _updatingScope ||
+                              _refreshingScope ||
+                              _enablingChapter
                           ? null
                           : _enableChapter,
                       style: OutlinedButton.styleFrom(
@@ -733,35 +927,42 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
                   _message(
                     NovelAiMessage(role: 'user', content: _pendingQuestion!),
                   ),
-                if (_sending || _updatingScope) ...[
+                if (_sending || _updatingScope || _refreshingScope) ...[
                   const LinearProgressIndicator(),
-                  if (_progress != null)
+                  if (_progress != null || _refreshingScope)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        _progress!,
-                        key: const ValueKey('novel-ai-progress'),
+                      child: Semantics(
+                        liveRegion: true,
+                        child: Text(
+                          _refreshingScope ? '正在停止补录并刷新范围…' : _progress!,
+                          key: const ValueKey('novel-ai-progress'),
+                        ),
                       ),
                     ),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
-                      key: const ValueKey('novel-ai-stop'),
-                      onPressed: () => _stop('已停止，可手动重试'),
-                      style: TextButton.styleFrom(
-                        minimumSize: const Size(48, 48),
+                  if (!_refreshingScope)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        key: const ValueKey('novel-ai-stop'),
+                        onPressed: () => _stop('已停止，可手动重试'),
+                        style: TextButton.styleFrom(
+                          minimumSize: const Size(48, 48),
+                        ),
+                        icon: const Icon(Icons.stop_circle_outlined),
+                        label: const Text('停止'),
                       ),
-                      icon: const Icon(Icons.stop_circle_outlined),
-                      label: const Text('停止'),
                     ),
-                  ),
                 ],
                 if (_error != null) ...[
                   Text(
                     _error!,
                     style: TextStyle(color: theme.colorScheme.error),
                   ),
-                  if (!_sending && !_updatingScope && _pendingQuestion != null)
+                  if (!_sending &&
+                      !_updatingScope &&
+                      !_refreshingScope &&
+                      _pendingQuestion != null)
                     Align(
                       alignment: Alignment.centerLeft,
                       child: TextButton.icon(
@@ -798,7 +999,11 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
                     key: const ValueKey('novel-ai-send'),
-                    onPressed: _sending || _updatingScope || _enablingChapter
+                    onPressed:
+                        _sending ||
+                            _updatingScope ||
+                            _refreshingScope ||
+                            _enablingChapter
                         ? null
                         : () => _send(_question.text),
                     style: FilledButton.styleFrom(
@@ -890,7 +1095,7 @@ class _NovelAiSheetState extends State<_NovelAiSheet>
                 const SizedBox(height: 12),
                 if (current.trim().isNotEmpty) ...[
                   Text(
-                    '当前章已显示正文 · ${reference.chapterTitle}',
+                    '当前章参考片段 · ${reference.chapterTitle}',
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                   const SizedBox(height: 4),

@@ -95,9 +95,11 @@ class _Client extends NovelAiClient {
 Widget _sheetApp(
   _Store store,
   _Client client, {
+  NovelAiBookContext book = _book,
   Future<NovelAiBookContext> Function(String question)? resolveBook,
   NovelAiContextResolver? resolveContext,
   NovelAiReadConfirmation? confirmReadBefore,
+  NovelAiReadConfirmation? refreshReadScope,
   ThemeData? readerTheme,
   bool dark = false,
   double textScale = 1,
@@ -119,13 +121,14 @@ Widget _sheetApp(
       builder: (context) => TextButton(
         onPressed: () => showNovelAiSheet(
           context,
-          book: _book,
+          book: book,
           store: store,
           client: client,
           readerTheme: readerTheme,
           resolveBook: resolveBook,
           resolveContext: resolveContext,
           confirmReadBefore: confirmReadBefore,
+          refreshReadScope: refreshReadScope,
         ),
         child: const Text('打开面板'),
       ),
@@ -362,7 +365,7 @@ void main() {
     expect(tester.getSize(enable).height, greaterThanOrEqualTo(48));
     await tester.tap(enable);
     await tester.pumpAndSettle();
-    expect(find.textContaining('不检索未读章节'), findsOneWidget);
+    expect(find.textContaining('未授权的章节不参与检索'), findsOneWidget);
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(store.settings.includeChapter, isFalse);
@@ -762,7 +765,7 @@ void main() {
     await _top(tester);
     final warning = find.byKey(const ValueKey('novel-ai-coverage-warning'));
     await _reach(tester, warning);
-    expect(find.textContaining('1 章确认已读但缺少完整正文'), findsOneWidget);
+    expect(find.textContaining('已收录 3 章的已读片段'), findsOneWidget);
     await _reach(tester, find.text('本次资料不完整，可能遗漏相关内容。'));
     expect(find.text('本次范围：已确认读过的章节可能不连续'), findsOneWidget);
     final references = find.byKey(const ValueKey('novel-ai-references'));
@@ -828,7 +831,7 @@ void main() {
     expect(find.text('重试回答'), findsOneWidget);
   });
 
-  testWidgets('确认前不会补录已读前文，确认后刷新范围', (tester) async {
+  testWidgets('确认前不会补录，部分完成后可再次确认重试', (tester) async {
     final store = _Store(
       initial: const NovelAiSettings(enabled: true, includeChapter: true),
       key: 'fake-key',
@@ -843,7 +846,20 @@ void main() {
           confirmations++;
           expect(cancellation.isCancelled, isFalse);
           progress('正在补录');
-          return _book.copyWith(scopeDescription: '前文章节已确认');
+          return _book.copyWith(
+            backfillCoverage: confirmations == 1
+                ? const NovelAiBackfillCoverage(
+                    throughChapterIndex: 3,
+                    targetChapterCount: 4,
+                    completeChapterCount: 2,
+                    incompleteChapterNumbers: [2, 4],
+                  )
+                : const NovelAiBackfillCoverage(
+                    throughChapterIndex: 3,
+                    targetChapterCount: 4,
+                    completeChapterCount: 4,
+                  ),
+          );
         },
       ),
     );
@@ -853,7 +869,11 @@ void main() {
     expect(tester.getSize(entry).height, greaterThanOrEqualTo(48));
     await tester.tap(entry);
     await tester.pumpAndSettle();
-    expect(find.textContaining('请仅在你确实读过'), findsOneWidget);
+    expect(find.textContaining('当前章包括尚未显示的部分'), findsOneWidget);
+    expect(find.textContaining('当前章之后的章节不会纳入'), findsOneWidget);
+    expect(find.textContaining('可能产生流量费用'), findsOneWidget);
+    expect(find.textContaining('服务可能收费'), findsOneWidget);
+    expect(find.textContaining('停止后已完成的内容会保留'), findsOneWidget);
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(confirmations, 0);
@@ -866,9 +886,405 @@ void main() {
     await tester.pumpAndSettle();
     expect(confirmations, 1);
     await _top(tester);
-    expect(find.text('前文章节已确认'), findsOneWidget);
+    expect(find.textContaining('完整正文 2 章，未完成 2 章'), findsOneWidget);
+    expect(find.textContaining('第 2、4 章'), findsOneWidget);
+    expect(find.textContaining('重试未完成的章节'), findsOneWidget);
+    expect(client.calls, 0);
+
+    await _reach(tester, entry);
+    await tester.tap(entry);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('novel-ai-confirm-read-before')),
+    );
+    await tester.pumpAndSettle();
+    await _top(tester);
+    expect(confirmations, 2);
+    expect(find.textContaining('完整正文 4 章，未完成 0 章'), findsOneWidget);
+    expect(find.textContaining('重试未完成的章节'), findsNothing);
     expect(client.calls, 0);
   });
+
+  testWidgets('停止后等待补录结束再只读刷新真实范围', (tester) async {
+    final store = _Store(
+      initial: const NovelAiSettings(enabled: true, includeChapter: true),
+      key: 'fake-key',
+    );
+    final pending = Completer<NovelAiBookContext>();
+    final client = _Client((_, _, _) async => '不应请求');
+    NovelAiCancellation? token;
+    var refreshes = 0;
+    final original = _book.copyWith(
+      backfillCoverage: const NovelAiBackfillCoverage(
+        throughChapterIndex: 3,
+        targetChapterCount: 4,
+        completeChapterCount: 1,
+        incompleteChapterNumbers: [2, 3, 4],
+      ),
+    );
+    await tester.pumpWidget(
+      _sheetApp(
+        store,
+        client,
+        book: original,
+        confirmReadBefore: (cancellation, progress) {
+          token = cancellation;
+          progress('正在取得正文 2/4');
+          return pending.future;
+        },
+        refreshReadScope: (cancellation, _) async {
+          expect(cancellation.isCancelled, isFalse);
+          refreshes++;
+          return original.copyWith(
+            backfillCoverage: const NovelAiBackfillCoverage(
+              throughChapterIndex: 3,
+              targetChapterCount: 4,
+              completeChapterCount: 2,
+              incompleteChapterNumbers: [3, 4],
+            ),
+          );
+        },
+      ),
+    );
+    await _open(tester);
+    final entry = find.byKey(const ValueKey('novel-ai-read-before'));
+    await _reach(tester, entry);
+    await tester.tap(entry);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('novel-ai-confirm-read-before')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('正在取得正文 2/4'), findsOneWidget);
+    final stop = find.byKey(const ValueKey('novel-ai-stop'));
+    await _reach(tester, stop);
+    await tester.tap(stop);
+    await tester.pump();
+    expect(token!.isCancelled, isTrue);
+    expect(refreshes, 0);
+    await _top(tester);
+    expect(find.byKey(const ValueKey('novel-ai-scope-stale')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('novel-ai-backfill-coverage')),
+      findsNothing,
+    );
+
+    pending.complete(original);
+    await tester.pump();
+    await tester.pump();
+    await _top(tester);
+    expect(refreshes, 1);
+    expect(find.byKey(const ValueKey('novel-ai-scope-stale')), findsNothing);
+    expect(find.textContaining('完整正文 2 章，未完成 2 章'), findsOneWidget);
+    expect(find.textContaining('第 3—4 章'), findsOneWidget);
+    expect(client.calls, 0);
+  });
+
+  for (final finishWhileInactive in [true, false]) {
+    testWidgets('后台取消补录后回前台只读刷新：先在后台结束=$finishWhileInactive', (tester) async {
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+      final store = _Store(
+        initial: const NovelAiSettings(enabled: true, includeChapter: true),
+        key: 'fake-key',
+      );
+      final client = _Client((_, _, _) async => '不应请求');
+      final pending = Completer<NovelAiBookContext>();
+      NovelAiCancellation? token;
+      var confirmations = 0;
+      var refreshes = 0;
+      final original = _book.copyWith(
+        backfillCoverage: const NovelAiBackfillCoverage(
+          throughChapterIndex: 3,
+          targetChapterCount: 4,
+          completeChapterCount: 1,
+          incompleteChapterNumbers: [2, 3, 4],
+        ),
+      );
+      await tester.pumpWidget(
+        _sheetApp(
+          store,
+          client,
+          book: original,
+          confirmReadBefore: (cancellation, _) {
+            confirmations++;
+            token = cancellation;
+            return pending.future;
+          },
+          refreshReadScope: (_, _) async {
+            refreshes++;
+            return original.copyWith(
+              backfillCoverage: const NovelAiBackfillCoverage(
+                throughChapterIndex: 3,
+                targetChapterCount: 4,
+                completeChapterCount: 2,
+                incompleteChapterNumbers: [3, 4],
+              ),
+            );
+          },
+        ),
+      );
+      await _open(tester);
+      final entry = find.byKey(const ValueKey('novel-ai-read-before'));
+      await _reach(tester, entry);
+      await tester.tap(entry);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('novel-ai-confirm-read-before')),
+      );
+      await tester.pump();
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      expect(token!.isCancelled, isTrue);
+
+      if (finishWhileInactive) {
+        pending.complete(original);
+        await tester.pump();
+        await tester.pump();
+      }
+      expect(refreshes, 0);
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      if (!finishWhileInactive) {
+        expect(refreshes, 0);
+        pending.complete(original);
+      }
+      await tester.pump();
+      await tester.pump();
+      await _top(tester);
+      expect(refreshes, 1);
+      expect(confirmations, 1);
+      expect(find.byKey(const ValueKey('novel-ai-scope-stale')), findsNothing);
+      expect(find.textContaining('完整正文 2 章，未完成 2 章'), findsOneWidget);
+      expect(client.calls, 0);
+    });
+  }
+
+  for (final failWhileInactive in [true, false]) {
+    testWidgets('跨前后台的只读刷新失败后重试且不并发：后台失败=$failWhileInactive', (tester) async {
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+      final store = _Store(
+        initial: const NovelAiSettings(enabled: true, includeChapter: true),
+        key: 'fake-key',
+      );
+      final client = _Client((_, _, _) async => '不应请求');
+      final pending = Completer<NovelAiBookContext>();
+      final firstRefresh = Completer<NovelAiBookContext>();
+      var refreshes = 0;
+      final original = _book.copyWith(
+        backfillCoverage: const NovelAiBackfillCoverage(
+          throughChapterIndex: 3,
+          targetChapterCount: 4,
+          completeChapterCount: 1,
+          incompleteChapterNumbers: [2, 3, 4],
+        ),
+      );
+      await tester.pumpWidget(
+        _sheetApp(
+          store,
+          client,
+          book: original,
+          confirmReadBefore: (_, _) => pending.future,
+          refreshReadScope: (_, _) {
+            refreshes++;
+            if (refreshes == 1) return firstRefresh.future;
+            return Future.value(
+              original.copyWith(
+                backfillCoverage: const NovelAiBackfillCoverage(
+                  throughChapterIndex: 3,
+                  targetChapterCount: 4,
+                  completeChapterCount: 2,
+                  incompleteChapterNumbers: [3, 4],
+                ),
+              ),
+            );
+          },
+        ),
+      );
+      await _open(tester);
+      final entry = find.byKey(const ValueKey('novel-ai-read-before'));
+      await _reach(tester, entry);
+      await tester.tap(entry);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('novel-ai-confirm-read-before')),
+      );
+      await tester.pump();
+      final stop = find.byKey(const ValueKey('novel-ai-stop'));
+      await _reach(tester, stop);
+      await tester.tap(stop);
+      await tester.pump();
+      pending.complete(original);
+      await tester.pump();
+      await tester.pump();
+      expect(refreshes, 1);
+
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      if (failWhileInactive) {
+        firstRefresh.completeError(StateError('后台刷新失败'));
+        await tester.pump();
+      }
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      if (!failWhileInactive) {
+        expect(refreshes, 1);
+        firstRefresh.completeError(StateError('前台恢复时的旧刷新失败'));
+      }
+      await tester.pump();
+      await tester.pump();
+      await _top(tester);
+      expect(refreshes, 2);
+      expect(find.byKey(const ValueKey('novel-ai-scope-stale')), findsNothing);
+      expect(find.textContaining('完整正文 2 章，未完成 2 章'), findsOneWidget);
+      expect(client.calls, 0);
+    });
+  }
+
+  testWidgets('补录失败且刷新失败时隐藏旧统计，允许再次补录', (tester) async {
+    final store = _Store(
+      initial: const NovelAiSettings(enabled: true, includeChapter: true),
+      key: 'fake-key',
+    );
+    final client = _Client((_, _, _) async => '不应请求');
+    var attempts = 0;
+    final original = _book.copyWith(
+      backfillCoverage: const NovelAiBackfillCoverage(
+        throughChapterIndex: 3,
+        targetChapterCount: 4,
+        completeChapterCount: 1,
+        incompleteChapterNumbers: [2, 3, 4],
+      ),
+    );
+    await tester.pumpWidget(
+      _sheetApp(
+        store,
+        client,
+        book: original,
+        confirmReadBefore: (_, _) async {
+          attempts++;
+          if (attempts == 1) throw const NovelAiException('补录失败');
+          return original.copyWith(
+            backfillCoverage: const NovelAiBackfillCoverage(
+              throughChapterIndex: 3,
+              targetChapterCount: 4,
+              completeChapterCount: 4,
+            ),
+          );
+        },
+        refreshReadScope: (_, _) async => throw StateError('刷新失败'),
+      ),
+    );
+    await _open(tester);
+    final entry = find.byKey(const ValueKey('novel-ai-read-before'));
+    Future<void> confirm() async {
+      await _reach(tester, entry);
+      await tester.tap(entry);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('novel-ai-confirm-read-before')),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await confirm();
+    await _top(tester);
+    expect(find.textContaining('补录范围待刷新'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('novel-ai-backfill-coverage')),
+      findsNothing,
+    );
+    expect(attempts, 1);
+    await confirm();
+    await _top(tester);
+    expect(attempts, 2);
+    expect(find.byKey(const ValueKey('novel-ai-scope-stale')), findsNothing);
+    expect(find.textContaining('完整正文 4 章，未完成 0 章'), findsOneWidget);
+    expect(client.calls, 0);
+  });
+
+  testWidgets('重开时呈现长范围状态并压缩未完成章节', (tester) async {
+    final store = _Store(
+      initial: const NovelAiSettings(enabled: true, includeChapter: true),
+      key: 'fake-key',
+    );
+    final client = _Client((_, _, _) async => '不应请求');
+    final saved = _book.copyWith(
+      backfillCoverage: NovelAiBackfillCoverage(
+        throughChapterIndex: 2708,
+        targetChapterCount: 2709,
+        completeChapterCount: 7,
+        incompleteChapterNumbers: [for (var i = 1; i <= 2702; i++) i],
+        persisted: false,
+      ),
+    );
+    await tester.pumpWidget(
+      _sheetApp(
+        store,
+        client,
+        book: saved,
+        confirmReadBefore: (_, _) async => saved,
+      ),
+    );
+    await _open(tester);
+    expect(find.textContaining('完整正文 7 章，未完成 2702 章'), findsOneWidget);
+    expect(find.textContaining('第 1—2702 章'), findsOneWidget);
+    await _reach(tester, find.textContaining('补录范围未能持久保存'));
+    expect(find.textContaining('补录范围未能持久保存'), findsOneWidget);
+    final entry = find.byKey(const ValueKey('novel-ai-read-before'));
+    await _reach(tester, entry);
+    expect(tester.getSize(entry).height, greaterThanOrEqualTo(48));
+    expect(client.calls, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final size in [const Size(320, 720), const Size(640, 320)]) {
+    testWidgets('大字下补录确认可滚动并保留操作：$size', (tester) async {
+      await tester.binding.setSurfaceSize(size);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final store = _Store(
+        initial: const NovelAiSettings(enabled: true, includeChapter: true),
+        key: 'fake-key',
+      );
+      var confirmations = 0;
+      await tester.pumpWidget(
+        _sheetApp(
+          store,
+          _Client((_, _, _) async => '不应请求'),
+          dark: true,
+          textScale: 2,
+          reduceMotion: true,
+          confirmReadBefore: (_, _) async {
+            confirmations++;
+            return _book;
+          },
+        ),
+      );
+      await _open(tester);
+      final entry = find.byKey(const ValueKey('novel-ai-read-before'));
+      await _reach(tester, entry);
+      await tester.tap(entry);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<AlertDialog>(find.byType(AlertDialog)).scrollable,
+        isTrue,
+      );
+      expect(
+        find
+            .byKey(const ValueKey('novel-ai-confirm-read-before'))
+            .hitTestable(),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(confirmations, 0);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('没有可用原文时明确提示，而不是伪造参考来源', (tester) async {
     final store = _Store(
@@ -996,6 +1412,7 @@ void main() {
         key: 'fake-key',
       );
       final client = _Client((_, _, _) async => '可核对的回答');
+      var confirmations = 0;
       await tester.pumpWidget(
         _sheetApp(
           store,
@@ -1016,8 +1433,10 @@ void main() {
               ),
             ],
           ),
-          confirmReadBefore: (_, _) async =>
-              _book.copyWith(scopeDescription: '已确认前文'),
+          confirmReadBefore: (_, _) async {
+            confirmations++;
+            return _book.copyWith(scopeDescription: '已确认前文');
+          },
         ),
       );
       await _open(tester);
@@ -1046,18 +1465,30 @@ void main() {
       await tester.ensureVisible(confirmed);
       await tester.tap(confirmed);
       await tester.pumpAndSettle();
+      expect(confirmations, 1);
       await _top(tester);
-      expect(find.text('已确认前文'), findsOneWidget);
+      final confirmedScope = find.text('已确认前文');
+      await _reach(tester, confirmedScope);
+      expect(confirmedScope, findsOneWidget);
 
       await _top(tester);
       await _ask(tester, '谁做了什么？');
       await tester.pumpAndSettle();
+      expect(client.calls, 1);
+      expect(client.books.single.excerpts.single.text, '原文依据');
       await _top(tester);
       final references = find.byKey(const ValueKey('novel-ai-references'));
       await _reach(tester, references);
       await tester.tap(find.text('参考原文'));
       await tester.pumpAndSettle();
-      expect(find.text('第 1 章 · 第一章'), findsOneWidget);
+      final source = find.text('第 1 章 · 第一章');
+      await _reach(tester, source);
+      expect(source, findsOneWidget);
+      final excerpt = find.byWidgetPredicate(
+        (widget) => widget is SelectableText && widget.data == '原文依据',
+      );
+      await _reach(tester, excerpt);
+      expect(excerpt, findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   }

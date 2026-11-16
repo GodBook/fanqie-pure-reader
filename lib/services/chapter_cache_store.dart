@@ -141,7 +141,7 @@ class ChapterCacheStats {
   });
 }
 
-/// UTF-8 logical chapter bytes, grouped by the actual per-chapter pin flag.
+/// UTF-8 logical chapter bytes, grouped by durable versus temporary retention.
 /// Neither category represents Hive's physical file size.
 @immutable
 class ChapterCacheUsage {
@@ -419,7 +419,7 @@ class ChapterCacheStore
               }
               _adjustUsage(
                 parts[0],
-                pinned: _isPinned(raw as Map),
+                pinned: _isRetained(raw as Map),
                 bytes: _bytes(raw),
                 direction: 1,
               );
@@ -475,15 +475,79 @@ class ChapterCacheStore
     required String title,
     required String text,
     bool pinned = false,
-  }) => _serialize((box) async {
-    if (bookId.isEmpty || chapterId.isEmpty || text.trim().isEmpty) return;
+  }) => _serialize(
+    (box) => _writeChapterLocked(
+      box,
+      bookId: bookId,
+      chapterId: chapterId,
+      title: title,
+      text: text,
+      pinned: pinned,
+    ),
+  );
+
+  /// Retains a confirmed AI backfill without subscribing this book to updates.
+  /// The comparison and write run in the same cache queue. A changed chapter
+  /// is left untouched so its caller can reload and retry instead of replacing
+  /// a newer copy. An already-identical chapter is safe to retain again.
+  Future<void> retainForNovelAi({
+    required String bookId,
+    required String chapterId,
+    required String title,
+    required String text,
+    required String? expectedText,
+  }) => _serialize(
+    (box) => _writeChapterLocked(
+      box,
+      bookId: bookId,
+      chapterId: chapterId,
+      title: title,
+      text: text,
+      aiRetained: true,
+      comparePrevious: true,
+      expectedText: expectedText,
+    ),
+  );
+
+  Future<void> _writeChapterLocked(
+    LazyBox<dynamic> box, {
+    required String bookId,
+    required String chapterId,
+    required String title,
+    required String text,
+    bool pinned = false,
+    bool aiRetained = false,
+    bool comparePrevious = false,
+    String? expectedText,
+  }) async {
+    if (bookId.isEmpty || chapterId.isEmpty || text.trim().isEmpty) {
+      if (comparePrevious) throw ArgumentError('章节内容无效');
+      return;
+    }
     final bytes = utf8.encode(text).length;
     if (bytes > maxBytes) throw StateError('该章节超过缓存容量上限');
     final key = _key(bookId, chapterId);
     final previous = await box.get(key);
+    if (comparePrevious) {
+      if (previous is Map &&
+          ((previous['bookId'] is String && previous['bookId'] != bookId) ||
+              (previous['chapterId'] is String &&
+                  previous['chapterId'] != chapterId))) {
+        throw StateError('章节缓存身份不符，请重新读取');
+      }
+      final current = previous is Map && previous['text'] is String
+          ? previous['text'] as String
+          : null;
+      if (current != expectedText && current != text) {
+        throw StateError('章节缓存已变化，请重新读取后重试');
+      }
+    }
     final previousValid = _isChapter(previous);
     final previousBytes = previousValid ? _bytes(previous as Map) : 0;
     final keepPinned = pinned || (previous is Map && _isPinned(previous));
+    final keepAiRetained =
+        aiRetained || (previous is Map && _isAiRetained(previous));
+    final keepRetained = keepPinned || keepAiRetained;
     final accessedAt = _touch(key);
     final next = {
       'bookId': bookId,
@@ -493,6 +557,7 @@ class ChapterCacheStore
       'bytes': bytes,
       'accessedAt': accessedAt,
       if (keepPinned) 'pinned': true,
+      if (keepAiRetained) 'aiRetained': true,
     };
     try {
       await box.put(key, next);
@@ -505,12 +570,12 @@ class ChapterCacheStore
         previous['chapterId'] == chapterId) {
       _adjustUsage(
         bookId,
-        pinned: _isPinned(previous),
+        pinned: _isRetained(previous),
         bytes: previousBytes,
         direction: -1,
       );
     }
-    _adjustUsage(bookId, pinned: keepPinned, bytes: bytes, direction: 1);
+    _adjustUsage(bookId, pinned: keepRetained, bytes: bytes, direction: 1);
     await _updateCatalogueAfterWrite(
       bookId: bookId,
       chapterId: chapterId,
@@ -519,12 +584,10 @@ class ChapterCacheStore
       previousBytes: previousValid ? previousBytes : null,
       pinned: keepPinned,
     );
-    // A pinned write does not consume the automatic budget, so it cannot make
-    // an unpinned chapter overflow. Skipping trim here avoids scanning a
-    // whole-book cache once per downloaded chapter.
-    if (!keepPinned) await _trim(box, keepBook: bookId);
+    // Retained chapters do not consume the automatic cache budget.
+    if (!keepRetained) await _trim(box, keepBook: bookId);
     changes.value++;
-  });
+  }
 
   @override
   Future<void> saveBook(CachedBook book) => _serializeCatalog((box) async {
@@ -692,11 +755,16 @@ class ChapterCacheStore
           'cover': '',
           'chapters': <dynamic>[],
         };
-    final ids = _cachedIds(record).toSet()..add(chapterId);
+    final ids = _cachedIds(record).toSet();
+    final wasCounted = ids.contains(chapterId);
+    ids.add(chapterId);
     record['cachedChapterIds'] = ids.toList();
     record['cachedChapterCount'] = ids.length;
     final oldBytes = (record['cachedByteCount'] as num?)?.toInt() ?? 0;
-    record['cachedByteCount'] = oldBytes + bytes - (previousBytes ?? 0);
+    // A recovered chapter can outlive its catalogue/progress record. Do not
+    // subtract bytes that the replacement record never included.
+    record['cachedByteCount'] =
+        oldBytes + bytes - (wasCounted ? previousBytes ?? 0 : 0);
     record['pinned'] = record['pinned'] == true || pinned;
     record['lastAccessedAt'] = DateTime.now().millisecondsSinceEpoch;
     final chapters = record['chapters'];
@@ -835,6 +903,10 @@ class ChapterCacheStore
   /// on the way past: it is the user's own copy and the LRU pass leaves it be.
   bool _isPinned(Map entry) => entry['pinned'] == true;
 
+  bool _isAiRetained(Map entry) => entry['aiRetained'] == true;
+
+  bool _isRetained(Map entry) => _isPinned(entry) || _isAiRetained(entry);
+
   Future<void> _trim(LazyBox<dynamic> box, {required String keepBook}) async {
     final catalog = await _catalogBox();
     final pinnedBooks = <String>{};
@@ -854,7 +926,7 @@ class ChapterCacheStore
       if (parts == null || pinnedBooks.contains(parts[0])) continue;
       final raw = await box.get(key);
       if (!_isChapter(raw)) continue;
-      if (_isPinned(raw as Map)) continue;
+      if (_isRetained(raw as Map)) continue;
       final bytes = _bytes(raw);
       totalBytes += bytes;
       entries.add((
@@ -1164,6 +1236,7 @@ class ChapterCacheStore
           ],
           'cachedChapterCount': counts[item.key] ?? 0,
           'cachedByteCount': bytes[item.key] ?? 0,
+          if (pinned.contains(item.key)) 'pinned': true,
           'cachedAt': DateTime.now().millisecondsSinceEpoch,
         };
       }

@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hive_ce/hive.dart';
 
 import 'package:fqapp/models/book_detail.dart';
 import 'package:fqapp/models/chapter_ideas.dart';
@@ -11,6 +13,7 @@ import 'package:fqapp/models/media_item.dart';
 import 'package:fqapp/pages/reader_page.dart';
 import 'package:fqapp/services/novel_ai.dart';
 import 'package:fqapp/services/novel_ai_read_scope.dart';
+import 'package:fqapp/services/chapter_text_formatter.dart';
 import 'package:fqapp/services/secure_key_provider.dart';
 import 'package:fqapp/widgets/reader/reader_paged_view.dart';
 
@@ -111,6 +114,7 @@ void main() {
     Future<BookDetail> Function(String)? detail,
     NovelAiReaderSheetOpener? opener,
     String? chapterText,
+    Future<String> Function(Chapter)? load,
     Key? key,
   }) => MaterialApp(
     home: ReaderPage(
@@ -124,7 +128,8 @@ void main() {
       shelfItem: _shelfItem(bookId, status: status),
       readerStore: MemoryReaderStore(),
       chapterCache: cache ?? MemoryChapterCache(),
-      chapterLoader: (chapter) async => chapterText ?? _longText(chapter.title),
+      chapterLoader:
+          load ?? (chapter) async => chapterText ?? _longText(chapter.title),
       ideasLoader: (_) async => ChapterIdeas.empty,
       novelAiStore: store,
       novelAiReadScopeStore: readScope,
@@ -133,14 +138,19 @@ void main() {
     ),
   );
 
-  Future<void> mount(WidgetTester tester, Widget child, {Size? size}) async {
+  Future<void> mount(
+    WidgetTester tester,
+    Widget child, {
+    Size? size,
+    bool settle = true,
+  }) async {
     await binding.setSurfaceSize(size ?? const Size(390, 800));
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
       await binding.setSurfaceSize(null);
     });
     await tester.pumpWidget(child);
-    await tester.pumpAndSettle();
+    if (settle) await tester.pumpAndSettle();
   }
 
   Future<void> menu(WidgetTester tester) async {
@@ -509,6 +519,138 @@ void main() {
       resolved?.excerpts.every((item) => item.chapterId == 'chapter-25'),
       isTrue,
     );
+  });
+
+  testWidgets('补录下载远前文和当前整章，重开后检索且排除未来章', (tester) async {
+    await enable();
+    await tester.runAsync(() async {
+      final scopeDirectory = await Directory.systemTemp.createTemp(
+        'ai-reader-full-',
+      );
+      Hive.init(scopeDirectory.path);
+      await readScope.snapshot(
+        bookId: 'warmup',
+        catalogue: _chapters,
+        currentChapterId: 'first',
+        currentRevision: 'empty',
+        currentVisibleEnd: 0,
+      );
+      Future<void> until(bool Function() ready) async {
+        for (var i = 0; i < 500 && !ready(); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          await tester.pump();
+        }
+        expect(ready(), isTrue, reason: 'Real encrypted scope I/O must finish');
+      }
+
+      try {
+        final cache = MemoryChapterCache();
+        final chapters = List.generate(
+          33,
+          (i) =>
+              Chapter(itemId: 'full-$i', title: '第 ${i + 1} 章', volumeName: ''),
+        );
+        Future<String> load(Chapter chapter) async {
+          final text = chapter.itemId == 'full-0'
+              ? '沈檐把铜钥匙藏在北塔侧门。他这样做是为了避开涨潮。'
+              : chapter.itemId == 'full-31'
+              ? '${_longText("当前章")}\n\n本章末尾的银色门牌写着栖雨渡口。'
+              : chapter.itemId == 'full-32'
+              ? 'FUTURE_PLOT_SENTINEL：下一章未读的紫色密信。'
+              : '这一章记录渡口的普通生活。';
+          return ChapterContent.fromPlainText(text).toCacheText();
+        }
+
+        await mount(
+          tester,
+          readerPage(
+            chapters: chapters,
+            startIndex: 31,
+            cache: cache,
+            load: load,
+            detail: (_) async => const BookDetail(bookId: 'book-a'),
+          ),
+          settle: false,
+        );
+        await until(() => find.byType(ReaderPagedView).evaluate().isNotEmpty);
+        await tester.tap(find.byKey(const ValueKey('reader-novel-ai-float')));
+        await until(
+          () => find
+              .byKey(const ValueKey('novel-ai-read-before'))
+              .evaluate()
+              .isNotEmpty,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+        final confirm = find.byKey(const ValueKey('novel-ai-read-before'));
+        await tester.ensureVisible(confirm);
+        await tester.tap(confirm);
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.tap(find.text('确认补录'));
+        await until(
+          () => find
+              .byKey(const ValueKey('novel-ai-backfill-coverage'))
+              .evaluate()
+              .isNotEmpty,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+        final ids = await cache.cachedChapterIds('book-a');
+        expect(ids, containsAll(chapters.take(32).map((c) => c.itemId)));
+        final close = find.byKey(const ValueKey('novel-ai-close'));
+        await tester.ensureVisible(close);
+        await tester.tap(close);
+        await tester.pump(const Duration(milliseconds: 500));
+
+        final resolved = <NovelAiBookContext>[];
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpWidget(
+          readerPage(
+            chapters: chapters,
+            startIndex: 31,
+            cache: cache,
+            load: load,
+            detail: (_) async => const BookDetail(bookId: 'book-a'),
+            opener: (_, book, resolve) async {
+              expect(book.backfillCoverage?.complete, isTrue);
+              expect(book.backfillCoverage?.targetChapterCount, 32);
+              resolved.add(await resolve('沈檐为什么把铜钥匙藏在北塔侧门？'));
+              resolved.add(await resolve('本章末尾银色门牌写着什么？'));
+              resolved.add(await resolve('梵穹霁是谁？'));
+            },
+          ),
+        );
+        await until(() => find.byType(ReaderPagedView).evaluate().isNotEmpty);
+        await tester.tap(find.byKey(const ValueKey('reader-novel-ai-float')));
+        await until(() => resolved.length == 3);
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(resolved, hasLength(3));
+        expect(
+          resolved.first.excerpts.map((e) => e.text).join(),
+          contains('避开涨潮'),
+        );
+        expect(
+          resolved[1].excerpts.map((e) => e.text).join(),
+          contains('栖雨渡口'),
+        );
+        expect(resolved.last.excerpts, isEmpty);
+        for (final context in resolved) {
+          expect(context.excerpts.every((e) => e.chapterIndex <= 31), isTrue);
+          expect(
+            context.excerpts.map((e) => e.text).join(),
+            isNot(contains('FUTURE_PLOT_SENTINEL')),
+          );
+          expect(
+            context.excerpts.map((e) => e.text).join(),
+            isNot(contains('legacyText')),
+          );
+        }
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await readScope.flush();
+        await Hive.close();
+        Hive.init(null);
+        await scopeDirectory.delete(recursive: true);
+      }
+    });
   });
 
   testWidgets('同一目录列表原地变化后不会打开旧范围问答', (tester) async {

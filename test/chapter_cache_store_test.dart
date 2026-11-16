@@ -418,6 +418,187 @@ void main() {
     expect(await store.cachedChapterIds('a'), {'p1', 'p2', 'p3'});
     expect(await store.cachedChapterIds('b'), {'r2', 'r3'});
   });
+
+  test(
+    'AI retained chapters survive eviction, ordinary writes, restart and catalogue rebuild without following',
+    () async {
+      final store = ChapterCacheStore(keys: keys, maxEntries: 2, maxBytes: 16);
+      for (var index = 1; index <= 5; index++) {
+        await store.retainForNovelAi(
+          bookId: 'ai',
+          chapterId: '$index',
+          title: '第$index章',
+          text: 'body$index',
+          expectedText: null,
+        );
+      }
+      expect(await store.cachedChapterIds('ai'), {'1', '2', '3', '4', '5'});
+      expect(await store.pinnedBooks(), isEmpty);
+      final initialUsage = (await store.classifiedUsage())['ai']!;
+      expect(initialUsage.downloaded.chapterCount, 5);
+      expect(initialUsage.downloaded.byteCount, 25);
+      expect(initialUsage.temporary.chapterCount, 0);
+
+      // The normal reader can refresh this chapter without dropping the
+      // separate retention marker or turning the book into an update follow.
+      await _write(store, 'ai', '1', 'updated');
+      for (final chapter in ['one', 'two', 'three']) {
+        await _write(store, 'automatic', chapter, chapter);
+      }
+      expect(await store.cachedChapterIds('ai'), {'1', '2', '3', '4', '5'});
+      expect(await store.cachedChapterIds('automatic'), {'two', 'three'});
+      expect(await store.pinnedBooks(), isEmpty);
+      final usage = (await store.classifiedUsage())['ai']!;
+      expect(usage.downloaded.chapterCount, 5);
+      expect(usage.downloaded.byteCount, 27);
+      expect(usage.temporary.chapterCount, 0);
+
+      await Hive.close();
+      final reopened = ChapterCacheStore(
+        keys: keys,
+        maxEntries: 2,
+        maxBytes: 16,
+      );
+      expect(await reopened.pinnedBooks(), isEmpty);
+      expect(await reopened.peek(bookId: 'ai', chapterId: '1'), 'updated');
+      expect(await reopened.cachedChapterIds('ai'), {'1', '2', '3', '4', '5'});
+
+      // Lose only the catalogue/progress metadata and force reconciliation
+      // from the chapter records, as after an interrupted metadata update.
+      final catalog = Hive.box<dynamic>('chapter_cache_catalog_v1_enc');
+      await catalog.delete('book:ai');
+      await catalog.delete('progress:ai');
+      expect(await reopened.pinnedBooks(), isEmpty);
+      expect(await reopened.cachedChapterIds('ai'), {'1', '2', '3', '4', '5'});
+      await _write(reopened, 'automatic', 'four', 'four');
+      expect(await reopened.cachedChapterIds('ai'), {'1', '2', '3', '4', '5'});
+      expect(await reopened.pinnedBooks(), isEmpty);
+    },
+  );
+
+  test(
+    'manual downloads continue to follow and can opt in after AI retention',
+    () async {
+      final store = ChapterCacheStore(keys: keys);
+      await store.saveBook(_book('manual'));
+      await _write(store, 'manual', 'same', 'downloaded', pinned: true);
+      await store.retainForNovelAi(
+        bookId: 'manual',
+        chapterId: 'same',
+        title: 'chapter',
+        text: 'downloaded',
+        expectedText: 'downloaded',
+      );
+      await store.retainForNovelAi(
+        bookId: 'manual',
+        chapterId: 'extra',
+        title: 'extra',
+        text: 'extra body',
+        expectedText: null,
+      );
+      await store.retainForNovelAi(
+        bookId: 'later-manual',
+        chapterId: 'one',
+        title: 'one',
+        text: 'AI body',
+        expectedText: null,
+      );
+      expect((await store.pinnedBooks()).map((book) => book.id), ['manual']);
+      await _write(store, 'later-manual', 'one', 'AI body', pinned: true);
+      expect((await store.pinnedBooks()).map((book) => book.id).toSet(), {
+        'manual',
+        'later-manual',
+      });
+
+      await Hive.close();
+      final reopened = ChapterCacheStore(keys: keys);
+      expect((await reopened.pinnedBooks()).map((book) => book.id).toSet(), {
+        'manual',
+        'later-manual',
+      });
+      await reopened.peek(bookId: 'manual', chapterId: 'same');
+      final catalog = Hive.box<dynamic>('chapter_cache_catalog_v1_enc');
+      await catalog.delete('book:manual');
+      await catalog.delete('progress:manual');
+      expect((await reopened.pinnedBooks()).map((book) => book.id).toSet(), {
+        'manual',
+        'later-manual',
+      });
+      expect(await reopened.cachedChapterIds('manual'), {'same', 'extra'});
+    },
+  );
+
+  test(
+    'retained chapter refresh repairs a missing one-chapter catalogue count',
+    () async {
+      final store = ChapterCacheStore(keys: keys);
+      await store.retainForNovelAi(
+        bookId: 'ai',
+        chapterId: 'one',
+        title: 'one',
+        text: 'hello',
+        expectedText: null,
+      );
+      final catalog = Hive.box<dynamic>('chapter_cache_catalog_v1_enc');
+      await catalog.delete('book:ai');
+      await catalog.delete('progress:ai');
+      await _write(store, 'ai', 'one', 'hi');
+      expect((await store.stats(bookId: 'ai')).byteCount, 2);
+      expect(await store.pinnedBooks(), isEmpty);
+      expect((await store.classifiedUsage())['ai']!.downloaded.byteCount, 2);
+    },
+  );
+
+  test(
+    'AI retention compares inside the write queue and never overwrites a newer chapter',
+    () async {
+      final store = ChapterCacheStore(keys: keys);
+      await _write(store, 'book', 'one', 'old');
+      expect(await store.peek(bookId: 'book', chapterId: 'one'), 'old');
+      final update = _write(store, 'book', 'one', 'newer');
+      final stale = store.retainForNovelAi(
+        bookId: 'book',
+        chapterId: 'one',
+        title: 'one',
+        text: 'old download',
+        expectedText: 'old',
+      );
+      await Future.wait([update, expectLater(stale, throwsStateError)]);
+      expect(await store.peek(bookId: 'book', chapterId: 'one'), 'newer');
+      expect(
+        (await store.classifiedUsage())['book']!.temporary.chapterCount,
+        1,
+      );
+
+      // An identical current value is an idempotent success even when the
+      // original expectation is stale. A later normal refresh keeps retention.
+      await store.retainForNovelAi(
+        bookId: 'book',
+        chapterId: 'one',
+        title: 'one',
+        text: 'newer',
+        expectedText: 'old',
+      );
+      await _write(store, 'book', 'one', 'newest');
+      expect(await store.peek(bookId: 'book', chapterId: 'one'), 'newest');
+      final usage = (await store.classifiedUsage())['book']!;
+      expect(usage.downloaded.chapterCount, 1);
+      expect(usage.temporary.chapterCount, 0);
+      expect(await store.pinnedBooks(), isEmpty);
+
+      // A chapter inserted after a cache miss must also win over a stale fetch.
+      final inserted = _write(store, 'book', 'two', 'inserted');
+      final staleMiss = store.retainForNovelAi(
+        bookId: 'book',
+        chapterId: 'two',
+        title: 'two',
+        text: 'network result',
+        expectedText: null,
+      );
+      await Future.wait([inserted, expectLater(staleMiss, throwsStateError)]);
+      expect(await store.peek(bookId: 'book', chapterId: 'two'), 'inserted');
+    },
+  );
 }
 
 class _ReadOnlyHive extends Fake implements HiveInterface {

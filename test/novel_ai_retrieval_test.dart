@@ -25,6 +25,31 @@ NovelAiSourceChapter _chapter(
 
 void main() {
   test(
+    'explicit early chapter retrieves bounded whole text and excludes future',
+    () async {
+      final first = _chapter(0, '${'普通正文。' * 500}\n栖雨渡口的钥匙藏在铜匣里。');
+      for (final question in ['第1章发生了什么？', '第一章最后讲了什么？']) {
+        final result = await retrieveNovelAiContext(
+          bookId: first.bookId,
+          allowedChapterIds: {first.id},
+          chapters: [first],
+          question: question,
+        );
+        expect(result.excerpts.map((e) => e.text).join(), contains('钥匙藏在铜匣里'));
+        expect(result.excerpts.every((e) => e.text.length <= 1400), isTrue);
+        expect(result.includedTextLength, lessThanOrEqualTo(14000));
+      }
+      final future = await retrieveNovelAiContext(
+        bookId: first.bookId,
+        allowedChapterIds: {first.id},
+        chapters: [first],
+        question: '第二章发生了什么？',
+      );
+      expect(future.excerpts, isEmpty);
+    },
+  );
+
+  test(
     'searches all allowed chapters and finds an old rare character',
     () async {
       final chapters = <NovelAiSourceChapter>[
