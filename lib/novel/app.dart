@@ -35,6 +35,7 @@ import '../services/novel_app_update.dart';
 import '../services/novel_release.dart';
 import '../services/novel_color_theme.dart';
 import '../services/novel_ai.dart';
+import '../services/novel_fattening_notifications.dart';
 import 'ai_settings_page.dart';
 import 'user_guide_page.dart';
 import '../widgets/reader/reader_appearance_sheet.dart';
@@ -599,6 +600,8 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
   StreamSubscription<List<ConnectivityResult>>? _network;
   late bool _lastUpdateEnabled;
   late bool _lastWifiOnly;
+  bool _reminderLaunchScheduled = false;
+  bool _openingReminder = false;
 
   @override
   void initState() {
@@ -611,6 +614,10 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
     _lastWifiOnly = updates.wifiOnly;
     updates.addListener(_updatePolicyChanged);
     NovelRuntime.localReady.addListener(_scheduleUpdateCheck);
+    NovelRuntime.localReady.addListener(_scheduleReminderLaunch);
+    final reminders = NovelFatteningNotifications.instance;
+    reminders.pendingLaunch.addListener(_scheduleReminderLaunch);
+    unawaited(reminders.initialize());
     _scheduleUpdateCheck();
     _updateTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       _scheduleUpdateCheck();
@@ -627,8 +634,50 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
     NovelDownloadManager.instance.setForeground(resumed);
     if (resumed) {
       _scheduleUpdateCheck();
+      unawaited(NovelFatteningNotifications.instance.refreshPendingLaunch());
+      _scheduleReminderLaunch();
     } else {
       _updateKickoff?.cancel();
+    }
+  }
+
+  void _scheduleReminderLaunch() {
+    final reminders = NovelFatteningNotifications.instance;
+    if (!mounted ||
+        _openingReminder ||
+        _reminderLaunchScheduled ||
+        reminders.pendingLaunch.value == null ||
+        !NovelRuntime.localReady.value ||
+        !NovelDownloadManager.instance.isForeground) {
+      return;
+    }
+    _reminderLaunchScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _reminderLaunchScheduled = false;
+      final token = reminders.pendingLaunch.value;
+      if (!mounted ||
+          token == null ||
+          !NovelRuntime.localReady.value ||
+          !NovelDownloadManager.instance.isForeground) {
+        return;
+      }
+      unawaited(_handleReminderLaunch(token));
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _handleReminderLaunch(String token) async {
+    _openingReminder = true;
+    try {
+      await _openFatteningReminder(context, token);
+    } catch (_) {
+      await NovelFatteningNotifications.instance.consumeLaunch(token);
+      if (mounted) _notice(context, '暂时无法从提醒续读，可从书架打开。');
+    } finally {
+      _openingReminder = false;
+      if (NovelFatteningNotifications.instance.pendingLaunch.value != token) {
+        _scheduleReminderLaunch();
+      }
     }
   }
 
@@ -689,6 +738,10 @@ class _NovelShellState extends State<NovelShell> with WidgetsBindingObserver {
     _updateTimer?.cancel();
     _updateKickoff?.cancel();
     NovelRuntime.localReady.removeListener(_scheduleUpdateCheck);
+    NovelRuntime.localReady.removeListener(_scheduleReminderLaunch);
+    NovelFatteningNotifications.instance.pendingLaunch.removeListener(
+      _scheduleReminderLaunch,
+    );
     NovelDownloadManager.instance.removeListener(_updatePolicyChanged);
     NovelDownloadManager.instance.setForeground(false);
     super.dispose();

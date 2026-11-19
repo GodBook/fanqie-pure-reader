@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,9 @@ import '../models/media_item.dart';
 import '../models/shelf_identity.dart';
 import 'chapter_cache_store.dart';
 import 'connectivity_status.dart';
+import 'library_store.dart';
+import 'novel_fattening_notifications.dart';
+import 'reader_history.dart';
 import 'shelf_store.dart';
 
 /// User-assigned shelf state and an independently acknowledged catalogue tail.
@@ -32,6 +36,12 @@ class NovelShelfMetadata {
     this.fattenCatalogueHash = '',
     this.fattenCatalogueAt = 0,
     this.fattenReviewAt = 0,
+    this.fattenReminderEnabled = false,
+    this.fattenReminderCycle = 0,
+    this.fattenReminderNotifiedCycle = 0,
+    this.fattenReminderToken = '',
+    this.fattenReminderReadyAt = 0,
+    this.fattenReminderDelivery = '',
   });
 
   static const readingStates = {'', '想读', '在读', '已读', '暂搁'};
@@ -62,6 +72,18 @@ class NovelShelfMetadata {
   final String fattenCatalogueHash;
   final int fattenCatalogueAt;
   final int fattenReviewAt;
+  final bool fattenReminderEnabled;
+  final int fattenReminderCycle;
+  final int fattenReminderNotifiedCycle;
+  final String fattenReminderToken;
+  final int fattenReminderReadyAt;
+  final String fattenReminderDelivery;
+
+  bool get fattenReminderReady =>
+      fattenReminderEnabled &&
+      fattenReminderCycle > 0 &&
+      fattenReminderNotifiedCycle == fattenReminderCycle &&
+      fattenReminderReadyAt > 0;
 
   NovelShelfMetadata copyWith({
     String? readingState,
@@ -80,6 +102,12 @@ class NovelShelfMetadata {
     String? fattenCatalogueHash,
     int? fattenCatalogueAt,
     int? fattenReviewAt,
+    bool? fattenReminderEnabled,
+    int? fattenReminderCycle,
+    int? fattenReminderNotifiedCycle,
+    String? fattenReminderToken,
+    int? fattenReminderReadyAt,
+    String? fattenReminderDelivery,
   }) => NovelShelfMetadata(
     readingState: readingState ?? this.readingState,
     pinned: pinned ?? this.pinned,
@@ -97,6 +125,14 @@ class NovelShelfMetadata {
     fattenCatalogueHash: fattenCatalogueHash ?? this.fattenCatalogueHash,
     fattenCatalogueAt: fattenCatalogueAt ?? this.fattenCatalogueAt,
     fattenReviewAt: fattenReviewAt ?? this.fattenReviewAt,
+    fattenReminderEnabled: fattenReminderEnabled ?? this.fattenReminderEnabled,
+    fattenReminderCycle: fattenReminderCycle ?? this.fattenReminderCycle,
+    fattenReminderNotifiedCycle:
+        fattenReminderNotifiedCycle ?? this.fattenReminderNotifiedCycle,
+    fattenReminderToken: fattenReminderToken ?? this.fattenReminderToken,
+    fattenReminderReadyAt: fattenReminderReadyAt ?? this.fattenReminderReadyAt,
+    fattenReminderDelivery:
+        fattenReminderDelivery ?? this.fattenReminderDelivery,
   );
 
   Map<String, dynamic> toMap() => {
@@ -116,13 +152,25 @@ class NovelShelfMetadata {
     'fattenCatalogueHash': fattenCatalogueHash,
     'fattenCatalogueAt': fattenCatalogueAt,
     'fattenReviewAt': fattenReviewAt,
+    'fattenReminderEnabled': fattenReminderEnabled,
+    'fattenReminderCycle': fattenReminderCycle,
+    'fattenReminderNotifiedCycle': fattenReminderNotifiedCycle,
+    'fattenReminderToken': fattenReminderToken,
+    'fattenReminderReadyAt': fattenReminderReadyAt,
+    'fattenReminderDelivery': fattenReminderDelivery,
   };
 
   Map<String, dynamic> toPortableMap() => toMap()
     ..remove('fattenCatalogueCount')
     ..remove('fattenCatalogueHash')
     ..remove('fattenCatalogueAt')
-    ..remove('fattenReviewAt');
+    ..remove('fattenReviewAt')
+    ..remove('fattenReminderEnabled')
+    ..remove('fattenReminderCycle')
+    ..remove('fattenReminderNotifiedCycle')
+    ..remove('fattenReminderToken')
+    ..remove('fattenReminderReadyAt')
+    ..remove('fattenReminderDelivery');
 
   static NovelShelfMetadata? fromMap(dynamic raw) {
     if (raw is! Map) return null;
@@ -134,7 +182,7 @@ class NovelShelfMetadata {
         !outcomes.contains(outcome)) {
       return null;
     }
-    for (final key in ['pinned', 'followed']) {
+    for (final key in ['pinned', 'followed', 'fattenReminderEnabled']) {
       if (raw[key] != null && raw[key] is! bool) return null;
     }
     for (final key in [
@@ -145,6 +193,9 @@ class NovelShelfMetadata {
       'fattenCatalogueCount',
       'fattenCatalogueAt',
       'fattenReviewAt',
+      'fattenReminderCycle',
+      'fattenReminderNotifiedCycle',
+      'fattenReminderReadyAt',
     ]) {
       final value = raw[key];
       if (value != null &&
@@ -163,6 +214,15 @@ class NovelShelfMetadata {
     if (title is! String || title.length > 1000) return null;
     final fattenGoal = raw['fattenGoal'] ?? 50;
     if (fattenGoal is! int || fattenGoal < 1 || fattenGoal > 1000) return null;
+    final token = raw['fattenReminderToken'] ?? '';
+    if (token is! String ||
+        (token.isNotEmpty && !NovelFatteningNotifications.validToken(token))) {
+      return null;
+    }
+    final delivery = raw['fattenReminderDelivery'] ?? '';
+    if (!const {'', 'pending', 'sent', 'unavailable'}.contains(delivery)) {
+      return null;
+    }
     return NovelShelfMetadata(
       readingState: state,
       pinned: raw['pinned'] == true,
@@ -180,6 +240,12 @@ class NovelShelfMetadata {
       fattenCatalogueHash: raw['fattenCatalogueHash'] ?? '',
       fattenCatalogueAt: raw['fattenCatalogueAt'] ?? 0,
       fattenReviewAt: raw['fattenReviewAt'] ?? 0,
+      fattenReminderEnabled: raw['fattenReminderEnabled'] == true,
+      fattenReminderCycle: raw['fattenReminderCycle'] ?? 0,
+      fattenReminderNotifiedCycle: raw['fattenReminderNotifiedCycle'] ?? 0,
+      fattenReminderToken: token,
+      fattenReminderReadyAt: raw['fattenReminderReadyAt'] ?? 0,
+      fattenReminderDelivery: delivery,
     );
   }
 }
@@ -233,14 +299,25 @@ class _FatteningQueueFull implements Exception {
 }
 
 class NovelShelfManagement extends ChangeNotifier {
-  NovelShelfManagement({ChapterCache? catalogueCache})
-    : _catalogueCache = catalogueCache ?? ChapterCacheStore.instance;
+  NovelShelfManagement({
+    ChapterCache? catalogueCache,
+    NovelFatteningNotificationPort? notifications,
+    Future<Map<String, dynamic>?> Function(MediaItem)? reminderHistoryLoader,
+    Iterable<MediaItem> Function()? shelfBooks,
+  }) : _catalogueCache = catalogueCache ?? ChapterCacheStore.instance,
+       _notifications = notifications ?? NovelFatteningNotifications.instance,
+       _reminderHistoryLoader = reminderHistoryLoader ?? _loadReminderHistory,
+       _shelfBooks = shelfBooks ?? _currentShelfBooks;
   static final instance = NovelShelfManagement();
   static const _storageKey = 'novel_shelf_metadata_v1';
   final Map<String, NovelShelfMetadata> _entries = {};
   final Map<String, int> _generations = {};
   final Map<String, List<Chapter>> _checkedChapters = {};
   final ChapterCache _catalogueCache;
+  final NovelFatteningNotificationPort _notifications;
+  final Future<Map<String, dynamic>?> Function(MediaItem)
+  _reminderHistoryLoader;
+  final Iterable<MediaItem> Function() _shelfBooks;
   final LinkedHashMap<String, _FatteningCatalogue> _fatteningCache =
       LinkedHashMap();
   final Map<String, Future<_FatteningCatalogue?>> _fatteningLoads = {};
@@ -264,6 +341,55 @@ class NovelShelfManagement extends ChangeNotifier {
       _entries[keyOf(book)] ?? const NovelShelfMetadata();
   bool checking(MediaItem book) => _checking.contains(keyOf(book));
   ValueListenable<int> get fatteningCapacity => _fatteningCapacity;
+
+  static Iterable<MediaItem> _currentShelfBooks() =>
+      ShelfStore.instance.records().map((record) => record.item);
+
+  static Future<Map<String, dynamic>?> _loadReminderHistory(MediaItem book) =>
+      LibraryStore.instance.isInitialized
+      ? ReaderHistory(LibraryStore.instance).load(book.id)
+      : Future.value();
+
+  static bool supportsFatteningReminder(MediaItem book) =>
+      book.kind == 'book' &&
+      book.source == 'fanqie' &&
+      !ShelfIdentity.localContentIdPattern.hasMatch(book.id);
+
+  /// Legacy unscoped history is accepted only without a cross-source collision.
+  static bool reminderHistoryMatches(
+    MediaItem book,
+    Map<String, dynamic>? history,
+    Iterable<MediaItem> shelfBooks,
+  ) {
+    if (history == null ||
+        history['kind'] != 'book' ||
+        history['id']?.toString() != book.id ||
+        (history['bookId'] != null &&
+            history['bookId'].toString() != book.id)) {
+      return false;
+    }
+    final source = history['source']?.toString();
+    if (source != null && source.isNotEmpty) return source == book.source;
+    return book.source == 'fanqie' &&
+        !shelfBooks.any(
+          (candidate) =>
+              candidate.id == book.id && candidate.source != book.source,
+        );
+  }
+
+  bool _needsCheck(MediaItem book) {
+    final metadata = of(book);
+    return metadata.followed ||
+        (metadata.fattenReminderEnabled && supportsFatteningReminder(book));
+  }
+
+  static String _newReminderToken() {
+    final random = Random.secure();
+    return List.generate(
+      32,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+  }
 
   /// Invalidate requests started before a lifecycle, connectivity or policy change.
   void invalidateChecks() => _checkRevision++;
@@ -363,12 +489,186 @@ class NovelShelfManagement extends ChangeNotifier {
 
   Future<void> setFattenGoal(MediaItem book, int goal) {
     if (goal < 1 || goal > 1000) throw RangeError.range(goal, 1, 1000);
+    return _setFattenGoal(book, goal);
+  }
+
+  Future<void> _setFattenGoal(MediaItem book, int goal) async {
+    await initialize();
     final key = keyOf(book);
-    return _change((entries) {
-      entries[key] = (entries[key] ?? const NovelShelfMetadata()).copyWith(
-        fattenGoal: goal,
+    String? previousToken;
+    await _change(
+      (entries) {
+        final previous = entries[key] ?? const NovelShelfMetadata();
+        if (previous.fattenGoal == goal) return;
+        if (previous.fattenReminderEnabled) {
+          previousToken = previous.fattenReminderToken;
+        }
+        entries[key] = previous.copyWith(
+          fattenGoal: goal,
+          fattenReminderCycle: previous.fattenReminderEnabled
+              ? previous.fattenReminderCycle + 1
+              : previous.fattenReminderCycle,
+          fattenReminderToken: previous.fattenReminderEnabled
+              ? _newReminderToken()
+              : previous.fattenReminderToken,
+          fattenReminderReadyAt: 0,
+          fattenReminderDelivery: '',
+        );
+      },
+      afterCommit: () {
+        _generations[key] = (_generations[key] ?? 0) + 1;
+      },
+    );
+    if (previousToken != null) await _notifications.cancel(previousToken!);
+  }
+
+  /// Opt-in is independent of follow/download policies and never requests an
+  /// Android permission itself. The explicit UI action owns that prompt.
+  Future<void> setFattenReminder(MediaItem book, bool enabled) async {
+    if (enabled && !supportsFatteningReminder(book)) {
+      throw const FormatException('此书暂不支持养肥提醒');
+    }
+    final key = keyOf(book);
+    String? previousToken;
+    await _change(
+      (entries) {
+        final previous = entries[key] ?? const NovelShelfMetadata();
+        if (previous.fattenReminderEnabled == enabled) return;
+        previousToken = previous.fattenReminderToken;
+        entries[key] = previous.copyWith(
+          fattenReminderEnabled: enabled,
+          fattenReminderCycle: enabled
+              ? previous.fattenReminderCycle + 1
+              : previous.fattenReminderCycle,
+          fattenReminderToken: enabled ? _newReminderToken() : '',
+          fattenReminderReadyAt: 0,
+          fattenReminderDelivery: '',
+        );
+      },
+      afterCommit: () {
+        _generations[key] = (_generations[key] ?? 0) + 1;
+      },
+    );
+    if (previousToken != null) await _notifications.cancel(previousToken!);
+  }
+
+  Future<bool> requestFattenReminderPermission() =>
+      _notifications.requestPermission();
+
+  /// A launch token carries no saved chapter. Resolve it against the current
+  /// shelf and fresh history so tapping cannot restore a stale notification's
+  /// position or open a removed/disabled/cross-source item.
+  Future<MediaItem?> resolveFatteningReminder(String token) async {
+    if (!NovelFatteningNotifications.validToken(token)) return null;
+    await initialize();
+    final books = _shelfBooks().toList(growable: false);
+    MediaItem? book;
+    for (final candidate in books) {
+      final metadata = of(candidate);
+      if (supportsFatteningReminder(candidate) &&
+          metadata.fattenReminderReady &&
+          metadata.fattenReminderToken == token) {
+        book = candidate;
+        break;
+      }
+    }
+    if (book == null) return null;
+    final history = await _reminderHistoryLoader(book);
+    final value = await fatteningOf(
+      book,
+      history: history,
+      historyIdentityMatches: reminderHistoryMatches(book, history, books),
+    );
+    if (value.status != NovelFatteningStatus.available ||
+        of(book).fattenReminderToken != token ||
+        !of(book).fattenReminderReady ||
+        !_shelfBooks().any((candidate) => keyOf(candidate) == keyOf(book!))) {
+      return null;
+    }
+    return book;
+  }
+
+  Future<bool> acknowledgeFatteningReminder(
+    MediaItem book,
+    String token,
+  ) async {
+    var acknowledged = false;
+    bool current() =>
+        of(book).fattenReminderToken == token &&
+        of(book).fattenReminderReady &&
+        _shelfBooks().any((candidate) => keyOf(candidate) == keyOf(book));
+    await _change(
+      (entries) {
+        entries[keyOf(book)] = entries[keyOf(book)]!.copyWith(
+          fattenReminderReadyAt: 0,
+        );
+      },
+      guard: current,
+      afterCommit: () => acknowledged = true,
+    );
+    if (acknowledged) await _notifications.cancel(token);
+    return acknowledged;
+  }
+
+  Future<void> _evaluateFatteningReminder(
+    MediaItem book, {
+    required bool Function() isCurrent,
+  }) async {
+    final metadata = of(book);
+    final token = metadata.fattenReminderToken;
+    if (!metadata.fattenReminderEnabled ||
+        metadata.fattenReminderCycle <= metadata.fattenReminderNotifiedCycle ||
+        !NovelFatteningNotifications.validToken(token)) {
+      return;
+    }
+    final history = await _reminderHistoryLoader(book);
+    final books = _shelfBooks().toList(growable: false);
+    if (!books.any((candidate) => keyOf(candidate) == keyOf(book))) return;
+    final value = await fatteningOf(
+      book,
+      history: history,
+      historyIdentityMatches: reminderHistoryMatches(book, history, books),
+    );
+    bool current() =>
+        isCurrent() &&
+        of(book).fattenReminderEnabled &&
+        of(book).fattenReminderToken == token &&
+        _shelfBooks().any((candidate) => keyOf(candidate) == keyOf(book));
+    if (!current() ||
+        value.status != NovelFatteningStatus.available ||
+        value.remaining! < value.goal) {
+      return;
+    }
+    var claimed = false;
+    await _change((entries) {
+      final previous = entries[keyOf(book)]!;
+      if (previous.fattenReminderNotifiedCycle >=
+          previous.fattenReminderCycle) {
+        return;
+      }
+      entries[keyOf(book)] = previous.copyWith(
+        fattenReminderNotifiedCycle: previous.fattenReminderCycle,
+        fattenReminderReadyAt: DateTime.now().millisecondsSinceEpoch,
+        fattenReminderDelivery: 'pending',
       );
-    });
+      claimed = true;
+    }, guard: current);
+    if (!claimed || !current()) return;
+    bool sent;
+    try {
+      sent = await _notifications.show(token);
+    } catch (_) {
+      sent = false;
+    }
+    if (!current()) {
+      await _notifications.cancel(token);
+      return;
+    }
+    await _change((entries) {
+      entries[keyOf(book)] = entries[keyOf(book)]!.copyWith(
+        fattenReminderDelivery: sent ? 'sent' : 'unavailable',
+      );
+    }, guard: current);
   }
 
   /// Records only a complete, accepted online response. Callers must perform
@@ -379,10 +679,18 @@ class NovelShelfManagement extends ChangeNotifier {
     List<Chapter> chapters, {
     bool Function()? isCurrent,
   }) async {
+    await _rememberFatteningCatalogue(book, chapters, isCurrent: isCurrent);
+  }
+
+  Future<bool> _rememberFatteningCatalogue(
+    MediaItem book,
+    List<Chapter> chapters, {
+    bool Function()? isCurrent,
+  }) async {
     if (book.kind != 'book' ||
         book.source != 'fanqie' ||
         ShelfIdentity.localContentIdPattern.hasMatch(book.id)) {
-      return;
+      return false;
     }
     final ids = chapters.map((chapter) => chapter.itemId).toList();
     if (ids.isEmpty ||
@@ -398,7 +706,7 @@ class NovelShelfManagement extends ChangeNotifier {
         _fatteningGenerations[key] == generation &&
         (isCurrent == null || isCurrent());
     await initialize();
-    if (!current()) return;
+    if (!current()) return false;
 
     final previousProof = of(book);
     final digest = _hash(ids);
@@ -406,7 +714,7 @@ class NovelShelfManagement extends ChangeNotifier {
     var committed = false;
     try {
       final cache = _catalogueCache;
-      if (cache is! ConditionalChapterCatalogueUpdate) return;
+      if (cache is! ConditionalChapterCatalogueUpdate) return false;
       final stored = await (cache as ConditionalChapterCatalogueUpdate)
           .updateCatalogueIfSafe(
             CachedBook(
@@ -499,16 +807,17 @@ class NovelShelfManagement extends ChangeNotifier {
       }
     } catch (_) {
       // Optional evidence must never claim an uncommitted catalogue.
-      if (!committed) return;
+      if (!committed) return false;
     }
     if (!committed || !current() || of(book).fattenCatalogueHash != digest) {
-      return;
+      return false;
     }
     _putFatteningCache(
       key,
       _FatteningCatalogue(List.unmodifiable(ids), digest),
     );
     if (!_disposed) notifyListeners();
+    return true;
   }
 
   /// Evaluates the reading chapter by stable ID within a verified snapshot.
@@ -748,7 +1057,7 @@ class NovelShelfManagement extends ChangeNotifier {
         await previous.finished.future;
         if (!current()) return;
       }
-      if (!of(book).followed || _checking.contains(key)) continue;
+      if (!_needsCheck(book) || _checking.contains(key)) continue;
       ConnectivityView? network;
       try {
         network = await connectivity();
@@ -756,7 +1065,7 @@ class NovelShelfManagement extends ChangeNotifier {
         network = null;
       }
       if (!current()) return;
-      if (!of(book).followed || _checking.contains(key)) continue;
+      if (!_needsCheck(book) || _checking.contains(key)) continue;
       final allowed =
           network != null &&
           network.online &&
@@ -764,8 +1073,8 @@ class NovelShelfManagement extends ChangeNotifier {
       if (!allowed) {
         await _change((entries) {
           final current = entries[key];
-          if (current?.followed == true) {
-            entries[key] = current!.copyWith(
+          if (current != null && _needsCheck(book)) {
+            entries[key] = current.copyWith(
               outcome: network?.online == true ? 'waiting' : 'failed',
             );
           }
@@ -781,7 +1090,7 @@ class NovelShelfManagement extends ChangeNotifier {
       try {
         final chapters = await directoryLoader(book.id);
         if (!current()) return;
-        if ((_generations[key] ?? 0) != generation || !of(book).followed) {
+        if ((_generations[key] ?? 0) != generation || !_needsCheck(book)) {
           continue;
         }
         ConnectivityView? latestNetwork;
@@ -791,7 +1100,7 @@ class NovelShelfManagement extends ChangeNotifier {
           latestNetwork = null;
         }
         if (!current()) return;
-        if ((_generations[key] ?? 0) != generation || !of(book).followed) {
+        if ((_generations[key] ?? 0) != generation || !_needsCheck(book)) {
           continue;
         }
         if (latestNetwork == null ||
@@ -799,8 +1108,8 @@ class NovelShelfManagement extends ChangeNotifier {
             (!manual && wifiOnly && latestNetwork.metered)) {
           await _change((entries) {
             final existing = entries[key];
-            if (existing?.followed == true) {
-              entries[key] = existing!.copyWith(
+            if (existing != null && _needsCheck(book)) {
+              entries[key] = existing.copyWith(
                 outcome: latestNetwork?.online == true ? 'waiting' : 'failed',
               );
             }
@@ -819,7 +1128,7 @@ class NovelShelfManagement extends ChangeNotifier {
         await _change((entries) {
           final current = entries[key];
           if (current == null ||
-              !current.followed ||
+              !_needsCheck(book) ||
               (_generations[key] ?? 0) != generation) {
             return;
           }
@@ -854,13 +1163,13 @@ class NovelShelfManagement extends ChangeNotifier {
         }, guard: () => current() && (_generations[key] ?? 0) == generation);
         if (current() &&
             (_generations[key] ?? 0) == generation &&
-            of(book).followed) {
+            _needsCheck(book)) {
           _checkedChapters[key] = List.unmodifiable(chapters);
           if ((_fatteningGenerations[key] ?? 0) != fatteningGeneration) {
             continue;
           }
           try {
-            await rememberFatteningCatalogue(
+            final accepted = await _rememberFatteningCatalogue(
               book,
               chapters,
               isCurrent: () =>
@@ -868,8 +1177,18 @@ class NovelShelfManagement extends ChangeNotifier {
                   (_generations[key] ?? 0) == generation &&
                   (_fatteningGenerations[key] ?? 0) ==
                       fatteningGeneration + 1 &&
-                  of(book).followed,
+                  _needsCheck(book),
             );
+            if (accepted) {
+              await _evaluateFatteningReminder(
+                book,
+                isCurrent: () =>
+                    current() &&
+                    (_generations[key] ?? 0) == generation &&
+                    (_fatteningGenerations[key] ?? 0) ==
+                        fatteningGeneration + 1,
+              );
+            }
           } catch (_) {
             // Fattening evidence is optional and must not fail follow checks.
           }
@@ -877,11 +1196,11 @@ class NovelShelfManagement extends ChangeNotifier {
       } catch (_) {
         if (current() &&
             (_generations[key] ?? 0) == generation &&
-            of(book).followed) {
+            _needsCheck(book)) {
           await _change((entries) {
             final current = entries[key];
-            if (current?.followed == true) {
-              entries[key] = current!.copyWith(outcome: 'failed');
+            if (current != null && _needsCheck(book)) {
+              entries[key] = current.copyWith(outcome: 'failed');
             }
           }, guard: () => current() && (_generations[key] ?? 0) == generation);
         }
@@ -926,6 +1245,12 @@ class NovelShelfManagement extends ChangeNotifier {
         fattenCatalogueHash: '',
         fattenCatalogueAt: 0,
         fattenReviewAt: 0,
+        fattenReminderEnabled: false,
+        fattenReminderCycle: 0,
+        fattenReminderNotifiedCycle: 0,
+        fattenReminderToken: '',
+        fattenReminderReadyAt: 0,
+        fattenReminderDelivery: '',
       );
     }
     return parsed;

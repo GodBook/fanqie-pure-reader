@@ -39,7 +39,7 @@ if ($badging -match 'application-debuggable') { throw 'Shipping APK is debuggabl
 if ($badging -notmatch "package: name='com\.fanqie\.pure\.reader'" -or $badging -notmatch "application-label:'番茄小说纯净版'") { throw 'Unexpected package identity or application label.' }
 if ($badging -notmatch "sdkVersion:'24'" -or $badging -notmatch "targetSdkVersion:'36'") { throw 'Unexpected SDK requirements.' }
 $permissions = @([regex]::Matches($badging, "uses-permission: name='([^']+)'") | ForEach-Object { $_.Groups[1].Value })
-$allowed = @('android.permission.INTERNET', 'android.permission.ACCESS_NETWORK_STATE', 'android.permission.REQUEST_INSTALL_PACKAGES', 'com.fanqie.pure.reader.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION')
+$allowed = @('android.permission.INTERNET', 'android.permission.ACCESS_NETWORK_STATE', 'android.permission.REQUEST_INSTALL_PACKAGES', 'android.permission.POST_NOTIFICATIONS', 'com.fanqie.pure.reader.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION')
 if (@($permissions | Where-Object { $_ -notin $allowed }).Count -ne 0) { throw 'Unexpected Android permissions.' }
 $manifest = (& (Join-Path $tools.FullName 'aapt.exe') dump xmltree $apkFile.FullName AndroidManifest.xml) -join "`n"
 if ($manifest -match 'E: service ') { throw 'The novel app must not package a background media service.' }

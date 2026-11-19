@@ -2,6 +2,141 @@ part of '../reader_page.dart';
 
 /// Paragraph ideas (段评) loading and the ideas sheet.
 extension _ReaderPageIdeas on _ReaderPageState {
+  NovelCommentFavoritesStore get _commentFavoritesStore =>
+      widget.commentFavoritesStore ?? NovelCommentFavoritesStore.instance;
+
+  Future<void> _showCommentFavorites() async {
+    _stopAutoTurn();
+    final origin = _captureTemporaryJumpOrigin();
+    final generation = ++_readerNavigationGeneration;
+    _readerPanelOpen = true;
+    _setControlsVisible(false);
+    final reduceMotion =
+        MediaQuery.disableAnimationsOf(context) ||
+        MediaQuery.accessibleNavigationOf(context);
+    final page = _readerOverlay(
+      _effectivePreset,
+      NovelCommentFavoritesPage(
+        store: _commentFavoritesStore,
+        bookId: widget.bookId,
+        allowOpen: true,
+      ),
+    );
+    final route = reduceMotion
+        ? PageRouteBuilder<NovelCommentFavorite>(
+            transitionDuration: Duration.zero,
+            reverseTransitionDuration: Duration.zero,
+            pageBuilder: (_, _, _) => page,
+          )
+        : MaterialPageRoute<NovelCommentFavorite>(builder: (_) => page);
+    NovelCommentFavorite? favorite;
+    try {
+      favorite = await Navigator.of(context).push(route);
+      // Pager positions may be detached or re-created during the reverse
+      // transition. Wait until the reader owns the viewport before landing.
+      await route.completed;
+    } finally {
+      if (mounted) {
+        _readerPanelOpen = false;
+        _syncSystemBars();
+      }
+    }
+    if (!mounted ||
+        favorite == null ||
+        !_routeCurrent ||
+        generation != _readerNavigationGeneration) {
+      return;
+    }
+    await _navigateCommentFavorite(favorite, generation, origin);
+  }
+
+  Future<void> _navigateCommentFavorite(
+    NovelCommentFavorite favorite,
+    int generation,
+    ({String chapterId, int sourceOffset})? origin,
+  ) async {
+    bool current() => mounted && generation == _readerNavigationGeneration;
+    if (favorite.bookId != widget.bookId) return;
+    try {
+      var target = widget.chapters.indexWhere(
+        (c) => c.itemId == favorite.chapterId,
+      );
+      if (target < 0) {
+        _showMessage('原章节已不在目录中，仍可查看本机摘录');
+        return;
+      }
+      final chapter = widget.chapters[target];
+      if (chapter.title != favorite.chapterTitle ||
+          chapter.version != favorite.chapterVersion ||
+          _unverifiedChapterVersions.containsKey(chapter.itemId)) {
+        _showMessage('原章节已更新，无法安全定位；本机摘录仍保留');
+        return;
+      }
+      // Verify before changing the visible reading position. This may use a
+      // downloaded chapter; network is only part of an explicit open request.
+      final loaded = await _chapterText(chapter);
+      if (!current()) return;
+      final content = ChapterContent.fromCacheText(loaded.text);
+      if (!favorite.anchor.matches(content, chapter.title)) {
+        _showMessage('原文或段落已变化，无法安全定位；本机摘录仍保留');
+        return;
+      }
+      target = widget.chapters.indexWhere(
+        (c) =>
+            c.itemId == chapter.itemId &&
+            c.version == chapter.version &&
+            c.title == chapter.title,
+      );
+      if (target < 0) {
+        _showMessage('目录已变化，请重新打开段评收藏');
+        return;
+      }
+      if (target != _index) {
+        await _jumpToChapter(target, navigationGeneration: generation);
+        if (current() && _chapter.itemId == favorite.chapterId) {
+          _rememberTemporaryJump(origin, generation);
+        }
+      }
+      if (!current() ||
+          _loading ||
+          _error != null ||
+          _chapter.itemId != favorite.chapterId) {
+        return;
+      }
+      await WidgetsBinding.instance.endOfFrame;
+      if (!current() || _chapter.itemId != favorite.chapterId) return;
+      final layout = _chapterLayout;
+      if (layout == null ||
+          !_progressReady ||
+          _chapter.version != favorite.chapterVersion ||
+          _chapter.title != favorite.chapterTitle ||
+          !favorite.anchor.matches(_chapterContent, _chapter.title)) {
+        _showMessage('原文已变化，无法安全定位；本机摘录仍保留');
+        return;
+      }
+      final start = layout.displayOffsetForSource(favorite.anchor.sourceOffset);
+      final end = layout.displayOffsetForSource(
+        favorite.anchor.sourceOffset + favorite.anchor.paragraphText.length,
+      );
+      final block = layout.blockAtOffset(start);
+      if (block?.paraIndex != favorite.anchor.paraIndex || start == end) {
+        _showMessage('原段当前无法显示，仍可查看本机摘录');
+        return;
+      }
+      final landed = await _landAtOffset(
+        start,
+        end: end,
+        navigationGeneration: generation,
+      );
+      if (current()) {
+        _rememberTemporaryJump(origin, generation);
+        if (!landed) _showMessage('阅读版面已变化，请重试定位');
+      }
+    } catch (_) {
+      if (current()) _showMessage('原章节暂时无法打开，可继续查看本机摘录后重试');
+    }
+  }
+
   ChapterIdeasStore? get _ideasStore =>
       widget.ideasStore ??
       (widget.novelOnly && widget.chapterCache == null
@@ -305,6 +440,37 @@ extension _ReaderPageIdeas on _ReaderPageState {
         (chapter.itemId == _chapter.itemId
             ? _chapterContent
             : _joinedKey.currentState?.chapterAt(sourceIndex)?.content);
+    final favoriteAnchors = <int, NovelCommentAnchor?>{};
+    NovelCommentFavorite? favoriteFor(
+      ParagraphIdeas paragraph,
+      BookComment comment,
+    ) {
+      if (!widget.novelOnly ||
+          contentSnapshot == null ||
+          comment.id.trim().isEmpty ||
+          comment.text.trim().isEmpty) {
+        return null;
+      }
+      final anchor = favoriteAnchors.putIfAbsent(
+        paragraph.paraIndex,
+        () => NovelCommentAnchor.capture(
+          content: contentSnapshot,
+          chapterTitle: chapter.title,
+          paraIndex: paragraph.paraIndex,
+        ),
+      );
+      if (anchor == null) return null;
+      return NovelCommentFavorite.fromComment(
+        bookId: widget.bookId,
+        bookTitle: widget.title,
+        chapterId: chapter.itemId,
+        chapterTitle: chapter.title,
+        chapterVersion: chapter.version,
+        anchor: anchor,
+        comment: comment,
+      );
+    }
+
     final chapterEnd = ideaSnapshot.paragraphs.isEmpty
         ? null
         : ideaSnapshot.paragraphs.last.paraIndex;
@@ -343,6 +509,9 @@ extension _ReaderPageIdeas on _ReaderPageState {
               ideas: ideaSnapshot,
               preset: _effectivePreset,
               fontSize: _preferences.effectiveCommentFontSize,
+              favoritesStore: widget.novelOnly ? _commentFavoritesStore : null,
+              favoritesBookId: widget.bookId,
+              favoriteBuilder: widget.novelOnly ? favoriteFor : null,
               // Each bubble opens only that paragraph's comments.
               initialParaIndex: focusParaIndex,
               scope: focusParaIndex == chapterEnd ? '本章评论' : '本段评论',

@@ -147,6 +147,7 @@ kotlin {
             "**/RendererCompatibility.kt", "**/EinkRefreshPlugin.kt",
             "**/FairMemoryPlugin.kt", "**/SharePlugin.kt", "**/DownloadsPlugin.kt",
             "**/LibraryBackupPlugin.kt", "**/AppUpdatePlugin.kt", "**/LocalBookPickerPlugin.kt",
+            "**/NovelFatteningNotificationPlugin.kt",
         ))
     }
     compilerOptions {

@@ -1,5 +1,201 @@
 part of 'app.dart';
 
+Future<void> _openFatteningReminder(BuildContext context, String token) async {
+  final notifications = NovelFatteningNotifications.instance;
+  final management = NovelShelfManagement.instance;
+  try {
+    final book = await management.resolveFatteningReminder(token);
+    if (!context.mounted) return;
+    await notifications.consumeLaunch(token);
+    if (!context.mounted) return;
+    if (book == null ||
+        !await management.acknowledgeFatteningReminder(book, token)) {
+      if (context.mounted) {
+        _notice(context, '提醒对应的书籍、阅读位置或设置已变化，请从书架核对');
+      }
+      return;
+    }
+    if (context.mounted) await _readBook(context, book);
+  } catch (_) {
+    await notifications.consumeLaunch(token);
+    if (context.mounted) _notice(context, '暂时无法打开提醒，请从书架核对后继续阅读');
+  }
+}
+
+class NovelFatteningReminderSettingsSheet extends StatefulWidget {
+  const NovelFatteningReminderSettingsSheet({
+    super.key,
+    required this.book,
+    required this.management,
+    this.onCheck,
+  });
+
+  final MediaItem book;
+  final NovelShelfManagement management;
+  final Future<void> Function()? onCheck;
+
+  @override
+  State<NovelFatteningReminderSettingsSheet> createState() =>
+      _NovelFatteningReminderSettingsSheetState();
+}
+
+class _NovelFatteningReminderSettingsSheetState
+    extends State<NovelFatteningReminderSettingsSheet> {
+  bool _busy = false;
+  String? _feedback;
+
+  Future<void> _toggle(bool enabled) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _feedback = null;
+    });
+    try {
+      await widget.management.setFattenReminder(widget.book, enabled);
+      final allowed = enabled
+          ? await widget.management.requestFattenReminderPermission()
+          : false;
+      if (mounted) {
+        setState(
+          () => _feedback = enabled
+              ? allowed
+                    ? '已开启，等下次前台联网检查；每次开启或修改目标只提醒一次。'
+                    : '系统通知暂不可用，达标后仍会在书架显示续读入口。'
+              : '已关闭，并撤回本书的系统提醒。',
+        );
+      }
+    } catch (_) {
+      if (mounted) setState(() => _feedback = '设置保存失败，已保留原设置，请重试');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _goal() async {
+    final goal = await showDialog<int>(
+      context: context,
+      builder: (_) => _FattenGoalDialog(
+        initialGoal: widget.management.of(widget.book).fattenGoal,
+      ),
+    );
+    if (goal == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await widget.management.setFattenGoal(widget.book, goal);
+      if (mounted) {
+        setState(() => _feedback = '目标已保存，已开启的提醒将在下次前台联网检查时重新判断。');
+      }
+    } catch (_) {
+      if (mounted) setState(() => _feedback = '目标保存失败，已保留原目标');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _check() async {
+    if (_busy || widget.onCheck == null) return;
+    setState(() {
+      _busy = true;
+      _feedback = '正在通过当前网络检查…';
+    });
+    try {
+      await widget.onCheck!();
+      if (!mounted) return;
+      final metadata = widget.management.of(widget.book);
+      setState(
+        () => _feedback = metadata.fattenReminderReady
+            ? '已核验达标，返回书架即可继续阅读。'
+            : metadata.outcome == 'failed'
+            ? '此次检查未完成，保留上次结果，可联网后重试。'
+            : '检查完成。仅在能核对阅读位置且达到当前目标时提醒。',
+      );
+    } catch (_) {
+      if (mounted) setState(() => _feedback = '此次检查未完成，请稍后重试');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        MediaQuery.sizeOf(context).width >= 600 ? 32 : 20,
+        0,
+        MediaQuery.sizeOf(context).width >= 600 ? 32 : 20,
+        24,
+      ),
+      child: ListenableBuilder(
+        listenable: widget.management,
+        builder: (context, _) {
+          final metadata = widget.management.of(widget.book);
+          final theme = Theme.of(context);
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('养肥达标提醒', style: theme.textTheme.titleLarge),
+              const SizedBox(height: 8),
+              Text(widget.book.title, style: theme.textTheme.bodyLarge),
+              const SizedBox(height: 16),
+              SwitchListTile.adaptive(
+                key: const ValueKey('fatten-reminder-switch'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('达到目标后提醒我'),
+                subtitle: const Text('按已保存阅读位置之后的章节数判断'),
+                value: metadata.fattenReminderEnabled,
+                onChanged: _busy ? null : _toggle,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                minTileHeight: 48,
+                title: Text('养肥目标：${metadata.fattenGoal} 章'),
+                subtitle: const Text('修改目标会开启新一轮提醒判断'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: _busy ? null : _goal,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                '只在打开应用、恢复前台或手动联网检查后判断；自动检查沿用追更的网络条件。'
+                '没有后台轮询，也不保证发章时实时提醒。每次开启或修改目标只提醒一次，'
+                '重新开启可再次提醒。未能核对目录或阅读位置时不会冒充达标。',
+              ),
+              const SizedBox(height: 12),
+              const Text('系统通知不显示书名或阅读位置；关闭系统通知时，书架仍保留达标续读入口。'),
+              if (_feedback != null) ...[
+                const SizedBox(height: 16),
+                Semantics(liveRegion: true, child: Text(_feedback!)),
+              ],
+              if (metadata.fattenReminderEnabled &&
+                  metadata.fattenReminderDelivery == 'unavailable') ...[
+                const SizedBox(height: 8),
+                const Text('本轮系统通知未发送，达标记录已保留在书架。'),
+              ],
+              if (metadata.fattenReminderEnabled && widget.onCheck != null) ...[
+                const SizedBox(height: 16),
+                FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(48, 48),
+                  ),
+                  onPressed: _busy ? null : _check,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('通过当前网络立即检查'),
+                ),
+              ],
+              const SizedBox(height: 8),
+              TextButton(
+                style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+                onPressed: _busy ? null : () => Navigator.pop(context),
+                child: Text(_busy ? '正在处理…' : '完成'),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+}
+
 Future<void> _globalReaderSettings(BuildContext context) async {
   var preferences = await ReaderPreferences.load();
   if (!context.mounted) return;
@@ -237,6 +433,19 @@ String _shelfResumeInfo(Map<String, dynamic> entry) {
 }
 
 extension _NovelShelfLibrary on _NovelShelfState {
+  Future<void> _openFattened(MediaItem book) async {
+    if (_openingId != null) return;
+    _update(() => _openingId = book.id);
+    try {
+      await _openFatteningReminder(
+        context,
+        NovelShelfManagement.instance.of(book).fattenReminderToken,
+      );
+    } finally {
+      if (mounted) _update(() => _openingId = null);
+    }
+  }
+
   Future<void> _groupEditor({String? id}) async {
     final groups = ShelfGroupStore.instance;
     final input = TextEditingController(
@@ -791,6 +1000,9 @@ extension _NovelShelfLibrary on _NovelShelfState {
                           entry,
                           sourcesById[r.item.id] ?? const <String>{},
                         ),
+                        onReadyTap: _openingId == null
+                            ? () => _openFattened(r.item)
+                            : null,
                       ),
                     ],
                   );
@@ -812,12 +1024,14 @@ class NovelShelfFatteningIndicator extends StatefulWidget {
     required this.metadata,
     required this.history,
     required this.historyIdentityMatches,
+    this.onReadyTap,
   });
   final NovelShelfManagement management;
   final MediaItem book;
   final NovelShelfMetadata metadata;
   final Map<String, dynamic>? history;
   final bool historyIdentityMatches;
+  final VoidCallback? onReadyTap;
 
   @override
   State<NovelShelfFatteningIndicator> createState() =>
@@ -960,6 +1174,33 @@ class _ShelfFatteningIndicatorState
               '按缓存目录 ${result.catalogueCount} 章计算 · 截至 $stamp',
               style: style,
             ),
+            if (widget.metadata.fattenReminderReady &&
+                result.remaining! >= result.goal) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: FilledButton.tonalIcon(
+                  key: ValueKey('fattening-ready-${widget.book.id}'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(48, 48),
+                  ),
+                  onPressed: widget.onReadyTap,
+                  icon: const Icon(Icons.auto_stories_outlined),
+                  label: const Text('已达标 · 继续阅读'),
+                ),
+              ),
+              if (widget.metadata.fattenReminderDelivery == 'unavailable')
+                Text('本轮系统通知未发送，达标记录已保留', style: style),
+            ] else if (widget.metadata.fattenReminderEnabled) ...[
+              const SizedBox(height: 4),
+              Text(
+                widget.metadata.fattenReminderNotifiedCycle >=
+                        widget.metadata.fattenReminderCycle
+                    ? '本轮已提醒；可在书籍操作中关闭或重新开启'
+                    : '达标提醒已开启 · 等待前台联网检查',
+                style: style,
+              ),
+            ],
           ],
         );
       },

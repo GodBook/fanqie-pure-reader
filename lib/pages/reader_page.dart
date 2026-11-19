@@ -33,7 +33,9 @@ import '../services/imported_book_store.dart';
 import '../services/novel_cached_search.dart';
 import '../services/novel_ai.dart';
 import '../services/novel_ai_read_scope.dart';
+import '../services/novel_ai_recap.dart';
 import '../services/novel_ai_retrieval.dart';
+import '../services/novel_comment_favorites.dart';
 import '../widgets/reader/novel_ai_glass_ball.dart';
 import '../services/novel_reader_profiles.dart';
 import '../services/novel_reading_metrics.dart';
@@ -79,6 +81,8 @@ import '../widgets/reader/reader_marks_panel.dart';
 import '../widgets/reader/novel_reader_profiles_page.dart';
 import '../widgets/reader/reader_note_editor_dialog.dart';
 import '../widgets/reader/novel_ai_sheet.dart';
+import '../widgets/reader/novel_ai_recap_sheet.dart';
+import '../widgets/reader/novel_comment_favorites_page.dart';
 import '../widgets/reader/reader_chrome.dart';
 import '../widgets/reader/reader_find_panel.dart';
 import '../widgets/reader/reader_controls.dart';
@@ -186,6 +190,7 @@ class ReaderPage extends StatefulWidget {
   /// driving its own data).
   final ChapterIdeasLoader? ideasLoader;
   final ChapterIdeasStore? ideasStore;
+  final NovelCommentFavoritesStore? commentFavoritesStore;
 
   /// Resolves one paragraph's comment bodies. See [ParagraphCommentResolver].
   final ParagraphCommentResolver? commentResolver;
@@ -197,6 +202,7 @@ class ReaderPage extends StatefulWidget {
   /// Optional dependencies for isolating the novel AI entry in widget tests.
   final NovelAiStore? novelAiStore;
   final NovelAiReadScopeStore? novelAiReadScopeStore;
+  final NovelAiRecapService? novelAiRecapService;
   final Future<BookDetail> Function(String bookId)? novelAiDetailLoader;
   final NovelAiReaderSheetOpener? novelAiSheetOpener;
 
@@ -221,10 +227,12 @@ class ReaderPage extends StatefulWidget {
     this.imageProviderFactory,
     this.ideasLoader,
     this.ideasStore,
+    this.commentFavoritesStore,
     this.commentResolver,
     this.shelfItem,
     this.novelAiStore,
     this.novelAiReadScopeStore,
+    this.novelAiRecapService,
     this.novelAiDetailLoader,
     this.novelAiSheetOpener,
     this.underlineStore,

@@ -8,6 +8,7 @@ import '../../models/chapter_ideas.dart';
 import '../../models/comment_reply.dart';
 import '../../services/reader_preferences.dart';
 import '../../services/app_log.dart';
+import '../../services/novel_comment_favorites.dart';
 import '../comment_emoji.dart';
 import '../comment_images.dart';
 import '../home/home_design.dart';
@@ -44,6 +45,15 @@ class ReaderIdeasSheet extends StatefulWidget {
   /// the saved preference when this is omitted.
   final double? fontSize;
 
+  /// Optional local-only text preservation, separate from upstream reactions.
+  final NovelCommentFavoritesStore? favoritesStore;
+  final String? favoritesBookId;
+  final NovelCommentFavorite? Function(
+    ParagraphIdeas paragraph,
+    BookComment comment,
+  )?
+  favoriteBuilder;
+
   const ReaderIdeasSheet({
     super.key,
     required this.ideas,
@@ -55,6 +65,9 @@ class ReaderIdeasSheet extends StatefulWidget {
     this.scope = '本段评论',
     this.excerpt = '',
     this.fontSize,
+    this.favoritesStore,
+    this.favoritesBookId,
+    this.favoriteBuilder,
   });
 
   @override
@@ -96,6 +109,69 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
   final ScrollController _scroll = ScrollController();
   double _savedFontSize = 16;
   bool _excerptExpanded = false;
+  Set<String>? _favoriteKeys;
+  final _favoriteBusy = <String>{};
+  bool _favoritesFailed = false;
+  int _favoritesGeneration = 0;
+
+  void _reloadFavorites() => unawaited(_loadFavorites());
+
+  Future<void> _loadFavorites() async {
+    final store = widget.favoritesStore;
+    if (store == null || widget.favoriteBuilder == null) return;
+    final generation = ++_favoritesGeneration;
+    try {
+      final records = await store.load(bookId: widget.favoritesBookId);
+      if (mounted && generation == _favoritesGeneration) {
+        setState(() {
+          _favoriteKeys = records.map((record) => record.key).toSet();
+          _favoritesFailed = false;
+        });
+      }
+    } catch (_) {
+      if (mounted && generation == _favoritesGeneration) {
+        setState(() => _favoritesFailed = true);
+      }
+    }
+  }
+
+  Future<void> _toggleFavorite(NovelCommentFavorite record) async {
+    final store = widget.favoritesStore;
+    if (store == null ||
+        _favoriteKeys == null ||
+        !_favoriteBusy.add(record.key)) {
+      return;
+    }
+    final saved = _favoriteKeys!.contains(record.key);
+    setState(() {});
+    try {
+      if (saved) {
+        await store.remove(record.key);
+      } else {
+        await store.save(record);
+      }
+      if (mounted) {
+        setState(() {
+          if (saved) {
+            _favoriteKeys!.remove(record.key);
+          } else {
+            _favoriteKeys!.add(record.key);
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(saved ? '已移除段评收藏' : '已收藏到本机，可在阅读菜单“段评收藏”查看')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(saved ? '移除失败，收藏仍保留，请重试' : '收藏失败，请重试')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _favoriteBusy.remove(record.key));
+    }
+  }
 
   double get _fontSize {
     final size = widget.fontSize ?? _savedFontSize;
@@ -111,6 +187,8 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
   @override
   void initState() {
     super.initState();
+    widget.favoritesStore?.changes.addListener(_reloadFavorites);
+    _reloadFavorites();
     if (widget.fontSize == null) unawaited(_loadFontSize());
     final paragraphs = widget.ideas.withIdeas;
     if (paragraphs.isEmpty) return;
@@ -134,6 +212,7 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
 
   @override
   void dispose() {
+    widget.favoritesStore?.changes.removeListener(_reloadFavorites);
     _scroll.dispose();
     super.dispose();
   }
@@ -369,6 +448,14 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
                         style: style,
                       ),
                     ),
+                  if (_favoritesFailed)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton(
+                        onPressed: _reloadFavorites,
+                        child: const Text('收藏状态读取失败 · 重试'),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -435,6 +522,9 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
           if (index >= comments.length) {
             return _moreFooter();
           }
+          final favorite = _paragraph == null
+              ? null
+              : widget.favoriteBuilder?.call(_paragraph!, comments[index]);
           return _CommentRow(
             key: ValueKey(comments[index].id),
             comment: comments[index],
@@ -446,6 +536,16 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
             cachedReply: _cachedReplyState(comments[index].id),
             rememberReply: (state) =>
                 _rememberReplyState(comments[index].id, state),
+            favorite: favorite,
+            isFavorite:
+                favorite != null &&
+                (_favoriteKeys?.contains(favorite.key) ?? false),
+            favoriteBusy:
+                favorite != null && _favoriteBusy.contains(favorite.key),
+            favoriteReady: _favoriteKeys != null && !_favoritesFailed,
+            onFavorite: favorite == null
+                ? null
+                : () => _toggleFavorite(favorite),
           );
         },
       ),
@@ -567,6 +667,11 @@ class _CommentRow extends StatefulWidget {
   replyPageLoader;
   final _ReplyState? cachedReply;
   final _ReplyState Function(_ReplyState?) rememberReply;
+  final NovelCommentFavorite? favorite;
+  final bool isFavorite;
+  final bool favoriteBusy;
+  final bool favoriteReady;
+  final Future<void> Function()? onFavorite;
 
   const _CommentRow({
     super.key,
@@ -578,6 +683,11 @@ class _CommentRow extends StatefulWidget {
     this.replyPageLoader,
     this.cachedReply,
     required this.rememberReply,
+    this.favorite,
+    this.isFavorite = false,
+    this.favoriteBusy = false,
+    this.favoriteReady = false,
+    this.onFavorite,
   });
 
   @override
@@ -807,6 +917,34 @@ class _CommentRowState extends State<_CommentRow> {
                         ],
                       ),
                     ),
+                    if (widget.favorite != null)
+                      TextButton.icon(
+                        key: ValueKey('reader-comment-favorite-${comment.id}'),
+                        style: TextButton.styleFrom(
+                          minimumSize: const Size(48, 48),
+                          foregroundColor: textColor,
+                        ),
+                        onPressed: !widget.favoriteReady || widget.favoriteBusy
+                            ? null
+                            : widget.onFavorite,
+                        icon: ExcludeSemantics(
+                          child: Icon(
+                            widget.isFavorite
+                                ? LucideIcons.bookmark_check
+                                : LucideIcons.bookmark,
+                            size: 20,
+                          ),
+                        ),
+                        label: Text(
+                          widget.favoriteBusy
+                              ? widget.isFavorite
+                                    ? '正在移除…'
+                                    : '正在保存…'
+                              : widget.isFavorite
+                              ? '已收藏 · 取消'
+                              : '收藏到本机',
+                        ),
+                      ),
                   ],
                 ),
               ],

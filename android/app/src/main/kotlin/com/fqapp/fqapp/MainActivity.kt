@@ -55,6 +55,7 @@ class MainActivity : FlutterActivity() {
         flutterEngine.plugins.add(LibraryBackupPlugin())
         flutterEngine.plugins.add(LocalBookPickerPlugin())
         flutterEngine.plugins.add(AppUpdatePlugin())
+        flutterEngine.plugins.add(NovelFatteningNotificationPlugin())
         // 海信墨水屏整屏刷新（压残影）：反射调用厂商 EPD 接口。
         flutterEngine.plugins.add(EinkRefreshPlugin())
         // 小米澎湃 OS 公平运行内存：收 TRIM/KILL 广播，转发 Dart 处理后回系统。

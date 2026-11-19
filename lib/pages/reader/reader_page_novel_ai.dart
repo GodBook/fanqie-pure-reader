@@ -732,4 +732,213 @@ extension _ReaderPageNovelAi on _ReaderPageState {
     4 => '停更',
     _ => '未知',
   };
+
+  Future<void> _openNovelAiRecap() async {
+    if (!widget.novelOnly || _openingNovelAi || widget.chapters.isEmpty) return;
+    final visible = _novelAiVisibleSnapshot(allowPanel: true);
+    final origin = _captureTemporaryJumpOrigin();
+    final layout = _chapterLayout;
+    if (visible == null || origin == null || layout == null) {
+      _showMessage('阅读位置尚未稳定，请稍后再试');
+      return;
+    }
+    final bookId = widget.bookId;
+    final chapter = _chapter;
+    if (origin.chapterId != chapter.itemId) {
+      _showMessage('阅读位置尚未稳定，请稍后再试');
+      return;
+    }
+    // Use the actual resume anchor (page start / scroll top), not the bottom
+    // of the visible page or the full-chapter permission from the Q&A panel.
+    final boundary = NovelAiRecapBoundary(
+      bookId: bookId,
+      chapterId: chapter.itemId,
+      chapterIndex: _index,
+      offset: layout.displayOffsetForSource(origin.sourceOffset),
+      revision: visible.revision,
+    );
+    _novelAiReadScope.recordVisible(
+      bookId: bookId,
+      chapterId: chapter.itemId,
+      chapterVersion: chapter.version,
+      revision: visible.revision,
+      segments: visible.segments,
+    );
+    _stopAutoTurn();
+    _closeSelectionBar(clearSelection: true);
+    _setControlsVisible(false);
+    final navigationGeneration = ++_readerNavigationGeneration;
+    final session = ++_novelAiSession;
+    final loadGeneration = _loadGeneration;
+    final store = _novelAiStore;
+    final catalogue = widget.chapters;
+    final chapters = List<Chapter>.of(catalogue);
+    final replacements = _replacementStore.snapshot;
+    final replacementRevision = NovelAiReadScopeStore.replacementRevision(
+      replacements,
+    );
+    bool valid() =>
+        mounted &&
+        _appActive &&
+        _openingNovelAi &&
+        session == _novelAiSession &&
+        navigationGeneration == _readerNavigationGeneration &&
+        identical(store, _novelAiStore) &&
+        widget.bookId == bookId &&
+        _index == boundary.chapterIndex &&
+        _index >= 0 &&
+        _index < widget.chapters.length &&
+        _chapter.itemId == boundary.chapterId &&
+        _loadGeneration == loadGeneration &&
+        identical(_replacementStore.snapshot, replacements) &&
+        identical(widget.chapters, catalogue) &&
+        widget.chapters.length == chapters.length;
+    bool sameCatalogue() {
+      if (!valid()) return false;
+      for (var i = 0; i < chapters.length; i++) {
+        if (catalogue[i].itemId != chapters[i].itemId ||
+            catalogue[i].version != chapters[i].version) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    NovelAiRecapItem? selected;
+    NovelAiRecapInput? evidence;
+    _setState(() {
+      _openingNovelAi = true;
+      _readerPanelOpen = true;
+    });
+    try {
+      final anchorContext = _novelAiAnchorKey.currentContext;
+      if (anchorContext == null || !anchorContext.mounted) return;
+      selected = await showNovelAiRecapSheet(
+        anchorContext,
+        title: widget.title,
+        chapterTitle: chapter.title,
+        store: store,
+        readerTheme: _effectivePreset.theme(Theme.of(context)),
+        service: widget.novelAiRecapService,
+        resolve: (cancellation) async {
+          bool cancelled() =>
+              cancellation.isCancelled ||
+              !valid() ||
+              !store.settings.enabled ||
+              !store.settings.includeChapter;
+          if (cancelled() || !sameCatalogue()) {
+            throw const NovelAiException('阅读状态已变化，请关闭后重新回顾');
+          }
+          final scope = await _novelAiReadScope.snapshot(
+            bookId: bookId,
+            catalogue: chapters,
+            currentChapterId: chapter.itemId,
+            currentRevision: visible.revision,
+            currentVisibleEnd: boundary.offset,
+            replacementRevision: replacementRevision,
+            cancelled: cancelled,
+          );
+          if (cancelled() || !sameCatalogue()) {
+            throw const NovelAiException('阅读状态已变化，请关闭后重新回顾');
+          }
+          final input = buildNovelAiRecapInput(
+            scope: scope,
+            boundary: boundary,
+            title: widget.title,
+            chapterTitle: chapter.title,
+          );
+          evidence = input;
+          return input;
+        },
+      );
+    } catch (_) {
+      if (valid()) _showMessage('暂时无法打开回顾，请重试');
+    } finally {
+      if (mounted && session == _novelAiSession) {
+        _setState(() {
+          _readerPanelOpen = false;
+          _openingNovelAi = false;
+        });
+        _syncSystemBars();
+      }
+    }
+    if (!mounted ||
+        !_appActive ||
+        selected == null ||
+        evidence == null ||
+        navigationGeneration != _readerNavigationGeneration ||
+        !evidence!.sources.contains(selected.source)) {
+      return;
+    }
+    await _navigateNovelAiRecapSource(selected, navigationGeneration, origin);
+  }
+
+  Future<void> _navigateNovelAiRecapSource(
+    NovelAiRecapItem item,
+    int generation,
+    ({String chapterId, int sourceOffset}) origin,
+  ) async {
+    final source = item.source;
+    final target = widget.chapters.indexWhere(
+      (chapter) => chapter.itemId == source.chapterId,
+    );
+    if (target < 0 || target != source.chapterIndex) {
+      _showMessage('原文章节已更新，请重新生成回顾');
+      return;
+    }
+    _stopAutoTurn();
+    _takeOverListening();
+    if (target != _index) {
+      await _jumpToChapter(target, navigationGeneration: generation);
+      if (mounted &&
+          generation == _readerNavigationGeneration &&
+          _chapter.itemId == source.chapterId) {
+        // A failed or stale destination must still have a safe way back.
+        _rememberTemporaryJump(origin, generation);
+      }
+    }
+    if (!mounted ||
+        !_appActive ||
+        generation != _readerNavigationGeneration ||
+        _chapter.itemId != source.chapterId ||
+        _error != null) {
+      return;
+    }
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted ||
+        !_appActive ||
+        generation != _readerNavigationGeneration ||
+        _chapter.itemId != source.chapterId) {
+      return;
+    }
+    final current = _chapterLayout;
+    if (current == null || !_progressReady) {
+      _showMessage('原文尚未就绪，请返回后重试');
+      return;
+    }
+    final revision = NovelAiReadScopeStore.displayRevision(
+      current.blocks.map((block) => block.text),
+    );
+    final block = current.blockAtOffset(item.start);
+    if (revision != source.revision ||
+        block == null ||
+        block.isTitle ||
+        block.isImage ||
+        item.start < block.start ||
+        item.end > block.end ||
+        block.text.substring(
+              item.start - block.start,
+              item.end - block.start,
+            ) !=
+            item.quote) {
+      _showMessage('原文已更新，未定位到这条依据；请重新生成回顾');
+      return;
+    }
+    final landed = await _landAtOffset(
+      item.start,
+      end: item.end,
+      navigationGeneration: generation,
+    );
+    if (landed) _rememberTemporaryJump(origin, generation);
+  }
 }

@@ -3,6 +3,7 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- Device identity and reading data stay on-device; see
          .agents/notes/implemented/bug-fix/2026-09-18-home-geometry-and-backup.md -->
     <application

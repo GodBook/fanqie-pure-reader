@@ -591,6 +591,15 @@ class _NovelShelfState extends State<NovelShelf> {
                 subtitle: const Text('按当前位置之后的章节计算'),
                 onTap: () => Navigator.pop(context, 'fatten-goal'),
               ),
+              if (NovelShelfManagement.supportsFatteningReminder(book))
+                ListTile(
+                  leading: const Icon(Icons.notification_add_outlined),
+                  title: Text(
+                    metadata.fattenReminderEnabled ? '养肥达标提醒：已开启' : '养肥达标提醒',
+                  ),
+                  subtitle: const Text('下次前台联网检查时判断是否达标'),
+                  onTap: () => Navigator.pop(context, 'fatten-reminder'),
+                ),
               ListTile(
                 leading: const Icon(Icons.push_pin_outlined),
                 title: Text(metadata.pinned ? '取消置顶' : '置顶书籍'),
@@ -625,6 +634,19 @@ class _NovelShelfState extends State<NovelShelf> {
     );
     if (!mounted) return;
     if (action == 'detail' && !local) _openBook(context, book);
+    if (action == 'fatten-reminder') {
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        builder: (_) => NovelFatteningReminderSettingsSheet(
+          book: book,
+          management: NovelShelfManagement.instance,
+          onCheck: () => _checkFollowed(manual: true),
+        ),
+      );
+      return;
+    }
     if (action == 'move') {
       await _move([book]);
       return;

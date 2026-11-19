@@ -531,6 +531,13 @@ extension _ReaderPageBuild on _ReaderPageState {
               ),
             if (widget.novelOnly && _novelAiEnabled)
               GlassMenuItem(
+                key: const ValueKey('reader-novel-ai-recap'),
+                icon: Icons.history,
+                label: '回顾前文',
+                onPressed: () => Navigator.pop(menu, 'novel-ai-recap'),
+              ),
+            if (widget.novelOnly && _novelAiEnabled)
+              GlassMenuItem(
                 key: const ValueKey('reader-novel-ai-visibility'),
                 icon: _novelAiHidden
                     ? CupertinoIcons.eye
@@ -571,6 +578,13 @@ extension _ReaderPageBuild on _ReaderPageState {
                 icon: CupertinoIcons.chat_bubble_2,
                 label: _ideasFailed ? '段评加载失败 · 重试' : '段落评论',
                 onPressed: () => Navigator.pop(menu, 'paragraphs'),
+              ),
+            if (widget.novelOnly && !_isImportedBook)
+              GlassMenuItem(
+                key: const ValueKey('reader-comment-favorites'),
+                icon: LucideIcons.bookmark,
+                label: '段评收藏',
+                onPressed: () => Navigator.pop(menu, 'comment-favorites'),
               ),
             if (widget.novelOnly && _hasDownloadHandler)
               GlassMenuItem(
@@ -647,6 +661,8 @@ extension _ReaderPageBuild on _ReaderPageState {
     switch (action) {
       case 'novel-ai':
         await _openNovelAi();
+      case 'novel-ai-recap':
+        await _openNovelAiRecap();
       case 'novel-ai-visibility':
         _setState(() => _novelAiHidden = !_novelAiHidden);
       case 'novel-ai-move':
@@ -665,6 +681,8 @@ extension _ReaderPageBuild on _ReaderPageState {
         await _toggleParagraphIdeas();
       case 'paragraphs':
         await _showNovelParagraphs();
+      case 'comment-favorites':
+        await _showCommentFavorites();
       case 'cache':
         await _showCache();
       case 'download':
